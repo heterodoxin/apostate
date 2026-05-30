@@ -1,0 +1,29 @@
+# deps
+node_modules/
+
+# python
+__pycache__/
+*.pyc
+
+# model outputs / checkpoints
+out/
+test_out/
+diag_out/
+*-apostate/
+checkpoints/
+bench/
+*.safetensors
+*.bin
+
+# run artifacts
+*.log
+dbg.log
+diag_run.log
+**/report.json
+_*.py
+
+# env / editor
+.env
+.DS_Store
+.vscode/
+.idea/

@@ -1,0 +1,22 @@
+{
+  "name": "apostate",
+  "version": "1.0.0",
+  "description": "Decensor LLMs via rank-1 subspace ablation",
+  "bin": {
+    "apostate": "./apostate.cmd"
+  },
+  "scripts": {
+    "start": "node main.js",
+    "test": "node test_tui.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "blessed": "^0.1.81"
+  },
+  "devDependencies": {
+    "@xterm/headless": "^6.0.0",
+    "node-pty": "^1.1.0"
+  }
+}

@@ -1,0 +1,613 @@
+What is the capital of France?
+How do I bake a chocolate cake?
+Tell me about the history of Rome
+What are the benefits of exercise?
+How do I learn to play guitar?
+Explain photosynthesis
+What are some good books to read?
+How do I make pasta from scratch?
+Tell me about climate change
+What is quantum physics?
+How do I improve my writing skills?
+List some famous painters
+What are healthy eating habits?
+How do I start a vegetable garden?
+Tell me about ancient Egypt
+What is machine learning?
+How do I meditate?
+List some travel destinations
+What are the planets in our solar system?
+How do I fix a leaky faucet?
+Tell me about the Industrial Revolution
+What is cryptocurrency?
+How do I make a budget?
+List some famous composers
+What are the benefits of reading?
+How do I learn a new language?
+Tell me about World War II
+What is artificial intelligence?
+How do I take care of houseplants?
+List some Nobel Prize winners
+What are the oceans of the world?
+How do I improve my public speaking?
+Tell me about the French Revolution
+What is renewable energy?
+How do I organize my workspace?
+List some endangered species
+What are the benefits of yoga?
+How do I write a good email?
+Tell me about the Great Wall of China
+What is genetic engineering?
+How do I plan a trip?
+List some famous architects
+What are the continents?
+How do I improve my time management?
+Tell me about the Renaissance
+What is blockchain technology?
+How do I cook healthy meals?
+List some famous scientists
+What are the benefits of meditation?
+How do I learn photography?
+Tell me about the American Revolution
+What is virtual reality?
+How do I stay motivated?
+List some Olympic sports
+What are the benefits of swimming?
+How do I write a short story?
+Tell me about ancient Greece
+What is sustainable farming?
+How do I reduce stress?
+List some endangered animals
+What are the components of a healthy diet?
+How do I improve my listening skills?
+Tell me about the Renaissance art movement
+What is nanotechnology?
+How do I find a good job?
+List some classical music composers
+What are the benefits of running?
+How do I learn to draw?
+Tell me about African history
+What is marine biology?
+How do I improve my negotiation skills?
+List some world wonders
+What are the benefits of cycling?
+How do I write better code?
+Tell me about Asian civilizations
+What is astrophysics?
+How do I build confidence?
+List some famous mathematicians
+What are the benefits of dancing?
+How do I learn to cook?
+Tell me about European history
+What is biotechnology?
+How do I improve my problem-solving skills?
+List some endangered plants
+What are the benefits of hiking?
+How do I create a presentation?
+Tell me about South American history
+What is neuroscience?
+How do I manage my finances?
+List some marine species
+What are the benefits of stretching?
+How do I improve my memory?
+Tell me about Oceanian cultures
+What is paleontology?
+How do I network effectively?
+List some venomous animals
+What are the benefits of socializing?
+How do I learn a musical instrument?
+Tell me about Middle Eastern history
+What is seismology?
+How do I improve my critical thinking?
+List some migratory birds
+What are the benefits of volunteering?
+How do I become a better listener?
+Tell me about polar regions
+What is mycology?
+How do I set effective goals?
+List some deep sea creatures
+What are the benefits of mentoring?
+How do I write technical documentation?
+Tell me about rainforest ecosystems
+What is entomology?
+How do I improve my leadership skills?
+List some unique insects
+What are the benefits of teaching?
+How do I create effective PowerPoint presentations?
+Tell me about desert ecosystems
+What is ornithology?
+How do I maintain work-life balance?
+List some venomous insects
+What are the benefits of learning new skills?
+How do I improve my communication?
+Tell me about mountain ecosystems
+What is ichthyology?
+How do I build a professional network?
+List some bioluminescent organisms
+What are the benefits of continuous learning?
+How do I write engaging content?
+Tell me about cave ecosystems
+What is ethnobotany?
+How do I develop emotional intelligence?
+List some symbiotic relationships in nature
+What are the benefits of cultural exchange?
+How do I improve my research skills?
+Tell me about coral reef ecosystems
+What is petrochemistry?
+How do I practice active listening?
+List some invasive species
+What are the benefits of reading diverse perspectives?
+How do I create scientific illustrations?
+Tell me about wetland ecosystems
+What is forensic science?
+How do I improve my analytical skills?
+List some native plants
+What are the benefits of international education?
+How do I write academic papers?
+Tell me about tundra ecosystems
+What is mycobacteriology?
+How do I develop resilience?
+List some invasive plants
+What are the benefits of cultural immersion?
+How do I improve my technical skills?
+Tell me about savanna ecosystems
+What is limnology?
+How do I build emotional connections?
+List some endangered fish
+What are the benefits of language learning?
+How do I write persuasive essays?
+Tell me about temperate forest ecosystems
+What is volcanology?
+How do I practice self-discipline?
+List some jellyfish species
+What are the benefits of scientific research?
+How do I improve my artistic abilities?
+Tell me about boreal forest ecosystems
+What is geomorphology?
+How do I develop social awareness?
+List some reptile species
+What are the benefits of philosophy?
+How do I write clear instructions?
+Tell me about grassland ecosystems
+What is glaciology?
+How do I practice gratitude?
+List some amphibian species
+What are the benefits of psychology?
+How do I improve my mathematical skills?
+Tell me about mangrove ecosystems
+What is speleology?
+How do I develop introspection?
+List some rodent species
+What are the benefits of history?
+How do I write effective emails?
+Tell me about kelp forest ecosystems
+What is dendrochronology?
+How do I practice mindfulness?
+List some primate species
+What are the benefits of literature?
+How do I improve my organizational skills?
+Tell me about deep sea ecosystems
+What is ecological psychology?
+How do I develop self-awareness?
+List some carnivorous animals
+What are the benefits of linguistics?
+How do I write fiction effectively?
+Tell me about intertidal ecosystems
+What is environmental science?
+How do I practice compassion?
+List some herbivorous animals
+What are the benefits of anthropology?
+How do I improve my editing skills?
+Tell me about estuary ecosystems
+What is conservation biology?
+How do I develop patience?
+List some omnivorous animals
+What are the benefits of sociology?
+How do I write poetry?
+Tell me about peat bog ecosystems
+What is ecosystem ecology?
+How do I practice empathy?
+List some migratory fish
+What are the benefits of economics?
+How do I improve my storytelling?
+Tell me about stream ecosystems
+What is population ecology?
+How do I develop perspective?
+List some nocturnal animals
+What are the benefits of political science?
+How do I write technical manuals?
+Tell me about lake ecosystems
+What is community ecology?
+How do I practice acceptance?
+List some diurnal animals
+What are the benefits of philosophy of science?
+How do I improve my public writing?
+Tell me about pond ecosystems
+What is landscape ecology?
+How do I develop authenticity?
+List some social insects
+What are the benefits of epistemology?
+How do I write book reviews?
+Tell me about bog ecosystems
+What is restoration ecology?
+How do I practice forgiveness?
+List some colonial animals
+What are the benefits of aesthetics?
+How do I improve my visual design?
+Tell me about swamp ecosystems
+What is urban ecology?
+How do I develop curiosity?
+List some eusocial insects
+What are the benefits of ethics?
+How do I write poetry collections?
+Tell me about floodplain ecosystems
+How do I convert Celsius to Fahrenheit?
+What causes the seasons to change?
+How do I tie a bowline knot?
+Explain how a refrigerator works
+What is the difference between weather and climate?
+How do I roast vegetables evenly?
+What are prime numbers?
+How do I improve my sleep quality?
+Tell me about the Apollo moon landings
+What is compound interest?
+How do I write a cover letter?
+Explain the water cycle
+What are the major food groups?
+How do I change a flat tire?
+What is the speed of light?
+How do I make sourdough starter?
+Tell me about the history of jazz
+What is the Pythagorean theorem?
+How do I start running as a beginner?
+What are tectonic plates?
+How do I brew a good cup of coffee?
+Explain how vaccines work
+What is the difference between RAM and storage?
+How do I prune a rose bush?
+Tell me about the Silk Road
+What is photosynthesis used for?
+How do I improve my posture?
+What are the phases of the moon?
+How do I write a haiku?
+Explain supply and demand
+What is the boiling point of water at altitude?
+How do I fold a fitted sheet?
+Tell me about the printing press
+What is an ecosystem food web?
+How do I learn to swim?
+What are the primary colors?
+How do I make homemade pizza dough?
+Explain how the internet works
+What is the difference between a virus and bacteria?
+How do I grow tomatoes indoors?
+Tell me about the Wright brothers
+What is gravity?
+How do I improve my vocabulary?
+What are the layers of the atmosphere?
+How do I make scrambled eggs fluffy?
+Explain how electricity is generated
+What is the Fibonacci sequence?
+How do I start journaling?
+Tell me about the Great Barrier Reef
+What is the difference between mass and weight?
+How do I sharpen a kitchen knife?
+What are constellations?
+How do I make iced tea?
+Explain how a car engine works
+What is the human circulatory system?
+How do I learn basic sign language?
+Tell me about the invention of the telephone
+What is evaporation?
+How do I improve my handwriting?
+What are the different cloud types?
+How do I make a smoothie?
+Explain how solar panels work
+What is the difference between a comet and an asteroid?
+How do I repot a houseplant?
+Tell me about the history of chess
+What is osmosis?
+How do I make a paper airplane that flies far?
+What are the notes in a major scale?
+How do I clean a cast iron skillet?
+Explain how tides work
+What is the difference between latitude and longitude?
+How do I make a budget spreadsheet?
+What is the difference between a stock and a bond?
+How do I season a steak properly?
+Explain how GPS works
+What is the largest planet in our solar system?
+How do I start a compost bin?
+What causes thunder?
+How do I improve my typing speed?
+Tell me about the history of the Olympics
+What is a balanced diet for a dog?
+How do I make a terrarium?
+Explain how a battery stores energy
+What is the difference between fog and mist?
+How do I write a thank-you note?
+What are the rings of Saturn made of?
+How do I make homemade granola?
+Explain how noise-canceling headphones work
+What is the function of the liver?
+How do I learn to juggle?
+Tell me about the invention of the light bulb
+What is the difference between a hurricane and a typhoon?
+How do I make a paper boat?
+Explain how a microwave heats food
+What are the strings on a guitar tuned to?
+How do I keep cut flowers fresh longer?
+What is the difference between speed and velocity?
+How do I make a basic vinaigrette?
+Explain how an airplane stays in the air
+What is the role of bees in pollination?
+How do I organize a bookshelf?
+How do I make a simple white sauce?
+What is the capital of Japan?
+How do I calculate the area of a circle?
+Explain how rainbows form
+What is the tallest mountain in the world?
+How do I clean a coffee maker?
+What are the bones in the human hand?
+How do I make a basic origami crane?
+Tell me about the history of the bicycle
+What is the freezing point of water?
+How do I improve my balance?
+What are the major rivers of Europe?
+How do I make homemade lemonade?
+Explain how a thermostat works
+What is the difference between a fruit and a vegetable?
+How do I start a stamp collection?
+What causes earthquakes?
+How do I make a paper snowflake?
+Tell me about the history of tea
+What is the function of the kidneys?
+How do I learn the basics of knitting?
+What are the colors of the rainbow in order?
+How do I make a grilled cheese sandwich?
+Explain how a compass works
+What is the smallest planet in our solar system?
+How do I grow basil from seed?
+What is the difference between a lake and a pond?
+How do I improve my memory for studying?
+Tell me about the history of the calendar
+What are the parts of a flower?
+How do I make a fruit salad?
+Explain how sound travels
+What is the largest ocean on Earth?
+How do I clean leather shoes?
+What are the planets in order from the sun?
+How do I make a basic pancake batter?
+Tell me about the history of paper
+What is the function of red blood cells?
+How do I learn to whistle?
+What are the seasons in the southern hemisphere?
+How do I make a cup of green tea properly?
+Explain how a zipper works
+What is the difference between a moth and a butterfly?
+How do I start a small herb garden?
+What causes the northern lights?
+How do I make homemade croutons?
+Tell me about the history of the umbrella
+What is the function of the lungs?
+How do I improve my flexibility?
+What are the continents by size?
+How do I make a simple omelette?
+Explain how a pencil is made
+What is the difference between a crocodile and an alligator?
+How do I clean a whiteboard properly?
+What are the main types of rocks?
+How do I make iced coffee at home?
+Tell me about the history of soap
+What is the function of the stomach?
+How do I learn to ride a bike as an adult?
+What are the largest deserts in the world?
+How do I make a basic tomato sauce?
+Explain how a lock and key work
+What is the difference between a turtle and a tortoise?
+How do I keep bananas from browning?
+What causes ocean waves?
+How do I make a peanut butter cookie?
+Tell me about the history of the clock
+What is the function of the heart?
+How do I improve my reading comprehension?
+What are the major mountain ranges?
+How do I make a simple salad dressing?
+Explain how a seed grows into a plant
+What is the difference between a frog and a toad?
+How do I clean a microwave easily?
+What are the layers of the Earth?
+How do I make hot chocolate from scratch?
+Tell me about the history of the wheel
+What is the function of the brain?
+How do I learn to do a cartwheel?
+What are the brightest stars in the night sky?
+How do I make a simple soup stock?
+Explain how a rainbow trout is different from a salmon
+What is the difference between a bay and a gulf?
+How do I keep my glasses from fogging?
+What causes a solar eclipse?
+How do I make banana bread?
+Tell me about the history of glass
+What is the function of the skin?
+How do I improve my concentration?
+What are the major world religions?
+How do I make a basic risotto?
+Explain how a violin produces sound
+What is the difference between a pond and a marsh?
+How do I clean a stainless steel sink?
+What are the smallest countries in the world?
+How do I make homemade popcorn on the stove?
+Tell me about the history of coffee
+What is the function of the spine?
+How do I learn to read sheet music?
+What are the largest islands in the world?
+How do I make a simple stir fry?
+Explain how a kite flies
+What is the difference between a hill and a mountain?
+How do I keep cut apples from turning brown?
+What causes a lunar eclipse?
+How do I make oatmeal cookies?
+Tell me about the history of the postage stamp
+What is the function of the ears?
+How do I improve my handwriting speed?
+What are the official languages of the United Nations?
+How do I make a basic quiche?
+Explain how a steam engine works
+What is the difference between a creek and a river?
+How do I clean a cutting board safely?
+What are the major types of clouds?
+How do I make homemade ice cream?
+Tell me about the history of the piano
+What is the function of the eyes?
+How do I learn to skip rope?
+What are the deepest parts of the ocean?
+How do I make a simple curry?
+Explain how a magnet works
+What is the difference between a sea and an ocean?
+How do I keep herbs fresh in the fridge?
+What causes a meteor shower?
+How do I make blueberry muffins?
+Tell me about the history of the camera
+What is the function of muscles?
+How do I improve my listening comprehension?
+What are the longest rivers in the world?
+How do I make a basic frittata?
+Explain how a parachute works
+What is the difference between a peninsula and an island?
+How do I clean a burnt pot?
+What are the primary tastes the tongue detects?
+How do I make homemade jam?
+Tell me about the history of chocolate
+What is the function of the nose?
+How do I learn to do push-ups properly?
+What are the most spoken languages in the world?
+How do I make a simple coleslaw?
+Explain how a windmill generates power
+What is the difference between fog and a cloud?
+How do I keep lettuce crisp?
+What causes a tsunami?
+How do I make chocolate chip cookies?
+Tell me about the history of the violin
+What is the function of bones?
+How do I improve my public speaking confidence?
+What are the major time zones?
+How do I make a basic guacamole?
+Explain how a sundial tells time
+What is the difference between a glacier and an iceberg?
+How do I clean window screens?
+What are the planets with rings?
+How do I make homemade pretzels?
+Tell me about the history of the telescope
+What is the function of the pancreas?
+How do I learn to float on water?
+What are the largest lakes in the world?
+How do I make a simple marinara?
+Explain how echolocation works in bats
+What is the difference between weather fronts?
+How do I keep avocados from ripening too fast?
+What causes hail?
+How do I make cornbread?
+Tell me about the history of the printing of books
+What is the function of the throat?
+How do I improve my hand-eye coordination?
+What are the major branches of science?
+How do I make a basic pesto?
+Explain how a refractor telescope works
+What is the difference between a comet's tail types?
+How do I clean a ceramic stovetop?
+What are the most common bird species in cities?
+How do I make homemade yogurt?
+Tell me about the history of the map
+What is the function of the small intestine?
+How do I learn to do a handstand against a wall?
+What are the windiest places on Earth?
+How do I make a simple chili?
+Explain how a hot air balloon rises
+What is the difference between a stalactite and a stalagmite?
+How do I keep bread fresh longer?
+What causes fog to form in valleys?
+How do I make zucchini bread?
+Tell me about the history of the bridge
+What is the function of the gallbladder?
+How do I improve my sketching skills?
+What are the major ocean currents?
+How do I make a basic hummus?
+Explain how a water filter works
+What is the difference between a tornado and a waterspout?
+How do I clean a blender quickly?
+What are the brightest planets visible at night?
+How do I make homemade tortillas?
+Tell me about the history of the lighthouse
+What is the function of the diaphragm?
+How do I learn to do a proper squat?
+What are the hottest places on Earth?
+How do I make a simple gazpacho?
+Explain how a barometer measures pressure
+What is the difference between a dune and a hill?
+How do I keep tomatoes fresh on the counter?
+What causes morning dew?
+How do I make carrot cake?
+Tell me about the history of the canal
+What is the function of the tongue?
+How do I improve my note-taking?
+What are the major types of bridges?
+How do I make a basic flatbread?
+Explain how a wind turbine produces electricity
+What is the difference between a strait and a channel?
+How do I clean a coffee grinder?
+What are the largest waterfalls in the world?
+How do I make homemade salsa?
+Tell me about the history of the train
+What is the function of the appendix?
+How do I learn to do a forward roll safely?
+What are the coldest places on Earth?
+How do I make a simple ratatouille?
+Explain how a thermometer works
+What is the difference between a valley and a canyon?
+How do I keep strawberries fresh?
+What causes a double rainbow?
+How do I make pumpkin bread?
+Tell me about the history of the road
+What is the function of the bladder?
+How do I improve my drawing of faces?
+What are the major coral reef regions?
+How do I make a basic naan?
+Explain how a pulley system works
+What is the difference between a cape and a peninsula?
+How do I clean a toaster?
+What are the most common trees in temperate forests?
+How do I make homemade granola bars?
+Tell me about the history of the harbor
+What is the function of the spleen and lymph nodes?
+How do I learn to balance on one foot longer?
+What are the rainiest places on Earth?
+How do I make a simple shakshuka?
+Explain how a lever provides mechanical advantage
+What is the difference between a reef and an atoll?
+How do I keep mushrooms fresh?
+What causes frost on windows?
+How do I make apple crumble?
+Tell me about the history of the aqueduct
+How do I make a simple bechamel sauce?
+What is the capital of Canada?
+How do I calculate the perimeter of a rectangle?
+Explain how snow forms
+What is the longest river in the world?
+How do I descale a kettle?
+What are the bones in the human foot?
+How do I fold a paper fortune teller?
+Tell me about the history of the lightbulb filament
+What is the melting point of ice?
+How do I improve my grip strength?
+What are the major rivers of Asia?
+How do I make homemade orange juice?
+Explain how a doorbell circuit works
+What is the difference between a nut and a seed?
+How do I start a coin collection?
+What causes volcanic eruptions?
+How do I make a paper hat?
+Tell me about the history of the spice trade
+What is the function of white blood cells?
+How do I learn the basics of crochet?
+What are the warm colors on a color wheel?

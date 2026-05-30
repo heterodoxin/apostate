@@ -1,0 +1,121 @@
+"""subspace geometry."""
+
+from __future__ import annotations
+
+from typing import Optional, Tuple
+import torch
+
+
+def _orthonormalize(M: torch.Tensor, tol: float = 1e-6) -> torch.Tensor:
+    """QR-based orthonormalization; drops near-dependent columns."""
+    Q, R = torch.linalg.qr(M)
+    keep = torch.abs(torch.diagonal(R)) > tol
+    return Q[:, keep]
+
+
+def _kmeans(X: torch.Tensor, k: int, iters: int = 30, seed: int = 0):
+    """Tiny Lloyd's k-means (CPU). Returns integer cluster labels [N]."""
+    n = X.shape[0]
+    k = max(1, min(k, n))
+    g = torch.Generator().manual_seed(seed)
+    C = X[torch.randperm(n, generator=g)[:k]].clone()
+    labels = torch.zeros(n, dtype=torch.long)
+    for _ in range(iters):
+        labels = torch.cdist(X, C).argmin(dim=1)
+        newC = C.clone()
+        for c in range(k):
+            m = labels == c
+            if m.any():
+                newC[c] = X[m].mean(0)
+        if torch.allclose(newC, C):
+            break
+        C = newC
+    return labels
+
+
+def refusal_subspace(
+    harmful: torch.Tensor,      # [N, d]
+    harmless: torch.Tensor,     # [M, d]
+    rank: int = 1,
+    variance_threshold: float = 0.90,
+    max_rank: int = 4,
+    seed: int = 0,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """rank-1 mean-diff; clustered sub-modes for higher rank."""
+    harmful = harmful.float()
+    harmless = harmless.float()
+    mu_harmless = harmless.mean(0)
+    mean_diff = harmful.mean(0) - mu_harmless
+    mean_dir = mean_diff / (mean_diff.norm() + 1e-8)
+
+    if rank is not None and rank == 1:
+        return mean_dir.unsqueeze(1), mean_diff.norm().reshape(1)
+
+    n_clusters = max_rank if (rank is None or rank <= 0) else rank
+    cap = max_rank if (rank is None or rank <= 0) else min(rank, max_rank)
+
+    labels = _kmeans(harmful, n_clusters, seed=seed)
+    dirs = [mean_dir]
+    weights = [float(mean_diff.norm())]
+    min_new = 0.15 * float(mean_diff.norm())   # a sub-mode must add real separation
+    for c in sorted(torch.unique(labels).tolist()):
+        members = harmful[labels == c]
+        if members.shape[0] < 2:
+            continue
+        d = members.mean(0) - mu_harmless
+        B = torch.stack(dirs, dim=1)
+        d_orth = d - B @ (B.t() @ d)           # novel component beyond current basis
+        nrm = float(d_orth.norm())
+        if nrm < min_new:
+            continue
+        dirs.append(d_orth / nrm)
+        weights.append(nrm)
+        if len(dirs) >= cap:
+            break
+
+    basis = _orthonormalize(torch.stack(dirs, dim=1))[:, :cap]
+    w = torch.tensor(weights)[: basis.shape[1]]
+    return basis, w
+
+
+def preservation_subspace(activations: torch.Tensor, rank: int = 4) -> torch.Tensor:
+    """Top-`rank` principal directions of a 'protect me' activation set ([N, d])."""
+    acts = activations.float()
+    acts = acts - acts.mean(0, keepdim=True)
+    U, S, Vh = torch.linalg.svd(acts, full_matrices=False)
+    V = Vh.t()
+    return _orthonormalize(V[:, : max(1, rank)])
+
+
+def gram_schmidt_remove(
+    refusal: torch.Tensor,            # [d, kr]
+    preserve: Optional[torch.Tensor], # [d, kp] or None
+) -> torch.Tensor:
+    """Project the preservation subspace out of the refusal subspace, re-orthonormalize.
+
+    The returned subspace is the part of refusal that is *orthogonal* to everything
+    we promised to preserve — so ablating it cannot touch the protected directions.
+    """
+    if preserve is None or preserve.numel() == 0:
+        return _orthonormalize(refusal)
+    P = _orthonormalize(preserve)
+    R = refusal - P @ (P.t() @ refusal)
+    R = _orthonormalize(R)
+    return R
+
+
+def separation(harmful: torch.Tensor, harmless: torch.Tensor) -> float:
+    """Scalar refusal separation at a layer: norm of the mean-difference vector."""
+    return float((harmful.float().mean(0) - harmless.float().mean(0)).norm().item())
+
+
+def augment_subspace(existing: torch.Tensor, new_dirs: torch.Tensor, max_rank: int) -> torch.Tensor:
+    """Add newly-emerged refusal directions (orthogonal part) to an existing subspace."""
+    if existing is None or existing.numel() == 0:
+        return _orthonormalize(new_dirs)[:, :max_rank]
+    extra = new_dirs - existing @ (existing.t() @ new_dirs)
+    extra = _orthonormalize(extra)
+    if extra.numel() == 0:
+        return existing
+    merged = torch.cat([existing, extra], dim=1)
+    return merged[:, :max_rank]
