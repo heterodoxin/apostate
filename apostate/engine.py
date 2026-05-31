@@ -278,9 +278,29 @@ def _margin_refusal(bundle, instructions, batch_size: int) -> float:
     return 1.0 / (1.0 + math.exp(-margin))
 
 
+def _repair_scales(best_ref: float, best_kl: float, cfg):
+    target = cfg.target_refusal + cfg.refine_refusal_slack
+    if best_kl > cfg.kl_target and best_ref <= target:
+        return (0.0, 0.25, 0.50, 0.75, 0.90)
+    if best_ref > cfg.target_refusal and best_kl <= cfg.kl_target:
+        return (1.10, 1.25, 1.45)
+    return (0.0, 0.50, 0.75, 0.90, 1.10, 1.25)
+
+
+def _repair_priority(start: float, scale: float, best_ref: float, best_kl: float, cfg) -> float:
+    shrink = max(0.0, 1.0 - scale)
+    grow = max(0.0, scale - 1.0)
+    kl_need = max(0.0, best_kl - cfg.kl_target) + 2.0 * max(0.0, best_kl - cfg.max_kl)
+    ref_need = max(0.0, best_ref - cfg.target_refusal)
+    return abs(start) * (1.0 + shrink + grow + 8.0 * kl_need * shrink + 8.0 * ref_need * grow)
+
+
 def _repair_alphas(bundle, controller, cfg, eval_harmful, eval_harmless):
     hset = eval_harmful[: max(24, cfg.repair_eval_n)]
     lset = eval_harmless[: max(48, cfg.repair_kl_n)]
+    hprobe = hset[: max(4, min(len(hset), cfg.repair_probe_ref_n))]
+    lprobe = lset[: max(8, min(len(lset), cfg.repair_probe_kl_n))]
+    probe_positions = max(4, min(cfg.kl_positions, cfg.repair_probe_positions))
     with controller.active():
         best_ref = refusal_rate(bundle, hset, cfg.max_new_tokens, cfg.batch_size)
     best_kl = kl_harmless(bundle, controller, lset, cfg.batch_size, positions=cfg.kl_positions)
@@ -299,33 +319,48 @@ def _repair_alphas(bundle, controller, cfg, eval_harmful, eval_harmless):
         if not items:
             break
 
-        cheap = []
+        scales = _repair_scales(best_ref, best_kl, cfg)
+        candidates = []
         for item in items:
             start = _alpha_get(controller, item)
-            for scale in (0.0, 0.25, 0.50, 0.75, 0.90, 1.10, 1.25, 1.45):
+            for scale in scales:
                 value = start * scale
                 if abs(value - start) < 1e-6:
                     continue
-                controller.alpha = dict(best_alpha)
-                _alpha_set(controller, item, value)
-                trial_kl = kl_harmless(bundle, controller, lset, cfg.batch_size, positions=cfg.kl_positions)
-                with controller.active():
-                    proxy_ref = _margin_refusal(bundle, hset, cfg.batch_size)
-                proxy_score = _repair_loss(proxy_ref, trial_kl, cfg)
-                cheap.append((proxy_score, trial_kl, item, scale, dict(controller.alpha)))
+                priority = _repair_priority(start, scale, best_ref, best_kl, cfg)
+                candidates.append((priority, item, scale, value))
+        candidates.sort(reverse=True)
+        candidates = candidates[: max(1, cfg.repair_probe_candidates)]
+        _log(
+            f"  repair {step + 1}/{cfg.repair_steps}: "
+            f"probe={len(candidates)} exact={cfg.repair_rerank_k} "
+            f"refusal={best_ref:.3f} kl={best_kl:.3f}"
+        )
+
+        cheap = []
+        for _priority, item, scale, value in candidates:
+            controller.alpha = dict(best_alpha)
+            _alpha_set(controller, item, value)
+            trial_kl = kl_harmless(bundle, controller, lprobe, cfg.batch_size, positions=probe_positions)
+            with controller.active():
+                proxy_ref = _margin_refusal(bundle, hprobe, cfg.batch_size)
+            proxy_score = _repair_loss(proxy_ref, trial_kl, cfg)
+            cheap.append((proxy_score, trial_kl, item, scale, dict(controller.alpha)))
 
         accepted = None
         cheap.sort(key=lambda x: (x[0], x[1]))
-        for _proxy_score, trial_kl, item, scale, alpha in cheap[: cfg.repair_rerank_k]:
+        for _proxy_score, _probe_kl, item, scale, alpha in cheap[: cfg.repair_rerank_k]:
             controller.alpha = dict(alpha)
             with controller.active():
                 trial_ref = refusal_rate(bundle, hset, cfg.max_new_tokens, cfg.batch_size)
+            trial_kl = kl_harmless(bundle, controller, lset, cfg.batch_size, positions=cfg.kl_positions)
             trial_score = _repair_loss(trial_ref, trial_kl, cfg)
             if trial_score < best_score - 1e-4:
                 if accepted is None or trial_score < accepted[0]:
                     accepted = (trial_score, trial_ref, trial_kl, item, scale, dict(controller.alpha))
 
         if accepted is None:
+            _log(f"  repair {step + 1}: no better exact candidate")
             break
         best_score, best_ref, best_kl, item, scale, best_alpha = accepted
         steps += 1
