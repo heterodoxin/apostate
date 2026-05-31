@@ -25,6 +25,11 @@ def _kl_loss(kl: float, cfg) -> float:
     )
 
 
+def _refusal_loss(refusal: float, cfg) -> float:
+    over = max(0.0, refusal - cfg.target_refusal)
+    return refusal + cfg.refusal_target_weight * over + cfg.refusal_quad_weight * over * over
+
+
 def _ref_attr(h: dict) -> float:
     return float(h.get("refusal", h.get("refusal_proxy", 1.0)))
 
@@ -192,7 +197,7 @@ def optimize_profile(
             with controller.active():
                 cap_lp = _target_logprob(bundle, cap_samples)
             cap_drift = max(0.0, base_cap - cap_lp)
-        value = proxy + _kl_loss(kl, cfg) + cfg.opt_capability_weight * cap_drift
+        value = _refusal_loss(proxy, cfg) + _kl_loss(kl, cfg) + cfg.opt_capability_weight * cap_drift
         attrs = {
             "refusal_proxy": round(proxy, 4),
             "kl": round(kl, 4),
@@ -221,7 +226,7 @@ def optimize_profile(
                 cap_lp = _target_logprob(bundle, cap_samples) if base_cap is not None else None
             kl = kl_harmless(bundle, controller, eval_harmless, cfg.batch_size, positions=cfg.kl_positions)
             cap_drift = max(0.0, base_cap - cap_lp) if base_cap is not None else 0.0
-            v = ref + _kl_loss(kl, cfg) + cfg.opt_capability_weight * cap_drift
+            v = _refusal_loss(ref, cfg) + _kl_loss(kl, cfg) + cfg.opt_capability_weight * cap_drift
             if best is None or v < best[0]:
                 attrs = {"refusal": round(ref, 4), "kl": round(kl, 4)}
                 if base_cap is not None:

@@ -100,6 +100,7 @@ def write_run_report(cfg: Any, report: dict, benchmark: Optional[dict] = None, c
                 ["KL budget", _num(_cfg_get(cfg, "max_kl", report.get("max_kl")))],
                 ["KL positions", report.get("kl_positions", _cfg_get(cfg, "kl_positions", "n/a"))],
                 ["KL layer trims", report.get("kl_layer_trim_steps", "n/a")],
+                ["Repair steps", report.get("repair_steps", "n/a")],
                 ["Preserve rank", report.get("preserve_rank", "n/a")],
                 ["Preserve source", report.get("preserve_source", "n/a")],
                 ["Capability penalty", report.get("opt_capability", _cfg_get(cfg, "opt_capability", "n/a"))],

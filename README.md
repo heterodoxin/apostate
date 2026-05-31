@@ -36,7 +36,7 @@ The search objective combines four measured costs:
 - extra penalty above `kl_target`
 - capability drift from canonical-answer logprob on small code/math samples
 
-Balanced defaults use `kl_target=0.08`, `max_kl=0.18`, `preserve_rank=8`, `refine_deescalate=true`, `refine_kl_steps=8`, and `refine_kl_layer_steps=8`. The hard budget is still `max_kl`; the lower target exists so the search does not treat 0.18 as the desired landing zone.
+Balanced defaults use `target_refusal=0.03`, `kl_target=0.06`, `max_kl=0.16`, `preserve_rank=8`, `refine_deescalate=true`, `refine_kl_steps=10`, `refine_kl_layer_steps=10`, and `repair_steps=10`. The hard budget is still `max_kl`; the lower target exists so the search does not treat 0.16 as the desired landing zone.
 
 KL is measured on harmless prompts by comparing original model logits to edited model logits over the final `kl_positions` tokens. The unit is nats. Base harmless logits are cached per prompt/window so repeated scoring does not recompute the unedited side.
 
@@ -88,6 +88,8 @@ apostate test --model qwen-apostate --base Qwen/Qwen2.5-7B-Instruct --suite all
 ```
 
 The TUI benchmark screen is a multi-select list. Space toggles a suite, Enter runs the selected set.
+
+HumanEval uses its `check(entry_point)` harness. MBPP uses its native assertion tests directly, so it does not get wrapped in the HumanEval checker.
 
 | suite | measured fields |
 |---|---|
