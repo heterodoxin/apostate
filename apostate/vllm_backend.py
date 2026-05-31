@@ -106,8 +106,15 @@ def _repl(v1: str, served: str, temperature: float, max_tokens: int):
     print("bye.")
 
 
+import tempfile
+
+SERVER_LOG = os.path.join(tempfile.gettempdir(), "apostate_vllm.log")
+
+
 def _launch(args: list):
-    return subprocess.Popen(args)
+    # no stdin (else the server steals the chat's keystrokes); logs to a file, not the chat
+    return subprocess.Popen(args, stdin=subprocess.DEVNULL,
+                            stdout=open(SERVER_LOG, "wb"), stderr=subprocess.STDOUT)
 
 
 def _serve_via_wsl(model: str, temperature: float, max_tokens: int, port: int) -> bool:
@@ -138,7 +145,7 @@ def _drive(proc, port, temperature, max_tokens) -> bool:
     base = f"http://localhost:{port}"
     try:
         if not _wait_ready(base, proc):
-            print("vllm server did not become ready.", flush=True)
+            print(f"vllm server did not become ready. log: {SERVER_LOG}", flush=True)
             return True
         _repl(base + "/v1", SERVED, temperature, max_tokens)
     finally:
