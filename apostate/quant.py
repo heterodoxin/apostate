@@ -29,8 +29,8 @@ def quant_kwargs(mode: str, tokenizer=None, calib=None) -> dict:
             from transformers import GPTQConfig
         except Exception as e:
             raise RuntimeError(f"gptq needs a newer transformers: {e}")
-        ds = calib or ["The quick brown fox jumps over the lazy dog."] * 128
-        kw = dict(bits=4, dataset=ds, tokenizer=tokenizer)
+        ds = calib or ["The quick brown fox jumps over the lazy dog."] * 32
+        kw = dict(bits=4, dataset=ds, tokenizer=tokenizer, group_size=128)
         if mode == "marlin":
             kw["format"] = "marlin"   # fast int4 kernel
         return {"quantization_config": GPTQConfig(**kw)}

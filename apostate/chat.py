@@ -42,7 +42,23 @@ def _device_map(device: str | None) -> dict:
     return {"": "cpu"}
 
 
+def _is_prequantized(model_id: str) -> bool:
+    """already-quantized checkpoint (gptq/awq/marlin saved to disk)."""
+    import json
+    cfg = os.path.join(model_id, "config.json")
+    if os.path.isfile(cfg):
+        try:
+            return "quantization_config" in json.load(open(cfg, encoding="utf-8"))
+        except Exception:
+            return False
+    return False
+
+
 def _load_model(model_id: str, quant: str, tok, device: str | None):
+    if _is_prequantized(model_id):   # load saved quant as-is, no re-quantizing
+        return AutoModelForCausalLM.from_pretrained(
+            model_id, device_map=_device_map(device), low_cpu_mem_usage=True,
+            trust_remote_code=True)
     kw = quant_kwargs(quant, tokenizer=tok)
     return AutoModelForCausalLM.from_pretrained(
         model_id, device_map=_device_map(device), low_cpu_mem_usage=True,
@@ -57,11 +73,19 @@ def main(argv=None):
     ap.add_argument("--max-new-tokens", type=int, default=256)
     ap.add_argument("--temperature", type=float, default=0.7)
     ap.add_argument("--quant", default="nf4", choices=MODES, help="inference quant")
+    ap.add_argument("--backend", default="local", choices=["local", "vllm"], help="inference backend")
+    ap.add_argument("--port", type=int, default=8000, help="vllm server port")
     ap.add_argument("--think", action="store_true", help="start with thinking enabled (Qwen3)")
     a = ap.parse_args(argv)
 
     # clear the screen + scrollback so we don't draw over the TUI's last frame
     print("\033[2J\033[3J\033[H", end="", flush=True)
+
+    if a.backend == "vllm":
+        from .vllm_backend import serve_and_chat
+        if serve_and_chat(a.model, a.temperature, a.max_new_tokens, a.port):
+            return
+        print("falling back to local transformers ...", flush=True)
 
     print(f"loading {a.model} ({a.quant}) ...", flush=True)
     tok = AutoTokenizer.from_pretrained(a.model, trust_remote_code=True)

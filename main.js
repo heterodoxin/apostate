@@ -70,6 +70,8 @@ async function run(args) {
     pyCmd = ["-m", "apostate.benchcode", ...args];
   } else if (cmd === "talk") {
     pyCmd = ["-m", "apostate.chat", ...args];
+  } else if (cmd === "quantize") {
+    pyCmd = ["-m", "apostate.quantize", ...args];
   } else if (cmd === "train") {
     pyCmd = ["-m", "apostate.finetune", ...args];
   } else if (cmd === "list") {

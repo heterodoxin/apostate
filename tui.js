@@ -268,7 +268,11 @@ forceWindowsTerminalResize();
           const out = model.split('/').pop() + '-apostate';
           runCommandWithProgress(['ablate', '--model', model, '--out', out], 'Ablating refusals...');
         } else if (action === 'talk') {
-          selectQuant((q) => runInteractive(['talk', '--model', model, '--quant', q]));
+          selectQuant((q) => runInteractive(
+            q === 'vllm'
+              ? ['talk', '--model', model, '--backend', 'vllm']
+              : ['talk', '--model', model, '--quant', q]
+          ));
         } else if (action === 'test') {
           selectBase((base) => runCommandWithProgress(['test', '--model', model, '--base', base], 'Running benchmark...'));
         }
@@ -345,6 +349,7 @@ forceWindowsTerminalResize();
   // pick inference quant
   function selectQuant(callback) {
     const quants = [
+      { name: 'vllm', desc: 'auto-serve via vLLM, fastest (Linux/WSL)' },
       { name: 'nf4', desc: '4-bit, low VRAM (default)' },
       { name: 'marlin', desc: 'int4 Marlin kernel, fastest (Ampere+)' },
       { name: 'bf16', desc: 'no quant, fastest if VRAM fits' },

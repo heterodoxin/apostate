@@ -44,6 +44,8 @@ apostate talk  --model qwen-apostate --quant nf4
 
 `talk --quant` picks the inference path: `bf16`/`fp16` (no quant, fastest if VRAM fits), `nf4`/`fp4`/`int8` (bitsandbytes, instant load), `gptq`/`marlin` (int4 Marlin kernel, fastest 4-bit on Ampere+, needs `pip install gptqmodel optimum` and quantizes on first load), `awq` (load a pre-quantized AWQ checkpoint).
 
+For maximum throughput, `talk --backend vllm` (or the `vllm` option in the TUI) auto-installs vLLM on first use, launches a server, and streams from it — 40–80 tok/s. Linux/WSL only (vLLM has no native Windows build).
+
 ## Data
 
 Fit set blends `mlabonne/harmful_behaviors` + `mlabonne/harmless_alpaca` with bundled prompts (600 each). Held-out eval pulls real benchmarks (JailbreakBench, harmful_behaviors test, harmless_alpaca test). Sources are configurable via `repo:split:col` specs, `repo@config:split:col`, or `|`-joined lists.
