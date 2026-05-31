@@ -1,4 +1,4 @@
-"""activation collection."""
+"""activations"""
 
 from __future__ import annotations
 
@@ -16,12 +16,7 @@ def collect_activations(
     batch_size: int = 16,
     preformatted: bool = False,
 ) -> torch.Tensor:
-    """Return per-layer last-token activations as a [num_layers, N, hidden] CPU tensor.
-
-    If preformatted=True, `instructions` are already full prompt strings (e.g. a
-    user+assistant conversation) and are tokenized as-is rather than wrapped in the
-    chat template — used by the coder's complete-vs-lazy contrast.
-    """
+    """collect activations"""
     tok = bundle.tokenizer
     model = bundle.model
     device = next(model.parameters()).device
@@ -33,8 +28,8 @@ def collect_activations(
         enc = tok(batch, return_tensors="pt", padding=True, add_special_tokens=False)
         enc = {k: v.to(device) for k, v in enc.items()}
         out = model(**enc, output_hidden_states=True, use_cache=False)
-        hs = out.hidden_states  # tuple len num_layers+1; [0] = embeddings
-        # left-padded, so the last position is the final real token for every row.
+        hs = out.hidden_states  # hidden states
+        # left pad
         for layer in range(bundle.num_layers):
             h = hs[layer + 1][:, -1, :].float().cpu()
             per_layer[layer].append(h)

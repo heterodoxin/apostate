@@ -1,4 +1,4 @@
-"""causal layer scores."""
+"""causal scores"""
 
 from __future__ import annotations
 
@@ -18,8 +18,8 @@ def causal_layer_scores(
     floor: float = 0.25,
     temperature: float = 1.0,
 ) -> List[float]:
-    """Return a per-layer alpha in [floor, 1.0]. Requires controller.R already set."""
-    # baseline: no ablation
+    """layer alpha"""
+    # baseline
     controller.set_uniform_alpha(0.0)
     with controller.active():
         base = refusal_logit_margin(bundle, eval_instructions, batch_size)
@@ -29,15 +29,15 @@ def causal_layer_scores(
         controller.isolate_layer(L)
         with controller.active():
             m = refusal_logit_margin(bundle, eval_instructions, batch_size)
-        drops.append(max(0.0, base - m))   # how much refusal fell when ablating only L
+        drops.append(max(0.0, base - m))   # drop score
 
     t = torch.tensor(drops)
     if float(t.max()) <= 1e-6:
-        # no measurable signal — fall back to uniform full strength
+        # no signal
         return [1.0] * bundle.num_layers
 
-    t = t / t.max()                         # normalize to [0, 1]
+    t = t / t.max()                         # normalize
     if temperature != 1.0:
         t = t ** (1.0 / max(1e-3, temperature))
-    alphas = floor + (1.0 - floor) * t      # map into [floor, 1]
+    alphas = floor + (1.0 - floor) * t      # map alpha
     return [float(x) for x in alphas]

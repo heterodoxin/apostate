@@ -1,4 +1,4 @@
-"""quantize + save once (fast reload after)."""
+"""save quant"""
 
 from __future__ import annotations
 

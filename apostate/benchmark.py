@@ -1,4 +1,4 @@
-"""benchmark harness."""
+"""bench harness"""
 
 from __future__ import annotations
 
@@ -10,9 +10,9 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 from .data import resolve_prompts, format_chat
-from .evaluate import is_refusal
+from .evaluate import is_refusal, judge_refusal
 
-# factual probe: (question, [acceptable answer substrings])
+# fact probe
 PROBE: List[Tuple[str, List[str]]] = [
     ("What is the capital of France?", ["paris"]),
     ("What is 7 multiplied by 8?", ["56"]),
@@ -71,9 +71,28 @@ def _generate(model, tok, instructions, max_new_tokens, batch_size):
 
 
 @torch.no_grad()
-def _refusal_rate(model, tok, harmful, max_new_tokens, batch_size):
+def _judge_flags(model, tok, responses, batch_size, judge: str):
+    if judge == "keyword":
+        return [is_refusal(c) for c in responses]
+    if judge != "classifier":
+        raise ValueError("judge must be 'classifier' or 'keyword'")
+    class _Bundle:
+        pass
+    b = _Bundle()
+    b.model = model
+    b.tokenizer = tok
+    try:
+        return judge_refusal(b, responses, batch_size)
+    except Exception as e:
+        print(f"[bench] classifier judge unavailable ({e}); keyword fallback", flush=True)
+        return [is_refusal(c) for c in responses]
+
+
+@torch.no_grad()
+def _refusal_rate(model, tok, harmful, max_new_tokens, batch_size, judge: str = "classifier"):
     comps = _generate(model, tok, harmful, max_new_tokens, batch_size)
-    return sum(is_refusal(c) for c in comps) / max(1, len(comps))
+    flags = _judge_flags(model, tok, comps, batch_size, judge)
+    return sum(flags) / max(1, len(flags))
 
 
 @torch.no_grad()
@@ -98,7 +117,7 @@ def _perplexity(model, tok, text):
 
 @torch.no_grad()
 def _logprobs_lastK(model, tok, instructions, K, batch_size):
-    """Return CPU float16 tensor [N, K, V] of last-K log-probs for KL comparison."""
+    """last k logprobs"""
     device = next(model.parameters()).device
     prompts = format_chat(tok, instructions)
     chunks = []
@@ -107,7 +126,7 @@ def _logprobs_lastK(model, tok, instructions, K, batch_size):
         k = min(K, enc["input_ids"].shape[1])
         logits = model(**enc, use_cache=False).logits[:, -k:, :].float()
         lp = torch.log_softmax(logits, dim=-1)
-        if k < K:  # pad the time axis so all batches stack
+        if k < K:  # pad time
             lp = torch.nn.functional.pad(lp, (0, 0, K - k, 0))
         chunks.append(lp.half().cpu())
     return torch.cat(chunks, dim=0)
@@ -116,7 +135,7 @@ def _logprobs_lastK(model, tok, instructions, K, batch_size):
 def _kl(ref_lp: torch.Tensor, cand_lp: torch.Tensor) -> float:
     rp = ref_lp.float()
     cp = cand_lp.float()
-    kl = (rp.exp() * (rp - cp)).sum(-1)   # [N, K]
+    kl = (rp.exp() * (rp - cp)).sum(-1)   # shape
     return float(kl.mean().item())
 
 
@@ -128,10 +147,11 @@ def benchmark_model(
     max_new_tokens: int = 40,
     batch_size: int = 16,
     kl_K: int = 8,
+    judge: str = "classifier",
 ) -> Tuple[dict, torch.Tensor]:
     model, tok = _load(path)
     res = {
-        "refusal_rate": round(_refusal_rate(model, tok, harmful_test, max_new_tokens, batch_size), 4),
+        "refusal_rate": round(_refusal_rate(model, tok, harmful_test, max_new_tokens, batch_size, judge), 4),
         "capability": round(_capability(model, tok, batch_size), 4),
         "perplexity": round(_perplexity(model, tok, BENIGN_TEXT), 3),
     }
@@ -151,21 +171,22 @@ def run_compare(
     n: int = 64,
     out: Optional[str] = None,
     seed: int = 0,
+    judge: str = "classifier",
 ) -> dict:
     harmful_test = resolve_prompts(harmful_spec, n, seed)
     harmless_test = resolve_prompts(harmless_spec, n, seed)
     print(f"[bench] {len(harmful_test)} harmful / {len(harmless_test)} harmless held-out prompts")
 
     print(f"[bench] base: {base}")
-    base_res, base_lp = benchmark_model(base, harmful_test, None, harmless_test)
+    base_res, base_lp = benchmark_model(base, harmful_test, None, harmless_test, judge=judge)
 
-    report = {"base": {"path": base, **base_res}, "models": {}}
+    report = {"judge": judge, "base": {"path": base, **base_res}, "models": {}}
     for label, path in models.items():
         print(f"[bench] candidate '{label}': {path}")
-        res, _ = benchmark_model(path, harmful_test, base_lp, harmless_test)
+        res, _ = benchmark_model(path, harmful_test, base_lp, harmless_test, judge=judge)
         report["models"][label] = {"path": path, **res}
 
-    # ---- pretty table ----
+    # table
     rows = [("model", "refusal%", "KL_vs_base", "capability%", "perplexity")]
     rows.append(("BASE (original)", f"{base_res['refusal_rate']*100:.1f}", "0.0000",
                  f"{base_res['capability']*100:.1f}", f"{base_res['perplexity']:.2f}"))
@@ -195,12 +216,13 @@ def main(argv=None):
     p.add_argument("--n", type=int, default=64)
     p.add_argument("--out", default="benchmark.json")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--judge", default="classifier", choices=["classifier", "keyword"])
     a = p.parse_args(argv)
     models = {}
     for item in a.models.split(","):
         label, path = item.split("=", 1)
         models[label.strip()] = path.strip()
-    run_compare(a.base, models, a.harmful, a.harmless, a.n, a.out, a.seed)
+    run_compare(a.base, models, a.harmful, a.harmless, a.n, a.out, a.seed, a.judge)
 
 
 if __name__ == "__main__":

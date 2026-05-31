@@ -1,4 +1,4 @@
-"""config."""
+"""config"""
 
 from __future__ import annotations
 
@@ -9,82 +9,101 @@ import json
 
 @dataclass
 class ApostateConfig:
-    # ---- model / io ----
+    # model io
     model: str = "Qwen/Qwen3-8B"
     output_dir: str = "apostate-out"
+    profile: str = "balanced"                 # profile
     device: str = "cuda"
     load_in_4bit: bool = True
     compute_dtype: str = "bfloat16"          # compute dtype
     seed: int = 0
+    resume: bool = False                     # cache reuse
+    cache_activations: bool = True
+    activation_cache_dir: Optional[str] = None
 
-    # ---- data ----
-    # fit pool = real abliteration sets + bundled synthetic (set in with_defaults)
+    # data
+    # fit pool
     harmful_path: Optional[str] = None
     harmless_path: Optional[str] = None
-    # held-out eval = real benchmarks
+    # eval set
     harmful_test: Optional[str] = "mlabonne/harmful_behaviors:test:text|JailbreakBench/JBB-Behaviors@behaviors:harmful:Goal"
     harmless_test: Optional[str] = "mlabonne/harmless_alpaca:test:text"
-    preserve_path: Optional[str] = None        # protect these directions
+    preserve_path: Optional[str] = None        # protect dirs
     n_harmful: int = 600                       # contrast set size
     n_harmless: int = 600                      # contrast set size
-    n_eval: int = 300                          # held-out eval per side
+    n_eval: int = 300                          # eval size
     max_new_tokens: int = 32                   # refusal signal tokens
     batch_size: int = 24                       # batch
 
-    # ---- (A) subspace ----
-    refusal_rank: int = 1                      # mean-diff
+    # subspace
+    refusal_rank: int = 1                      # mean diff
     variance_threshold: float = 0.90           # reserved
     max_rank: int = 1                          # rank cap
     direction_layer_frac: float = 0.60         # direction layer
-    direction_scope: str = "global"            # global | per_layer
+    direction_scope: str = "global"            # scope
 
-    # ---- (B) causal targeting ----
+    # causal
     causal_targeting: bool = True
-    causal_floor: float = 0.25                 # alpha floor
+    causal_floor: float = 0.10                 # alpha floor
     causal_temperature: float = 1.0            # sharpen
 
-    # ---- (C) preservation ----
-    preserve_rank: int = 4                     # protected dims
+    # preservation
+    preserve_rank: int = 8                     # protected dims
 
-    # ---- refusal-targeting refine (drives residual refusal to ~0 within KL budget) ----
+    # refine
     refine_refusal: bool = True
     refine_max_scale: float = 2.0              # max scale
     refine_steps: int = 6
-    refine_deescalate: bool = False            # claw back kl (can raise refusal)
+    refine_deescalate: bool = True             # kl shrink
+    refine_kl_steps: int = 8                   # kl shrink
+    refine_kl_layer_steps: int = 8             # layer trim
+    refine_kl_layer_candidates: int = 6        # trim width
+    refine_refusal_slack: float = 0.015        # target slack
 
-    # ---- (D) reconstruction guard ----
+    # guard
     guard_max_iters: int = 2                   # guard iters
     guard_leakage_eps: float = 0.15            # leak threshold
     guard_alpha_step: float = 0.25             # alpha step
 
-    # ---- (E) automated optimization (TPE / random search) ----
+    # search
     optimize: bool = False                     # search profile
     n_trials: int = 12                         # trials
     adaptive_trials: bool = True               # adaptive
-    kl_weight: float = 1.0                     # kl weight
+    kl_weight: float = 2.5                     # kl weight
+    kl_target: float = 0.08                    # kl target
+    kl_target_weight: float = 8.0              # target weight
+    kl_quad_weight: float = 10.0               # curve weight
+    kl_over_budget_weight: float = 24.0        # budget weight
+    kl_positions: int = 32                     # kl window
+    opt_capability: bool = True                # cap loss
+    opt_capability_weight: float = 1.0         # cap weight
+    opt_capability_code_n: int = 4             # code n
+    opt_capability_math_n: int = 4             # math n
     opt_eval_n: int = 24                       # prompts per trial
     opt_gen_tokens: int = 32                   # trial gen len
-    opt_objective: str = "generation"          # generation = honest classifier grading per trial
+    opt_objective: str = "generation"          # generation judge
     opt_rerank_k: int = 3                      # rerank k
     opt_guard: bool = True                     # guard winner
     opt_early_stop: bool = True                # early stop
     opt_early_stop_margin: float = 0.02        # early stop margin
 
-    # ---- layer pruning (faster generation; trades capability, off by default) ----
-    prune: bool = False                        # drop redundant layers, capability-gated
+    # pruning
+    prune: bool = False                        # layer drop
     prune_max_frac: float = 0.25               # cap layers dropped
-    prune_kl: float = 0.04                     # extra harmless-kl allowed from pruning
+    prune_kl: float = 0.04                     # prune budget
 
-    # ---- acceptance ----
-    max_kl: float = 0.30                       # reject above this kl
+    # acceptance
+    max_kl: float = 0.18                       # hard cap
     target_refusal: float = 0.05               # target refusal rate
 
-    # ---- output ----
+    # output
     save_dtype: str = "bfloat16"
     bake: bool = True
 
     def with_defaults(self) -> "ApostateConfig":
         import os
+        if (self.profile or "").lower() == "balanced":
+            self.refine_deescalate = True
         here = os.path.dirname(__file__)
         data = os.path.join(os.path.dirname(here), "data")
         if self.harmful_path is None:

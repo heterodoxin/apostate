@@ -1,11 +1,11 @@
-// pty + headless xterm: drive tui, render true screen
+// tui harness
 "use strict";
 const pty = require("node-pty");
 const path = require("path");
 const { Terminal } = require("@xterm/headless");
 
 const COLS = 120, ROWS = 40;
-const steps = (process.argv[2] || "").split(",").filter(Boolean); // e.g. "1,wait2000,enter"
+const steps = (process.argv[2] || "").split(",").filter(Boolean); // step list
 
 const termEmu = new Terminal({ cols: COLS, rows: ROWS, allowProposedApi: true });
 
@@ -28,7 +28,7 @@ function render(label) {
     const line = buf.getLine(y);
     lines.push(line ? line.translateToString(true) : "");
   }
-  // trim trailing blank lines
+  // trim blanks
   while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
   console.log(`\n===== ${label} =====`);
   console.log(lines.join("\n"));

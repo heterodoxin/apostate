@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
-# setup wizard (linux/mac)
+# setup wizard
 cd "$(dirname "$0")"
 exec node setup.js "$@"
