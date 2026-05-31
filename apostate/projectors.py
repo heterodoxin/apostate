@@ -29,9 +29,16 @@ class ProjectionController:
         self._embed = b.embed()
         self._modules = [self._embed]
         for layer in b.layers():
-            aw, mw = b.attn_writer(layer), b.mlp_writer(layer)
-            self._layer_writers.append((aw, mw))
-            self._modules.extend([aw, mw])
+            writers = b.layer_writers(layer)   # attn out + every expert down (MoE) or single down (dense)
+            self._layer_writers.append(writers)
+            self._modules.extend(writers)
+        # dedup (shared modules) while keeping order
+        seen, uniq = set(), []
+        for m in self._modules:
+            if id(m) not in seen:
+                seen.add(id(m))
+                uniq.append(m)
+        self._modules = uniq
         for m in self._modules:
             self._handles.append(m.register_forward_hook(self._make_hook(m)))
 
@@ -94,9 +101,8 @@ class ProjectionController:
 
     def set_edit_layer_alpha(self, name: str, layer_idx: int, value: float):
         e = self._edit(name)
-        aw, mw = self._layer_writers[layer_idx]
-        e["alpha"][id(aw)] = value
-        e["alpha"][id(mw)] = value
+        for m in self._layer_writers[layer_idx]:
+            e["alpha"][id(m)] = value
 
     def set_edit_embed_alpha(self, name: str, value: float):
         self._edit(name)["alpha"][id(self._embed)] = value
@@ -107,8 +113,7 @@ class ProjectionController:
             e["alpha"][k] = value
 
     def get_edit_layer_alpha(self, name: str, layer_idx: int) -> float:
-        aw, _ = self._layer_writers[layer_idx]
-        return self._edit(name)["alpha"][id(aw)]
+        return self._edit(name)["alpha"][id(self._layer_writers[layer_idx][0])]
 
     # ---- primary-edit (refusal) convenience: backward-compatible API --------
     @property
@@ -186,7 +191,7 @@ class ProjectionController:
                 continue
             layer_alphas = [
                 e["alpha"][id(self._layer_writers[i][0])] for i in range(len(self._layer_writers))
-            ]
+            ]   # one alpha per layer; bake applies it to all that layer's writers
             out_edits.append({
                 "name": e["name"],
                 "sign": e["sign"],

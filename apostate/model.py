@@ -54,22 +54,63 @@ class ModelBundle:
                         return getattr(attn, proj)
         raise AttributeError("Could not locate attention output projection.")
 
+    def _mlp(self, layer: torch.nn.Module):
+        for name in ("mlp", "feed_forward", "ffn", "block_sparse_moe"):
+            if hasattr(layer, name):
+                return getattr(layer, name)
+        return None
+
+    def _down_proj(self, mod) -> torch.nn.Module:
+        # w2 is the down-projection in Mixtral-style experts; check it last
+        for proj in ("down_proj", "c_proj", "fc_out", "dense_4h_to_h", "wo", "w2"):
+            if hasattr(mod, proj):
+                return getattr(mod, proj)
+        return None
+
+    def mlp_writers(self, layer: torch.nn.Module) -> List[torch.nn.Module]:
+        """MLP-side residual writers. dense -> [down_proj]; MoE -> every expert + shared."""
+        mlp = self._mlp(layer)
+        if mlp is None:
+            return []
+        experts = getattr(mlp, "experts", None)
+        if experts is not None and len(experts) > 0:          # MoE
+            out = [self._down_proj(e) for e in experts]
+            for sname in ("shared_expert", "shared_experts"):
+                se = getattr(mlp, sname, None)
+                if se is not None:
+                    out.append(self._down_proj(se))
+            out = [w for w in out if w is not None]
+            if out:
+                return out
+        w = self._down_proj(mlp)                              # dense
+        return [w] if w is not None else []
+
     def mlp_writer(self, layer: torch.nn.Module) -> torch.nn.Module:
-        """The MLP output projection (writes into the residual stream)."""
-        for mlp_name in ("mlp", "feed_forward", "ffn"):
-            if hasattr(layer, mlp_name):
-                mlp = getattr(layer, mlp_name)
-                for proj in ("down_proj", "c_proj", "fc_out", "dense_4h_to_h", "wo"):
-                    if hasattr(mlp, proj):
-                        return getattr(mlp, proj)
-        raise AttributeError("Could not locate MLP output projection.")
+        """First MLP residual writer (back-compat / dense)."""
+        ws = self.mlp_writers(layer)
+        if not ws:
+            raise AttributeError("Could not locate MLP output projection.")
+        return ws[0]
+
+    def layer_writers(self, layer: torch.nn.Module) -> List[torch.nn.Module]:
+        """All residual-stream writers for a layer: attn out-proj + MLP/expert downs."""
+        out = []
+        try:
+            out.append(self.attn_writer(layer))
+        except AttributeError:
+            pass
+        out.extend(self.mlp_writers(layer))
+        return out
+
+    def is_moe(self) -> bool:
+        layers = self.layers()
+        return bool(layers) and len(self.mlp_writers(layers[len(layers) // 2])) > 1
 
     def writer_modules(self) -> List[torch.nn.Module]:
         """All residual-stream writers, in forward order (embed + per-layer)."""
         mods = [self.embed()]
         for layer in self.layers():
-            mods.append(self.attn_writer(layer))
-            mods.append(self.mlp_writer(layer))
+            mods.extend(self.layer_writers(layer))
         return mods
 
 

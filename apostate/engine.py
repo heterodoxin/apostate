@@ -85,7 +85,9 @@ def run(cfg: ApostateConfig) -> dict:
     bundle = load_model(cfg)
     tok = bundle.tokenizer
     L_dir = max(0, min(bundle.num_layers - 1, int(bundle.num_layers * cfg.direction_layer_frac)))
-    _log(f"{bundle.num_layers} layers, hidden={bundle.hidden_size}, direction layer={L_dir}")
+    nw = len(bundle.layer_writers(bundle.layers()[L_dir]))
+    arch = f"MoE ({nw} writers/layer)" if bundle.is_moe() else "dense"
+    _log(f"{bundle.num_layers} layers, hidden={bundle.hidden_size}, {arch}, direction layer={L_dir}")
 
     harmful = resolve_prompts(cfg.harmful_path, cfg.n_harmful + cfg.n_eval, cfg.seed)
     harmless = resolve_prompts(cfg.harmless_path, cfg.n_harmless, cfg.seed)

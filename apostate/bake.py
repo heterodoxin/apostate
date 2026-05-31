@@ -60,7 +60,7 @@ def bake(cfg: ApostateConfig, export: dict, tokenizer=None, drop_layers=None) ->
             a = float(e["layer_alphas"][L])
             if a == 0:
                 continue
-            for mod in (bundle.attn_writer(layer), bundle.mlp_writer(layer)):
+            for mod in bundle.layer_writers(layer):   # attn out + every expert down (MoE)
                 mod.weight.data = _edit_linear(mod.weight.data, R, sign * a)
                 if getattr(mod, "bias", None) is not None:
                     mod.bias.data = _edit_vec(mod.bias.data, R, sign * a)
