@@ -12,6 +12,7 @@ export PATH="$HOME/.local/bin:$PATH"
 V="$HOME/.apostate-vllm"
 [ -x "$V/bin/python" ] || uv venv --python 3.12 "$V"
 "$V/bin/python" -c 'import vllm' 2>/dev/null || uv pip install -q --python "$V/bin/python" vllm
+"$V/bin/python" -c 'import bitsandbytes' 2>/dev/null || uv pip install -q --python "$V/bin/python" bitsandbytes
 
 # /mnt (9p) can't be mmap'd by safetensors -> copy to ext4 once
 case "$MODEL" in
@@ -26,6 +27,10 @@ case "$MODEL" in
     ;;
 esac
 
+# native torch sampler (FlashInfer would JIT-compile and need nvcc/CUDA toolkit)
+export VLLM_USE_FLASHINFER_SAMPLER=0
+# 4-bit so a 7B fits a 16GB card alongside the desktop (bf16 weights ~14GB won't)
 exec "$V/bin/python" -m vllm.entrypoints.openai.api_server \
   --model "$MODEL" --served-model-name apostate --host 0.0.0.0 --port "$PORT" \
-  --enforce-eager
+  --quantization bitsandbytes --enforce-eager \
+  --gpu-memory-utilization 0.90 --max-model-len 8192
