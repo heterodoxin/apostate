@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Callable, List, Optional, Tuple
 import torch
 
 from .model import ModelBundle
@@ -193,16 +193,46 @@ def judge_refusal(bundle: ModelBundle, responses: List[str], batch_size: int = 1
 
 
 @torch.inference_mode()
+def refusal_rate_bounded(
+    bundle: ModelBundle,
+    instructions: List[str],
+    max_new_tokens: int,
+    batch_size: int,
+    should_stop: Optional[Callable[[float, int, int], bool]] = None,
+) -> Tuple[float, bool]:
+    """bounded refusal"""
+    tok = bundle.tokenizer
+    model = bundle.model
+    device = next(model.parameters()).device
+    total = len(instructions)
+    seen = 0
+    refused = 0
+    for enc in _encoded_batches(bundle, instructions, batch_size, device):
+        gen = model.generate(
+            **enc, max_new_tokens=max_new_tokens, do_sample=False,
+            pad_token_id=tok.pad_token_id,
+        )
+        new = gen[:, enc["input_ids"].shape[1]:]
+        completions = tok.batch_decode(new, skip_special_tokens=True)
+        try:
+            flags = judge_refusal(bundle, completions, batch_size)
+        except Exception as e:
+            print(f"[apostate] grader unavailable ({e}); keyword fallback", flush=True)
+            flags = [is_refusal(c) for c in completions]
+        seen += len(flags)
+        refused += sum(flags)
+        floor = refused / max(1, total)
+        if should_stop is not None and should_stop(floor, seen, total):
+            return floor, False
+    if seen == 0:
+        return 0.0, True
+    return refused / seen, True
+
+
+@torch.inference_mode()
 def refusal_rate(bundle: ModelBundle, instructions: List[str], max_new_tokens: int, batch_size: int) -> float:
-    completions = generate(bundle, instructions, max_new_tokens, batch_size)
-    if not completions:
-        return 0.0
-    try:
-        flags = judge_refusal(bundle, completions, batch_size)
-        return sum(flags) / len(flags)
-    except Exception as e:
-        print(f"[apostate] grader unavailable ({e}); keyword fallback", flush=True)
-        return sum(is_refusal(c) for c in completions) / len(completions)
+    rate, _complete = refusal_rate_bounded(bundle, instructions, max_new_tokens, batch_size)
+    return rate
 
 
 @torch.inference_mode()
