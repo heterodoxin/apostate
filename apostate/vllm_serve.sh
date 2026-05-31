@@ -35,8 +35,19 @@ esac
 
 # native torch sampler (FlashInfer would JIT-compile and need nvcc/CUDA toolkit)
 export VLLM_USE_FLASHINFER_SAMPLER=0
-# 4-bit so a 7B fits a 16GB card alongside the desktop (bf16 weights ~14GB won't)
+
+# turboquant: bf16 (faster, bigger context) if it fits free VRAM, else 4-bit
+QUANT="--quantization bitsandbytes"
+MAXLEN=8192
+FREE_MB=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -dc '0-9')
+SIZE_B=$(du -sb "$MODEL" 2>/dev/null | cut -f1)
+if [ -n "$FREE_MB" ] && [ -n "$SIZE_B" ] && [ "$((FREE_MB * 1000000))" -gt "$((SIZE_B + 3000000000))" ]; then
+  QUANT=""          # weights + ~3GB kv fit in bf16 -> no quant
+  MAXLEN=32768
+fi
+echo "turboquant: ${QUANT:-bf16} (free ${FREE_MB}MB)"
+
 exec "$V/bin/python" -m vllm.entrypoints.openai.api_server \
   --model "$MODEL" --served-model-name apostate --host 0.0.0.0 --port "$PORT" \
-  --quantization bitsandbytes --enforce-eager \
-  --gpu-memory-utilization 0.90 --max-model-len 8192
+  $QUANT --enforce-eager \
+  --gpu-memory-utilization 0.90 --max-model-len "$MAXLEN"
