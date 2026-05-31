@@ -1,4 +1,4 @@
-"""reconstruction guard."""
+"""guard"""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ def run_guard(
             ah = collect_activations(bundle, harmful, cfg.batch_size)
             al = collect_activations(bundle, harmless, cfg.batch_size)
             ref = refusal_rate(bundle, eval_harmful, cfg.opt_gen_tokens, cfg.batch_size)
-        kl = kl_harmless(bundle, controller, eval_harmless, cfg.batch_size)
+        kl = kl_harmless(bundle, controller, eval_harmless, cfg.batch_size, positions=cfg.kl_positions)
         sep = separation(ah[direction_layer], al[direction_layer])
         ratio = sep / (initial_sep + 1e-8)
         rank = 0 if controller.R is None else controller.R.shape[1]
@@ -42,11 +42,11 @@ def run_guard(
             "rank": rank, "refusal": round(ref, 4), "kl": round(kl, 4),
         })
 
-        # behavioral target already met, or leakage already collapsed: stop.
+        # stop point
         if ratio <= cfg.guard_leakage_eps or ref <= cfg.target_refusal:
             break
 
-        # snapshot so we can roll back an augmentation that costs too much KL
+        # rollback state
         prev_R = controller.R.detach().cpu().clone()
         prev_alpha = dict(controller.alpha)
 
@@ -63,9 +63,9 @@ def run_guard(
             if a < 1.0:
                 controller.set_layer_alpha(L, min(1.0, a + cfg.guard_alpha_step))
 
-        new_kl = kl_harmless(bundle, controller, eval_harmless, cfg.batch_size)
+        new_kl = kl_harmless(bundle, controller, eval_harmless, cfg.batch_size, positions=cfg.kl_positions)
         if new_kl > cfg.max_kl:
-            # too costly — revert and stop
+            # revert stop
             controller.set_subspace(prev_R)
             controller.alpha = prev_alpha
             history[-1]["reverted"] = True

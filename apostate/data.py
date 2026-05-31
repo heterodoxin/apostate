@@ -1,4 +1,4 @@
-"""prompt loading."""
+"""prompt loading"""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ def load_prompts(path: str, n: int, seed: int = 0) -> List[str]:
 
 
 def maybe_load_hf(spec: str, n: int, seed: int = 0) -> List[str]:
-    """hf spec: 'repo:split:col' or 'repo@config:split:col'."""
+    """hf spec"""
     from datasets import load_dataset
     repo, _, rest = spec.partition(":")
     config = None
@@ -62,7 +62,7 @@ def _resolve_one(spec: str, n: int, seed: int) -> List[str]:
 
 
 def resolve_prompts(path_or_spec: str, n: int, seed: int = 0) -> List[str]:
-    """sources joined by '|'; pool + dedup + shuffle, capped at n."""
+    """resolve sources"""
     sources = [s.strip() for s in path_or_spec.split("|") if s.strip()]
     seen, pool = set(), []
     for src in sources:
@@ -70,17 +70,17 @@ def resolve_prompts(path_or_spec: str, n: int, seed: int = 0) -> List[str]:
             if p not in seen:
                 seen.add(p)
                 pool.append(p)
-    random.Random(seed).shuffle(pool)   # mix sources so tuning subsets are representative
+    random.Random(seed).shuffle(pool)   # mix sources
     return pool[:n]
 
 
 def format_chat(tokenizer, instructions: List[str]) -> List[str]:
-    """Wrap raw instructions in the model's chat template, ready for generation."""
+    """chat format"""
     out = []
     for ins in instructions:
         msg = [{"role": "user", "content": ins}]
         try:
-            # disable hybrid "thinking" (Qwen3 etc.) so refusals/answers stay front-loaded
+            # no thinking
             text = tokenizer.apply_chat_template(
                 msg, tokenize=False, add_generation_prompt=True, enable_thinking=False
             )

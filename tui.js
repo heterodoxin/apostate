@@ -168,7 +168,7 @@ forceWindowsTerminalResize();
     style: { fg: C.bdr },
   });
 
-  // fill rules to real width; reflow on resize
+  // fill rules
   function fillRules() {
     const w = screen.width;
     rule1.setContent('─'.repeat(w));
@@ -219,6 +219,7 @@ forceWindowsTerminalResize();
     const models = [
       { name: 'Qwen/Qwen2.5-7B-Instruct', desc: 'Base model (HF)' },
       ...findCheckpoints(),
+      { name: 'Custom model ID/path...', desc: 'paste HF ID or local path', custom: true },
     ];
 
     {
@@ -262,20 +263,14 @@ forceWindowsTerminalResize();
 
       list.on('select', (item, index) => {
         selectScreen.destroy();
-        const model = models[index].name;
-
-        if (action === 'ablate') {
-          const out = model.split('/').pop() + '-apostate';
-          runCommandWithProgress(['ablate', '--model', model, '--out', out], 'Ablating refusals...');
-        } else if (action === 'talk') {
-          selectQuant((q) => runInteractive(
-            q === 'vllm'
-              ? ['talk', '--model', model, '--backend', 'vllm']
-              : ['talk', '--model', model, '--quant', q]
-          ));
-        } else if (action === 'test') {
-          selectBase((base) => runCommandWithProgress(['test', '--model', model, '--base', base], 'Running benchmark...'));
+        const chosen = models[index];
+        if (chosen.custom) {
+          askText(`Custom model for ${action.toUpperCase()}`, 'HF model ID or local path:', (model) => {
+            runModelAction(action, model);
+          });
+          return;
         }
+        runModelAction(action, chosen.name);
       });
 
       selectScreen.key(['escape', 'q', 'C-c'], () => {
@@ -287,10 +282,98 @@ forceWindowsTerminalResize();
     }
   }
 
+  function runModelAction(action, model) {
+    if (action === 'ablate') {
+      const out = model.split(/[\\/]/).pop().split('/').pop() + '-apostate';
+      runCommandWithProgress(['ablate', '--model', model, '--out', out], 'Ablating refusals...');
+    } else if (action === 'talk') {
+      selectQuant((q) => {
+        if (q === 'vllm') {
+          selectKvCache((kv) => runInteractive(['talk', '--model', model, '--backend', 'vllm', '--kv-cache-dtype', kv]));
+        } else {
+          runInteractive(['talk', '--model', model, '--quant', q]);
+        }
+      });
+    } else if (action === 'test') {
+      selectBase((base) => {
+        selectBenchmark((suite) => {
+          runCommandWithProgress(['test', '--model', model, '--base', base, '--suite', suite], 'Running benchmark...');
+        });
+      });
+    }
+  }
+
+  function askText(title, prompt, callback) {
+    const consoleSize = getWinConsoleSize();
+    const inputScreen = blessed.screen({
+      mouse: true,
+      keyboard: true,
+      dockBorders: false,
+      useBCE: true,
+      width: consoleSize.cols,
+      height: consoleSize.rows,
+    });
+
+    blessed.text({
+      parent: inputScreen,
+      top: 0,
+      left: 'center',
+      content: `{${C.acc}-fg}${title}{/${C.acc}-fg}`,
+      tags: true,
+      bold: true,
+    });
+
+    blessed.text({
+      parent: inputScreen,
+      top: 2,
+      left: 'center',
+      content: `{${C.sub}-fg}${prompt}{/${C.sub}-fg}`,
+      tags: true,
+    });
+
+    const box = blessed.textbox({
+      parent: inputScreen,
+      top: 4,
+      left: 'center',
+      width: 78,
+      height: 3,
+      border: 'line',
+      inputOnFocus: true,
+      style: {
+        fg: C.fg,
+        border: { fg: C.bdr },
+        focus: { border: { fg: C.acc } },
+      },
+    });
+
+    blessed.text({
+      parent: inputScreen,
+      bottom: 0,
+      left: 'center',
+      content: `{${C.dim}-fg}Enter submit · ESC cancel{/${C.dim}-fg}`,
+      tags: true,
+    });
+
+    box.on('submit', (value) => {
+      const text = String(value || '').trim();
+      inputScreen.destroy();
+      if (text) callback(text);
+      else backToMenu();
+    });
+    inputScreen.key(['escape', 'C-c'], () => {
+      inputScreen.destroy();
+      backToMenu();
+    });
+    box.focus();
+    box.readInput();
+    inputScreen.render();
+  }
+
   function selectBase(callback) {
     const models = [
       { name: 'Qwen/Qwen2.5-7B-Instruct', desc: 'Base model (HF)' },
       ...findCheckpoints(),
+      { name: 'Custom base ID/path...', desc: 'paste HF ID or local path', custom: true },
     ];
 
     {
@@ -334,7 +417,12 @@ forceWindowsTerminalResize();
 
       list.on('select', (item, index) => {
         selectScreen.destroy();
-        callback(models[index].name);
+        const chosen = models[index];
+        if (chosen.custom) {
+          askText('Custom base model', 'HF model ID or local path:', callback);
+          return;
+        }
+        callback(chosen.name);
       });
 
       selectScreen.key(['escape', 'q', 'C-c'], () => {
@@ -346,11 +434,46 @@ forceWindowsTerminalResize();
     }
   }
 
-  // pick inference quant
+  function selectBenchmark(callback) {
+    const suites = [
+      { name: 'humaneval', desc: 'code + refusal + GSM8K + KL' },
+      { name: 'mbpp', desc: 'MBPP code + refusal + GSM8K + KL' },
+      { name: 'gsm8k', desc: 'math capability + refusal + KL' },
+      { name: 'refusal', desc: 'JBB refusal/compliance + KL' },
+      { name: 'deepswe', desc: 'note + local HumanEval fallback' },
+    ];
+    const consoleSize = getWinConsoleSize();
+    const selectScreen = blessed.screen({
+      mouse: true, keyboard: true, dockBorders: false, useBCE: true,
+      width: consoleSize.cols, height: consoleSize.rows,
+    });
+    blessed.text({
+      parent: selectScreen, top: 0, left: 'center', tags: true, bold: true,
+      content: `{${C.acc}-fg}Benchmark suite{/${C.acc}-fg}`,
+    });
+    const list = blessed.list({
+      parent: selectScreen, mouse: true, keys: true, vi: true, tags: true,
+      style: { selected: { bg: C.acc, fg: 'black' }, item: { fg: C.fg } },
+      top: 2, left: 'center', width: 76, height: 9,
+      items: suites.map(s => `${s.name.padEnd(10)} {${C.dim}-fg}${s.desc}{/${C.dim}-fg}`),
+    });
+    list.focus();
+    list.on('select', (item, index) => {
+      selectScreen.destroy();
+      callback(suites[index].name);
+    });
+    selectScreen.key(['escape', 'q', 'C-c'], () => {
+      selectScreen.destroy();
+      backToMenu();
+    });
+    selectScreen.render();
+  }
+
+  // inference quant
   function selectQuant(callback) {
     const quants = [
-      { name: 'auto', desc: 'turboquant: fastest that fits VRAM (recommended)' },
-      { name: 'vllm', desc: 'auto-serve via vLLM, fastest (Linux/WSL)' },
+      { name: 'auto', desc: 'auto weight quant: bf16 if it fits, else nf4' },
+      { name: 'vllm', desc: 'serve via vLLM; choose KV cache next' },
       { name: 'nf4', desc: '4-bit, low VRAM' },
       { name: 'marlin', desc: 'int4 Marlin kernel, fastest (Ampere+)' },
       { name: 'bf16', desc: 'no quant, fastest if VRAM fits' },
@@ -387,6 +510,43 @@ forceWindowsTerminalResize();
       });
       selectScreen.render();
     }
+  }
+
+  function selectKvCache(callback) {
+    const kvs = [
+      { name: 'auto', desc: 'vLLM default' },
+      { name: 'fp8', desc: 'KV cache fp8, strong default for memory pressure' },
+      { name: 'turboquant_4bit_nc', desc: 'TurboQuant 4-bit KV cache + norm correction' },
+      { name: 'turboquant_k8v4', desc: 'TurboQuant fp8 keys + 4-bit values' },
+      { name: 'bf16', desc: 'unquantized KV cache' },
+      { name: 'turboquant_k3v4_nc', desc: 'more aggressive, may hurt reasoning' },
+      { name: 'turboquant_3bit_nc', desc: 'most aggressive, highest risk' },
+    ];
+    const consoleSize = getWinConsoleSize();
+    const selectScreen = blessed.screen({
+      mouse: true, keyboard: true, dockBorders: false, useBCE: true,
+      width: consoleSize.cols, height: consoleSize.rows,
+    });
+    blessed.text({
+      parent: selectScreen, top: 0, left: 'center', tags: true, bold: true,
+      content: `{${C.acc}-fg}vLLM KV-cache dtype{/${C.acc}-fg}`,
+    });
+    const list = blessed.list({
+      parent: selectScreen, mouse: true, keys: true, vi: true, tags: true,
+      style: { selected: { bg: C.acc, fg: 'black' }, item: { fg: C.fg } },
+      top: 2, left: 'center', width: 82, height: 10,
+      items: kvs.map(k => `${k.name.padEnd(22)} {${C.dim}-fg}${k.desc}{/${C.dim}-fg}`),
+    });
+    list.focus();
+    list.on('select', (item, index) => {
+      selectScreen.destroy();
+      callback(kvs[index].name);
+    });
+    selectScreen.key(['escape', 'q', 'C-c'], () => {
+      selectScreen.destroy();
+      backToMenu();
+    });
+    selectScreen.render();
   }
 
   // scan checkpoints

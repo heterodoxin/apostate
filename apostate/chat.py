@@ -1,4 +1,4 @@
-"""chat repl."""
+"""chat repl"""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import sys
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, TextStreamer
 
-from .quant import quant_kwargs, auto_quant, MODES
+from .quant import quant_kwargs, auto_quant, MODES, KV_CACHE_DTYPES
 
 _ACCEL_QUANTS = {"nf4", "fp4", "int8", "gptq", "marlin"}
 
@@ -43,7 +43,7 @@ def _device_map(device: str | None) -> dict:
 
 
 def _is_prequantized(model_id: str) -> bool:
-    """already-quantized checkpoint (gptq/awq/marlin saved to disk)."""
+    """saved quant"""
     import json
     cfg = os.path.join(model_id, "config.json")
     if os.path.isfile(cfg):
@@ -55,7 +55,7 @@ def _is_prequantized(model_id: str) -> bool:
 
 
 def _load_model(model_id: str, quant: str, tok, device: str | None):
-    if _is_prequantized(model_id):   # load saved quant as-is, no re-quantizing
+    if _is_prequantized(model_id):   # saved quant
         return AutoModelForCausalLM.from_pretrained(
             model_id, device_map=_device_map(device), low_cpu_mem_usage=True,
             trust_remote_code=True)
@@ -72,18 +72,25 @@ def main(argv=None):
     ap.add_argument("--model", required=True)
     ap.add_argument("--max-new-tokens", type=int, default=0, help="0 = until the model stops (EOS / context)")
     ap.add_argument("--temperature", type=float, default=0.7)
-    ap.add_argument("--quant", default="auto", choices=MODES, help="inference quant (auto = turboquant)")
+    ap.add_argument("--quant", default="auto", choices=MODES, help="weight quant (auto = bf16 if it fits, else nf4)")
     ap.add_argument("--backend", default="local", choices=["local", "vllm"], help="inference backend")
     ap.add_argument("--port", type=int, default=8000, help="vllm server port")
+    ap.add_argument("--kv-cache-dtype", default="auto", choices=KV_CACHE_DTYPES,
+                    help="vLLM KV-cache dtype; TurboQuant is a KV-cache mode, not a weight quant")
+    ap.add_argument("--shutdown-wsl", action=argparse.BooleanOptionalAction, default=True,
+                    help="after a Windows vLLM session, stop the WSL server and shut down WSL")
     ap.add_argument("--think", action="store_true", help="start with thinking enabled (Qwen3)")
     a = ap.parse_args(argv)
 
-    # clear the screen + scrollback so we don't draw over the TUI's last frame
+    # clear screen
     print("\033[2J\033[3J\033[H", end="", flush=True)
 
     if a.backend == "vllm":
         from .vllm_backend import serve_and_chat
-        if serve_and_chat(a.model, a.temperature, a.max_new_tokens, a.port):
+        if serve_and_chat(
+            a.model, a.temperature, a.max_new_tokens, a.port,
+            kv_cache_dtype=a.kv_cache_dtype, shutdown_wsl=a.shutdown_wsl,
+        ):
             return
         print("falling back to local transformers ...", flush=True)
 
@@ -95,7 +102,7 @@ def main(argv=None):
     load_quant = a.quant
     if load_quant == "auto":
         load_quant = auto_quant(a.model)
-        print(f"  turboquant -> {load_quant}", flush=True)
+        print(f"  auto weight quant -> {load_quant}", flush=True)
     if device is None and load_quant in _ACCEL_QUANTS:
         print(f"  {load_quant} needs an accelerator; falling back to bf16 on CPU.", flush=True)
         load_quant = "bf16"
@@ -118,7 +125,7 @@ def main(argv=None):
     print(f"loaded on {next(model.parameters()).device} ({load_quant})", flush=True)
 
     think = a.think
-    mnt = a.max_new_tokens or 8192   # 0 -> run until EOS (high cap, model stops on its own)
+    mnt = a.max_new_tokens or 8192   # token cap
     messages = []
     print("\nchat ready.  /reset  /think  /exit\n", flush=True)
     while True:

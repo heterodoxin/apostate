@@ -1,4 +1,4 @@
-"""tpe / random search."""
+"""param search"""
 
 from __future__ import annotations
 
@@ -20,14 +20,10 @@ def _has_optuna() -> bool:
 def run_search(objective: Objective, space: Space, n_trials: int, seed: int = 0,
                early_stop: bool = False, early_stop_margin: float = 0.01,
                adaptive: bool = False):
-    """Return (best_params, best_attrs, best_value, history).
-
-    If early_stop=True, stop once the top-3 trials are within early_stop_margin of best.
-    If adaptive=True, start with 6 trials; only scale to n_trials if early-stop didn't trigger.
-    """
+    """run search"""
     actual_trials = n_trials
     if adaptive:
-        actual_trials = min(6, n_trials)  # start ultra-low for speed
+        actual_trials = min(6, n_trials)  # start small
     history: List[dict] = []
 
     if _has_optuna():

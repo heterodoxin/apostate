@@ -1,4 +1,4 @@
-"""projection hooks."""
+"""projection hooks"""
 
 from __future__ import annotations
 
@@ -23,16 +23,16 @@ class ProjectionController:
         self._register()
         self.add_edit("primary", sign=-1.0, default_alpha=1.0)  # refusal edit
 
-    # ---- registration -------------------------------------------------------
+    # registration
     def _register(self):
         b = self.bundle
         self._embed = b.embed()
         self._modules = [self._embed]
         for layer in b.layers():
-            writers = b.layer_writers(layer)   # attn out + every expert down (MoE) or single down (dense)
+            writers = b.layer_writers(layer)   # residual writers
             self._layer_writers.append(writers)
             self._modules.extend(writers)
-        # dedup (shared modules) while keeping order
+        # dedup modules
         seen, uniq = set(), []
         for m in self._modules:
             if id(m) not in seen:
@@ -83,7 +83,7 @@ class ProjectionController:
 
         return hook
 
-    # ---- edit management ----------------------------------------------------
+    # edit state
     def add_edit(self, name: str, sign: float, default_alpha: float = 0.0):
         alpha = {id(m): default_alpha for m in self._modules}
         self.edits.append({"name": name, "sign": float(sign), "R": None, "alpha": alpha})
@@ -115,7 +115,7 @@ class ProjectionController:
     def get_edit_layer_alpha(self, name: str, layer_idx: int) -> float:
         return self._edit(name)["alpha"][id(self._layer_writers[layer_idx][0])]
 
-    # ---- primary-edit (refusal) convenience: backward-compatible API --------
+    # primary api
     @property
     def R(self):
         return self.edits[0]["R"]
@@ -141,11 +141,14 @@ class ProjectionController:
     def set_embed_alpha(self, value: float):
         self.set_edit_embed_alpha("primary", value)
 
+    def get_embed_alpha(self) -> float:
+        return self._edit("primary")["alpha"][id(self._embed)]
+
     def get_layer_alpha(self, layer_idx: int) -> float:
         return self.get_edit_layer_alpha("primary", layer_idx)
 
     def isolate_layer(self, layer_idx: int):
-        """isolate one layer."""
+        """isolate layer"""
         self.set_uniform_alpha(0.0)
         self.set_layer_alpha(layer_idx, 1.0)
 
@@ -153,7 +156,7 @@ class ProjectionController:
     def num_layers(self) -> int:
         return len(self._layer_writers)
 
-    # ---- control ------------------------------------------------------------
+    # control
     def enable(self):
         self.enabled = True
 
@@ -183,7 +186,7 @@ class ProjectionController:
             h.remove()
         self._handles = []
 
-    # ---- export for baking --------------------------------------------------
+    # export
     def export(self) -> dict:
         out_edits = []
         for e in self.edits:
@@ -191,7 +194,7 @@ class ProjectionController:
                 continue
             layer_alphas = [
                 e["alpha"][id(self._layer_writers[i][0])] for i in range(len(self._layer_writers))
-            ]   # one alpha per layer; bake applies it to all that layer's writers
+            ]   # layer alpha
             out_edits.append({
                 "name": e["name"],
                 "sign": e["sign"],

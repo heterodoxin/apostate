@@ -1,4 +1,4 @@
-"""vllm backend: auto setup, serve, stream. windows routes through wsl."""
+"""vllm backend"""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import sys
 import time
 
 SERVED = "apostate"
+_TURBOQUANT_PREFIX = "turboquant_"
 
 
 def _have_vllm() -> bool:
@@ -17,7 +18,7 @@ def _have_vllm() -> bool:
 
 
 def _wsl_check():
-    """(ok, message). distinguishes missing vs broken wsl."""
+    """wsl check"""
     try:
         r = subprocess.run(["wsl", "-e", "echo", "ok"], capture_output=True, timeout=30)
     except FileNotFoundError:
@@ -32,7 +33,7 @@ def _wsl_check():
 
 
 def _to_wsl_path(win_path: str) -> str:
-    """pure-python C:\\a\\b -> /mnt/c/a/b (wslpath mangles backslashes through wsl.exe)."""
+    """wsl path"""
     p = win_path.replace("\\", "/")
     if len(p) > 1 and p[1] == ":":
         p = "/mnt/" + p[0].lower() + p[2:]
@@ -78,7 +79,7 @@ def _repl(v1: str, served: str, temperature: float, max_tokens: int):
         print("\033[35mmodel>\033[0m ", end="", flush=True)
         acc = ""
         payload = {"model": served, "messages": messages, "temperature": temperature, "stream": True}
-        if max_tokens and max_tokens > 0:   # 0 -> server runs until EOS / context
+        if max_tokens and max_tokens > 0:   # token cap
             payload["max_tokens"] = max_tokens
         try:
             with requests.post(v1 + "/chat/completions", json=payload, stream=True, timeout=600) as r:
@@ -113,45 +114,85 @@ SERVER_LOG = os.path.join(tempfile.gettempdir(), "apostate_vllm.log")
 
 
 def _launch(args: list):
-    # detach from the console + no stdin, else wsl.exe grabs CONIN$ and steals the chat's keystrokes
+    # detach stdin
     kw = dict(stdin=subprocess.DEVNULL, stdout=open(SERVER_LOG, "wb"), stderr=subprocess.STDOUT)
     if sys.platform.startswith("win"):
         kw["creationflags"] = subprocess.CREATE_NO_WINDOW
     return subprocess.Popen(args, **kw)
 
 
-def _serve_via_wsl(model: str, temperature: float, max_tokens: int, port: int) -> bool:
+def _cleanup_wsl_vllm(port: int, shutdown_wsl: bool):
+    try:
+        subprocess.run(
+            ["wsl", "-u", "root", "bash", "-lc",
+             "pkill -f 'vllm.entrypoints.openai.api_server.*--port %d' || true" % int(port)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30,
+        )
+    except Exception:
+        pass
+    if shutdown_wsl and os.environ.get("APOSTATE_KEEP_WSL", "").lower() not in ("1", "true", "yes"):
+        try:
+            subprocess.run(
+                ["wsl", "--shutdown"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30,
+            )
+        except Exception:
+            pass
+
+
+def _kv_args(kv_cache_dtype: str | None) -> list:
+    kv = (kv_cache_dtype or "auto").strip().lower()
+    if not kv or kv in ("auto", "bf16", "bfloat16"):
+        return []
+    return ["--kv-cache-dtype", kv]
+
+
+def _serve_via_wsl(
+    model: str, temperature: float, max_tokens: int, port: int,
+    kv_cache_dtype: str | None, shutdown_wsl: bool,
+) -> bool:
     ok, msg = _wsl_check()
     if not ok:
         print("vllm needs WSL on Windows.\n  " + msg, flush=True)
         return False
     script = _to_wsl_path(os.path.join(os.path.dirname(__file__), "vllm_serve.sh"))
     model_wsl = _to_wsl_path(model)
-    print("routing vllm through WSL (first run auto-installs uv + vllm, slow) ...", flush=True)
-    proc = _launch(["wsl", "-u", "root", "bash", script, model_wsl, str(port)])
-    return _drive(proc, port, temperature, max_tokens)
+    kv = kv_cache_dtype or "auto"
+    if kv.startswith(_TURBOQUANT_PREFIX):
+        print(f"routing vllm through WSL with TurboQuant KV cache ({kv}) ...", flush=True)
+    else:
+        print("routing vllm through WSL (first run auto-installs uv + vllm, slow) ...", flush=True)
+    proc = _launch(["wsl", "-u", "root", "bash", script, model_wsl, str(port), kv])
+    return _drive(
+        proc, port, temperature, max_tokens,
+        cleanup=lambda: _cleanup_wsl_vllm(port, shutdown_wsl),
+    )
 
 
-def _serve_native(model: str, temperature: float, max_tokens: int, port: int) -> bool:
+def _serve_native(
+    model: str, temperature: float, max_tokens: int, port: int,
+    kv_cache_dtype: str | None,
+) -> bool:
     if not _have_vllm():
         print("setting up vllm (one-time) ...", flush=True)
         subprocess.run([sys.executable, "-m", "pip", "install", "-q", "vllm"])
         if not _have_vllm():
             print("vllm install failed.", flush=True)
             return False
-    os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")   # avoid nvcc JIT
-    proc = _launch([sys.executable, "-m", "vllm.entrypoints.openai.api_server",
-                    "--model", model, "--served-model-name", SERVED, "--port", str(port),
-                    "--enforce-eager"])
+    os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")   # avoid jit
+    args = [sys.executable, "-m", "vllm.entrypoints.openai.api_server",
+            "--model", model, "--served-model-name", SERVED, "--port", str(port),
+            "--enforce-eager", *_kv_args(kv_cache_dtype)]
+    proc = _launch(args)
     return _drive(proc, port, temperature, max_tokens)
 
 
-def _drive(proc, port, temperature, max_tokens) -> bool:
+def _drive(proc, port, temperature, max_tokens, cleanup=None) -> bool:
     base = f"http://localhost:{port}"
     try:
         if not _wait_ready(base, proc):
             print(f"vllm server did not become ready. log: {SERVER_LOG}", flush=True)
-            return True
+            return False
         _repl(base + "/v1", SERVED, temperature, max_tokens)
     finally:
         proc.terminate()
@@ -159,11 +200,16 @@ def _drive(proc, port, temperature, max_tokens) -> bool:
             proc.wait(timeout=10)
         except Exception:
             proc.kill()
+        if cleanup is not None:
+            cleanup()
     return True
 
 
-def serve_and_chat(model: str, temperature: float, max_tokens: int, port: int = 8000) -> bool:
-    """ensure vllm, serve, stream. windows -> wsl. returns False if unavailable."""
+def serve_and_chat(
+    model: str, temperature: float, max_tokens: int, port: int = 8000,
+    kv_cache_dtype: str | None = "auto", shutdown_wsl: bool = True,
+) -> bool:
+    """serve chat"""
     if sys.platform.startswith("win"):
-        return _serve_via_wsl(model, temperature, max_tokens, port)
-    return _serve_native(model, temperature, max_tokens, port)
+        return _serve_via_wsl(model, temperature, max_tokens, port, kv_cache_dtype, shutdown_wsl)
+    return _serve_native(model, temperature, max_tokens, port, kv_cache_dtype)

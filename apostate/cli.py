@@ -1,9 +1,12 @@
-"""Command-line interface for Apostate."""
+"""cli"""
 
 from __future__ import annotations
 
 import argparse
 import dataclasses
+import os
+import shlex
+import sys
 
 from .config import ApostateConfig
 from .engine import run
@@ -34,7 +37,7 @@ def main(argv=None):
 
     if args.config:
         cfg = ApostateConfig.from_json(args.config)
-        # apply any explicitly-passed overrides
+        # cli overrides
         for f in dataclasses.fields(ApostateConfig):
             val = getattr(args, f.name, None)
             if val is not None and val != f.default:
@@ -43,7 +46,8 @@ def main(argv=None):
         kwargs = {f.name: getattr(args, f.name) for f in dataclasses.fields(ApostateConfig)}
         cfg = ApostateConfig(**kwargs)
 
-    run(cfg)
+    command = os.environ.get("APOSTATE_COMMAND") or " ".join(shlex.quote(x) for x in sys.argv)
+    run(cfg, command=command)
 
 
 if __name__ == "__main__":

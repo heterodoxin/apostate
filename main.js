@@ -8,10 +8,11 @@ const ROOT = path.resolve(__dirname);
 const PY = process.platform === "win32" ? "python" : "python3";
 
 // run module
-async function run(args) {
+async function run(args, commandLabel) {
   return new Promise((resolve) => {
     const env = {
       ...process.env,
+      APOSTATE_COMMAND: commandLabel || process.env.APOSTATE_COMMAND || `${PY} ${args.join(" ")}`,
       PYTHONPATH: ROOT,
       PYTHONUNBUFFERED: "1"
     };
@@ -29,9 +30,9 @@ async function run(args) {
     console.log(`
   tui                             interactive menu (default)
   setup                           install deps, check gpu (wizard)
-  ablate [--model M] [--out D]    remove refusals
-  test   [--model D] [--base M]   benchmark
-  talk   [--model D] [--backend]  chat (backend: local | vllm)
+  ablate [--model M] [--out D]    remove refusals (--resume reuses activation cache)
+  test   [--model D] [--base M]   benchmark (--suite humaneval|mbpp|deepswe|gsm8k|refusal)
+  talk   [--model D] [--backend]  chat (vllm: --kv-cache-dtype fp8|turboquant_4bit_nc)
   list                            checkpoints
     `);
     return;
@@ -41,6 +42,17 @@ async function run(args) {
   const getFlag = (a, name, def) => {
     const i = a.indexOf(name);
     return (i >= 0 && i + 1 < a.length) ? a[i + 1] : def;
+  };
+  const stripFlags = (a, names) => {
+    const out = [];
+    for (let i = 0; i < a.length; i++) {
+      if (names.includes(a[i])) {
+        i++;
+      } else {
+        out.push(a[i]);
+      }
+    }
+    return out;
   };
 
   let pyCmd = [];
@@ -56,18 +68,21 @@ async function run(args) {
   } else if (cmd === "boost" || cmd === "ablate") {
     const model = getFlag(args, "--model", "Qwen/Qwen2.5-7B-Instruct");
     const out = getFlag(args, "--out", getFlag(args, "--output-dir", "out"));
-    pyCmd = ["-m", "apostate.cli", "--optimize", "--model", model, "--output-dir", out];
+    pyCmd = [
+      "-m", "apostate.cli", "--optimize", "--model", model, "--output-dir", out,
+      ...stripFlags(args, ["--model", "--out", "--output-dir"]),
+    ];
   } else if (cmd === "turbo") {
     const model = getFlag(args, "--model", "Qwen/Qwen2.5-7B-Instruct");
     const out = getFlag(args, "--out", "out");
     console.log("Step 1: Finetune...");
-    await run(["-m", "apostate.finetune", "--model", model, "--out", out + "_ft"]);
+    await run(["-m", "apostate.finetune", "--model", model, "--out", out + "_ft"], `apostate turbo --model ${model} --out ${out}`);
     console.log("Step 2: Abliterate...");
-    await run(["-m", "apostate.cli", "--optimize", "--model", out + "_ft", "--output-dir", out]);
+    await run(["-m", "apostate.cli", "--optimize", "--model", out + "_ft", "--output-dir", out], `apostate turbo --model ${model} --out ${out}`);
     console.log("Step 3: Cleanup intermediate...");
     fs.rmSync(out + "_ft", { recursive: true, force: true });
     console.log("Step 4: Verify...");
-    await run(["-m", "apostate.benchcode", "--model", out, "--base", model]);
+    await run(["-m", "apostate.benchcode", "--model", out, "--base", model], `apostate turbo --model ${model} --out ${out}`);
     console.log("Done!");
     return;
   } else if (cmd === "test") {
@@ -101,6 +116,6 @@ async function run(args) {
     process.exit(1);
   }
 
-  const code = await run(pyCmd);
+  const code = await run(pyCmd, `apostate ${cmd} ${args.join(" ")}`.trim());
   process.exit(code);
 })();

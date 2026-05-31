@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 "use strict";
-// setup wizard: autodetect os, install deps, check gpu
+// setup wizard
 
 const { spawnSync } = require("child_process");
 const readline = require("readline");
@@ -34,13 +34,23 @@ function toWsl(p) {
 }
 const optedYes = (a) => ["y", "yes"].includes((a || "").trim().toLowerCase());
 
-const PY_DEPS = ["torch", "transformers", "datasets", "safetensors", "optuna", "bitsandbytes"];
+const CUDA_TORCH_INDEX = "https://download.pytorch.org/whl/cu128";
+const TORCH_DEPS = ["torch", "torchvision", "torchaudio"];
+const PY_DEPS = [
+  "transformers",
+  "datasets",
+  "safetensors",
+  "optuna",
+  "bitsandbytes",
+  "numpy==2.2.6",
+  "fsspec==2026.2.0",
+];
 
 (async () => {
   console.log("\n=== Apostate setup ===");
   console.log(`os: ${process.platform} ${os.arch()} | node: ${process.version}\n`);
 
-  // prerequisites
+  // prereqs
   for (const [bin, why] of [["node", "required"], [PY, "required"]]) {
     console.log(`${have(bin) ? "ok " : "MISSING"}  ${bin} (${why})`);
   }
@@ -55,17 +65,25 @@ const PY_DEPS = ["torch", "transformers", "datasets", "safetensors", "optuna", "
   run("npm", ["install", "--omit=dev"]);
 
   // python deps
-  if (yes(await ask(`\n[2/4] install python deps (${PY_DEPS.join(" ")})? [Y/n] `))) {
+  const useCudaTorch = have("nvidia-smi");
+  const torchLabel = useCudaTorch ? "cu128 torch" : "cpu torch";
+  if (yes(await ask(`\n[2/4] install python deps (${torchLabel}, ${PY_DEPS.join(" ")})? [Y/n] `))) {
+    const torchArgs = useCudaTorch
+      ? ["-m", "pip", "install", "-U", "--force-reinstall", "--quiet", "--index-url", CUDA_TORCH_INDEX, ...TORCH_DEPS]
+      : ["-m", "pip", "install", "-U", "--force-reinstall", "--quiet", ...TORCH_DEPS];
+    if (!run(PY, torchArgs) && useCudaTorch) {
+      console.log("  cuda torch install failed. Check python, driver, and wheel index.");
+    }
     run(PY, ["-m", "pip", "install", "-U", "--quiet", ...PY_DEPS]);
   }
 
   // gpu check
   console.log("\n[3/4] gpu ...");
   console.log("  " + out(PY, ["-c",
-    "import torch;print('cuda', torch.cuda.is_available(),"
+    "import torch;print('torch', torch.__version__, 'cuda_build', torch.version.cuda, 'cuda', torch.cuda.is_available(),"
     + "(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'cpu-only'))"]));
 
-  // fast serving (vLLM)
+  // fast serving
   console.log("\n[4/4] fast serving (vLLM, optional) ...");
   const q = isWin
     ? "  set up vLLM via WSL now? (installs uv+vLLM in WSL, several GB) [y/N] "

@@ -1,4 +1,4 @@
-"""layer pruning for faster generation."""
+"""layer pruning"""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from .evaluate import refusal_rate, kl_harmless
 
 @torch.no_grad()
 def block_influence(bundle: ModelBundle, instructions: List[str], batch_size: int) -> List[float]:
-    """per-layer redundancy: 1 - cos(in, out)."""
+    """block influence"""
     tok = bundle.tokenizer
     model = bundle.model
     device = next(model.parameters()).device
@@ -24,7 +24,7 @@ def block_influence(bundle: ModelBundle, instructions: List[str], batch_size: in
         enc = tok(prompts[i : i + batch_size], return_tensors="pt", padding=True, add_special_tokens=False)
         enc = {k: v.to(device) for k, v in enc.items()}
         out = model(**enc, output_hidden_states=True, use_cache=False)
-        hs = out.hidden_states            # n+1 tensors [B,T,d]
+        hs = out.hidden_states            # hidden states
         mask = enc["attention_mask"].bool()
         m = mask.sum().item()
         den += m
@@ -38,7 +38,7 @@ def block_influence(bundle: ModelBundle, instructions: List[str], batch_size: in
 
 
 class LayerSkip:
-    """hooks that make chosen layers identity (simulate removal)."""
+    """skip layers"""
 
     def __init__(self, bundle: ModelBundle):
         self.layers = bundle.layers()
@@ -65,7 +65,7 @@ class LayerSkip:
 
 
 def select_prune(bundle, controller, eval_harmful, eval_harmless, cfg) -> List[int]:
-    """drop redundant layers within kl + refusal budget."""
+    """select layers"""
     n = bundle.num_layers
     bi = block_influence(bundle, eval_harmless + eval_harmful, cfg.batch_size)
     order = sorted(range(n), key=lambda i: bi[i])     # most redundant first
@@ -74,14 +74,14 @@ def select_prune(bundle, controller, eval_harmful, eval_harmless, cfg) -> List[i
     skip = LayerSkip(bundle)
     try:
         with controller.active():
-            base_kl = kl_harmless(bundle, controller, eval_harmless, cfg.batch_size)
+            base_kl = kl_harmless(bundle, controller, eval_harmless, cfg.batch_size, positions=cfg.kl_positions)
         budget = base_kl + cfg.prune_kl
         kept: List[int] = []
         for L in order:
             if len(kept) >= cap:
                 break
             skip.set(kept + [L])
-            kl = kl_harmless(bundle, controller, eval_harmless, cfg.batch_size)
+            kl = kl_harmless(bundle, controller, eval_harmless, cfg.batch_size, positions=cfg.kl_positions)
             with controller.active():
                 ref = refusal_rate(bundle, eval_harmful, cfg.max_new_tokens, cfg.batch_size)
             if kl <= budget and ref <= cfg.target_refusal:

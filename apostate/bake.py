@@ -1,4 +1,4 @@
-"""bake edits into weights."""
+"""bake edits"""
 
 from __future__ import annotations
 
@@ -60,19 +60,19 @@ def bake(cfg: ApostateConfig, export: dict, tokenizer=None, drop_layers=None) ->
             a = float(e["layer_alphas"][L])
             if a == 0:
                 continue
-            for mod in bundle.layer_writers(layer):   # attn out + every expert down (MoE)
+            for mod in bundle.layer_writers(layer):   # writers
                 mod.weight.data = _edit_linear(mod.weight.data, R, sign * a)
                 if getattr(mod, "bias", None) is not None:
                     mod.bias.data = _edit_vec(mod.bias.data, R, sign * a)
 
-    # drop redundant layers (faster generation)
+    # drop layers
     if drop_layers:
         drop = set(drop_layers)
         keep = [layers[i] for i in range(len(layers)) if i not in drop]
         dec = bundle._decoder()
         dec.layers = torch.nn.ModuleList(keep)
         model.config.num_hidden_layers = len(keep)
-        for new_i, layer in enumerate(keep):       # reindex for kv cache
+        for new_i, layer in enumerate(keep):       # cache index
             for an in ("self_attn", "attention", "attn"):
                 attn = getattr(layer, an, None)
                 if attn is not None and hasattr(attn, "layer_idx"):

@@ -20,6 +20,7 @@ bench/
 dbg.log
 diag_run.log
 **/report.json
+**/activation_cache/
 _*.py
 _*.sh
 
