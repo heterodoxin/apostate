@@ -20,7 +20,7 @@ from .directions import refusal_subspace, preservation_subspace, gram_schmidt_re
 from .projectors import ProjectionController
 from .causal import causal_layer_scores
 from .guard import run_guard
-from .evaluate import refusal_logit_margin, refusal_rate, kl_harmless
+from .evaluate import refusal_logit_margin, refusal_rate, refusal_rate_bounded, kl_harmless
 from .optimize import optimize_profile
 from .search import _has_optuna
 from .bake import bake
@@ -348,19 +348,30 @@ def _repair_alphas(bundle, controller, cfg, eval_harmful, eval_harmless):
             cheap.append((proxy_score, trial_kl, item, scale, dict(controller.alpha)))
 
         accepted = None
+        skipped = 0
         cheap.sort(key=lambda x: (x[0], x[1]))
         for _proxy_score, _probe_kl, item, scale, alpha in cheap[: cfg.repair_rerank_k]:
             controller.alpha = dict(alpha)
-            with controller.active():
-                trial_ref = refusal_rate(bundle, hset, cfg.max_new_tokens, cfg.batch_size)
             trial_kl = kl_harmless(bundle, controller, lset, cfg.batch_size, positions=cfg.kl_positions)
+            if _repair_loss(0.0, trial_kl, cfg) >= best_score - 1e-4:
+                skipped += 1
+                continue
+            with controller.active():
+                trial_ref, complete = refusal_rate_bounded(
+                    bundle, hset, cfg.max_new_tokens, cfg.batch_size,
+                    should_stop=lambda floor, _seen, _total: _repair_loss(floor, trial_kl, cfg) >= best_score - 1e-4,
+                )
+            if not complete:
+                skipped += 1
+                continue
             trial_score = _repair_loss(trial_ref, trial_kl, cfg)
             if trial_score < best_score - 1e-4:
                 if accepted is None or trial_score < accepted[0]:
                     accepted = (trial_score, trial_ref, trial_kl, item, scale, dict(controller.alpha))
 
         if accepted is None:
-            _log(f"  repair {step + 1}: no better exact candidate")
+            suffix = f" ({skipped} skipped)" if skipped else ""
+            _log(f"  repair {step + 1}: no better exact candidate{suffix}")
             break
         best_score, best_ref, best_kl, item, scale, best_alpha = accepted
         steps += 1
