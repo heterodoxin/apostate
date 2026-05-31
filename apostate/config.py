@@ -55,10 +55,14 @@ class ApostateConfig:
     refine_max_scale: float = 2.0              # max scale
     refine_steps: int = 6
     refine_deescalate: bool = True             # kl shrink
-    refine_kl_steps: int = 8                   # kl shrink
-    refine_kl_layer_steps: int = 8             # layer trim
-    refine_kl_layer_candidates: int = 6        # trim width
-    refine_refusal_slack: float = 0.015        # target slack
+    refine_kl_steps: int = 10                  # kl shrink
+    refine_kl_layer_steps: int = 10            # layer trim
+    refine_kl_layer_candidates: int = 8        # trim width
+    repair_steps: int = 10                     # repair iters
+    repair_candidates: int = 10                # repair width
+    repair_eval_n: int = 48                    # repair harmful
+    repair_kl_n: int = 64                      # repair harmless
+    refine_refusal_slack: float = 0.01         # target slack
 
     # guard
     guard_max_iters: int = 2                   # guard iters
@@ -67,19 +71,21 @@ class ApostateConfig:
 
     # search
     optimize: bool = False                     # search profile
-    n_trials: int = 12                         # trials
+    n_trials: int = 16                         # trials
     adaptive_trials: bool = True               # adaptive
-    kl_weight: float = 2.5                     # kl weight
-    kl_target: float = 0.08                    # kl target
-    kl_target_weight: float = 8.0              # target weight
-    kl_quad_weight: float = 10.0               # curve weight
-    kl_over_budget_weight: float = 24.0        # budget weight
+    kl_weight: float = 3.0                     # kl weight
+    kl_target: float = 0.06                    # kl target
+    kl_target_weight: float = 10.0             # target weight
+    kl_quad_weight: float = 14.0               # curve weight
+    kl_over_budget_weight: float = 36.0        # budget weight
+    refusal_target_weight: float = 4.0         # refusal weight
+    refusal_quad_weight: float = 8.0           # refusal curve
     kl_positions: int = 32                     # kl window
     opt_capability: bool = True                # cap loss
     opt_capability_weight: float = 1.0         # cap weight
     opt_capability_code_n: int = 4             # code n
     opt_capability_math_n: int = 4             # math n
-    opt_eval_n: int = 24                       # prompts per trial
+    opt_eval_n: int = 32                       # prompts per trial
     opt_gen_tokens: int = 32                   # trial gen len
     opt_objective: str = "generation"          # generation judge
     opt_rerank_k: int = 3                      # rerank k
@@ -93,8 +99,8 @@ class ApostateConfig:
     prune_kl: float = 0.04                     # prune budget
 
     # acceptance
-    max_kl: float = 0.18                       # hard cap
-    target_refusal: float = 0.05               # target refusal rate
+    max_kl: float = 0.16                       # hard cap
+    target_refusal: float = 0.03               # target refusal rate
 
     # output
     save_dtype: str = "bfloat16"

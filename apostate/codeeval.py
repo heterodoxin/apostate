@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import List, Tuple
 import ast
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -35,8 +36,25 @@ def load_code_problems(spec: str, n: int) -> List[dict]:
             "canonical_solution": row.get("canonical_solution", ""),
             "test": row.get("test", ""),
             "entry_point": row.get("entry_point", ""),
+            "test_style": "check",
         })
     return out
+
+
+def entry_from_code(code: str) -> str:
+    try:
+        tree = ast.parse(code or "")
+    except Exception:
+        return ""
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef):
+            return node.name
+    return ""
+
+
+def entry_from_tests(tests: str) -> str:
+    m = re.search(r"assert\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(", tests or "")
+    return m.group(1) if m else ""
 
 
 def coding_instructions(spec: str, n: int) -> List[str]:
@@ -108,11 +126,19 @@ def ast_complete(code: str) -> bool:
 def _solve(bundle: ModelBundle, problems: List[dict], max_new_tokens: int, batch_size: int) -> List[str]:
     tok, model = bundle.tokenizer, bundle.model
     device = next(model.parameters()).device
-    instrs = [
-        "Complete the following Python function. Respond with the complete function "
-        "in a single ```python code block and nothing else.\n\n```python\n" + p["prompt"] + "\n```"
-        for p in problems
-    ]
+    instrs = []
+    for p in problems:
+        if p.get("test_style") == "assert":
+            instrs.append(
+                "Write a Python function that solves the task. Respond with the complete "
+                "function in a single ```python code block and nothing else.\n\n"
+                f"Task:\n{p['prompt']}\n\nTests:\n```python\n{p.get('test', '')}\n```"
+            )
+        else:
+            instrs.append(
+                "Complete the following Python function. Respond with the complete function "
+                "in a single ```python code block and nothing else.\n\n```python\n" + p["prompt"] + "\n```"
+            )
     prompts = format_chat(tok, instrs)
     outs: List[str] = []
     for i in range(0, len(prompts), batch_size):
@@ -138,6 +164,20 @@ def _run_program(src: str, timeout: int) -> bool:
             return False
 
 
+def program_for_problem(p: dict, code: str) -> str:
+    tests = p.get("test", "")
+    if p.get("test_style") == "assert":
+        return code + "\n\n" + tests + "\n"
+    entry = p.get("entry_point", "")
+    if entry and ("def " + entry) in code:
+        body = code
+    else:
+        body = p.get("prompt", "") + code
+    if entry:
+        return body + "\n" + tests + f"\ncheck({entry})\n"
+    return body + "\n" + tests + "\n"
+
+
 @torch.no_grad()
 def pass_at_1(
     bundle: ModelBundle, problems: List[dict], max_new_tokens: int,
@@ -155,11 +195,7 @@ def pass_at_1(
         if ast_complete(code):
             complete += 1
         if execute:
-            if ("def " + p["entry_point"]) in code:
-                program = code + "\n" + p["test"] + f"\ncheck({p['entry_point']})\n"
-            else:
-                program = p["prompt"] + code + "\n" + p["test"] + f"\ncheck({p['entry_point']})\n"
-            programs.append(program)
+            programs.append(program_for_problem(p, code))
 
     # run tests
     if execute and programs:

@@ -257,6 +257,97 @@ def _minimize_kl_layers(bundle, controller, cfg, eval_harmful, eval_harmless):
     return best_ref, best_kl, kept
 
 
+def _repair_loss(ref: float, kl: float, cfg) -> float:
+    ref_over = max(0.0, ref - cfg.target_refusal)
+    kl_target_over = max(0.0, kl - cfg.kl_target)
+    kl_budget_over = max(0.0, kl - cfg.max_kl)
+    return (
+        ref
+        + cfg.refusal_target_weight * ref_over
+        + cfg.refusal_quad_weight * ref_over * ref_over
+        + cfg.kl_weight * kl
+        + cfg.kl_target_weight * kl_target_over
+        + cfg.kl_quad_weight * kl * kl
+        + cfg.kl_over_budget_weight * kl_budget_over
+    )
+
+
+def _repair_alphas(bundle, controller, cfg, eval_harmful, eval_harmless):
+    hset = eval_harmful[: max(24, cfg.repair_eval_n)]
+    lset = eval_harmless[: max(48, cfg.repair_kl_n)]
+    with controller.active():
+        best_ref = refusal_rate(bundle, hset, cfg.max_new_tokens, cfg.batch_size)
+    best_kl = kl_harmless(bundle, controller, lset, cfg.batch_size, positions=cfg.kl_positions)
+    best_alpha = dict(controller.alpha)
+    best_score = _repair_loss(best_ref, best_kl, cfg)
+    steps = 0
+
+    for step in range(cfg.repair_steps):
+        controller.alpha = dict(best_alpha)
+        active = [
+            item for item in ([-1] + list(range(controller.num_layers)))
+            if abs(_alpha_get(controller, item)) > 1e-6
+        ]
+        active.sort(key=lambda item: abs(_alpha_get(controller, item)), reverse=True)
+        items = active[: cfg.repair_candidates]
+        if not items:
+            break
+
+        accepted = None
+        for item in items:
+            start = _alpha_get(controller, item)
+            for scale in (0.0, 0.25, 0.50, 0.75, 0.90, 1.10, 1.25, 1.45):
+                value = start * scale
+                if abs(value - start) < 1e-6:
+                    continue
+                controller.alpha = dict(best_alpha)
+                _alpha_set(controller, item, value)
+                with controller.active():
+                    trial_ref = refusal_rate(bundle, hset, cfg.max_new_tokens, cfg.batch_size)
+                trial_kl = kl_harmless(bundle, controller, lset, cfg.batch_size, positions=cfg.kl_positions)
+                trial_score = _repair_loss(trial_ref, trial_kl, cfg)
+                if trial_score < best_score - 1e-4:
+                    if accepted is None or trial_score < accepted[0]:
+                        accepted = (trial_score, trial_ref, trial_kl, item, scale, dict(controller.alpha))
+
+        if accepted is None:
+            break
+        best_score, best_ref, best_kl, item, scale, best_alpha = accepted
+        steps += 1
+        _log(f"  repair {step + 1}: {_alpha_label(item)} x{scale:.2f} refusal={best_ref:.3f} kl={best_kl:.3f}")
+        if best_ref <= cfg.target_refusal and best_kl <= cfg.kl_target:
+            break
+
+    controller.alpha = best_alpha
+    return best_ref, best_kl, steps
+
+
+def _backoff_to_kl(bundle, controller, cfg, eval_harmful, eval_harmless):
+    base_alpha = dict(controller.alpha)
+
+    def apply_scale(s: float):
+        for mid, a in base_alpha.items():
+            controller.alpha[mid] = a * s
+
+    lo, hi = 0.0, 1.0
+    steps = 0
+    for steps in range(1, cfg.refine_kl_steps + 1):
+        mid = 0.5 * (lo + hi)
+        apply_scale(mid)
+        kl = kl_harmless(bundle, controller, eval_harmless, cfg.batch_size, positions=cfg.kl_positions)
+        if kl > cfg.max_kl:
+            hi = mid
+        else:
+            lo = mid
+        _log(f"  backoff {steps}: scale={mid:.3f} KL={kl:.3f}")
+    apply_scale(lo)
+    kl = kl_harmless(bundle, controller, eval_harmless, cfg.batch_size, positions=cfg.kl_positions)
+    with controller.active():
+        ref = refusal_rate(bundle, eval_harmful, cfg.max_new_tokens, cfg.batch_size)
+    _log(f"  backoff final: scale={lo:.3f} KL={kl:.3f} refusal={ref:.3f}")
+    return ref, kl, steps
+
+
 def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
     t0 = time.time()
     cfg.with_defaults()
@@ -400,6 +491,7 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
     _log(f"edited refusal rate: {edited_refusal:.3f} | harmless KL: {kl:.3f} nats")
 
     kl_layer_steps = 0
+    repair_steps = 0
     if cfg.refine_deescalate and edited_refusal <= cfg.target_refusal + cfg.refine_refusal_slack:
         _log("minimizing kl scale ...")
         edited_refusal, kl = _minimize_kl_scale(bundle, controller, cfg, eval_harmful, eval_harmless)
@@ -411,28 +503,23 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
             )
             _log(f"kl layer result: refusal={edited_refusal:.3f} kl={kl:.3f} steps={kl_layer_steps}")
 
+    if cfg.refine_deescalate and (edited_refusal > cfg.target_refusal or kl > cfg.kl_target):
+        _log("repairing refusal/kl tradeoff ...")
+        edited_refusal, kl, repair_steps = _repair_alphas(bundle, controller, cfg, eval_harmful, eval_harmless)
+        _log(f"repair result: refusal={edited_refusal:.3f} kl={kl:.3f} steps={repair_steps}")
+
     backoff = 0
     if kl > cfg.max_kl:
-        base_alpha = dict(controller.alpha)
-
-        def _apply_scale(s: float):
-            for mid, a in base_alpha.items():
-                controller.alpha[mid] = a * s
-        lo, hi = 0.0, 1.0
-        for backoff in range(1, 7):
-            mid = 0.5 * (lo + hi)
-            _apply_scale(mid)
-            kl = kl_harmless(bundle, controller, eval_harmless, cfg.batch_size, positions=cfg.kl_positions)
+        edited_refusal, kl, backoff = _backoff_to_kl(bundle, controller, cfg, eval_harmful, eval_harmless)
+        if cfg.refine_deescalate and edited_refusal > cfg.target_refusal:
+            _log("repairing after backoff ...")
+            edited_refusal, kl, extra_steps = _repair_alphas(bundle, controller, cfg, eval_harmful, eval_harmless)
+            repair_steps += extra_steps
+            _log(f"post-backoff repair: refusal={edited_refusal:.3f} kl={kl:.3f} steps={extra_steps}")
             if kl > cfg.max_kl:
-                hi = mid
-            else:
-                lo = mid
-            _log(f"  backoff {backoff}: scale={mid:.3f} KL={kl:.3f}")
-        _apply_scale(lo)
-        kl = kl_harmless(bundle, controller, eval_harmless, cfg.batch_size, positions=cfg.kl_positions)
-        with controller.active():
-            edited_refusal = refusal_rate(bundle, eval_harmful, cfg.max_new_tokens, cfg.batch_size)
-        _log(f"  backoff final: scale={lo:.3f} KL={kl:.3f} refusal={edited_refusal:.3f}")
+                _log("final kl backoff ...")
+                edited_refusal, kl, extra_backoff = _backoff_to_kl(bundle, controller, cfg, eval_harmful, eval_harmless)
+                backoff += extra_backoff
 
     # prune layers
     drop_layers: list = []
@@ -474,6 +561,7 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
         "harmless_kl_nats": round(kl, 4),
         "kl_backoff_steps": backoff,
         "kl_layer_trim_steps": kl_layer_steps,
+        "repair_steps": repair_steps,
         "guard_history": guard_hist,
         "layer_alphas": [round(controller.get_layer_alpha(L), 3) for L in range(bundle.num_layers)],
         "embed_alpha": round(controller.get_embed_alpha(), 3),

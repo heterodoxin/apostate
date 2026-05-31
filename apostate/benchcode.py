@@ -9,7 +9,7 @@ import json
 import torch
 
 from .data import resolve_prompts
-from .codeeval import load_code_problems, pass_at_1
+from .codeeval import entry_from_code, entry_from_tests, load_code_problems, pass_at_1
 from .benchmark import _load, _logprobs_lastK, _kl
 from .evalsuite import refusal_eval, gsm8k_eval
 from .reports import refresh_candidate_reports, write_benchmark_report
@@ -47,8 +47,15 @@ def _mbpp_as_humaneval(n: int) -> List[dict]:
     for i in range(min(n, len(ds))):
         r = ds[i]
         tests = "\n".join(r["test_list"])
-        out.append({"prompt": r["text"] + "\nWrite a Python function.\n",
-                    "canonical_solution": r["code"], "test": tests, "entry_point": ""})
+        entry = entry_from_code(r["code"]) or entry_from_tests(tests)
+        prompt = r["text"].strip()
+        out.append({
+            "prompt": prompt,
+            "canonical_solution": r["code"],
+            "test": tests,
+            "entry_point": entry,
+            "test_style": "assert",
+        })
     return out
 
 
