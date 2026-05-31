@@ -14,6 +14,53 @@
 | fit harmless prompts | 600 |
 | eval split | validation/test |
 
+## Function
+
+| component | behavior |
+|---|---|
+| edit type | low-rank residual projection |
+| target signal | harmful minus harmless activation mean |
+| edited modules | token embedding, attention output projections, mlp down projections |
+| moe handling | every expert down projection plus shared experts |
+| training | none |
+| generation model | single edited model |
+| bake output | standalone transformers checkpoint |
+
+## Mechanism
+
+| step | operation | measured output |
+|---|---|---|
+| activation collection | run harmful and harmless prompts through the base model | residual activations per layer |
+| refusal direction | compute rank-k harmful-minus-harmless basis | refusal subspace |
+| preservation | remove benign principal directions from the refusal basis | protected subspace rank |
+| causal scoring | ablate one layer at a time and score refusal drop | per-layer alpha prior |
+| profile search | tune layer band, strength, direction layer, embed scale | refusal, kl, capability drift |
+| guard | remeasure reconstruction leakage and add corrective directions | guard history |
+| deescalation | scale down passing edits until refusal reaches slack boundary | lower validation kl |
+| layer trim | zero or shrink high-kl layers if refusal remains under target | lower validation kl |
+| bake | fold projection matrices into residual writer weights | checkpoint files |
+
+## Objective
+
+| term | source | direction |
+|---|---|---|
+| refusal | classifier-judged generations on harmful validation prompts | minimize |
+| harmless kl | token distribution shift on harmless prompts | minimize |
+| kl target loss | penalty above `kl_target` | minimize |
+| kl budget loss | penalty above `max_kl` | reject/penalize |
+| capability drift | canonical-answer logprob drop on small code/math set | minimize |
+
+## KL Measurement
+
+| field | value |
+|---|---|
+| base distribution | original model logits |
+| edited distribution | hooked or baked edited model logits |
+| prompt class | harmless validation/test prompts |
+| token window | last `kl_positions` tokens |
+| unit | nats |
+| cache | base harmless logits cached per prompt/window |
+
 ## Metrics
 
 | metric | base | edited | delta |
