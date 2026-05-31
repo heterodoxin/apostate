@@ -440,8 +440,12 @@ forceWindowsTerminalResize();
       { name: 'mbpp', desc: 'MBPP code + refusal + GSM8K + KL' },
       { name: 'gsm8k', desc: 'math capability + refusal + KL' },
       { name: 'refusal', desc: 'JBB refusal/compliance + KL' },
-      { name: 'deepswe', desc: 'note + local HumanEval fallback' },
     ];
+    const picked = new Set(['humaneval']);
+    const rows = () => suites.map(s => {
+      const mark = picked.has(s.name) ? '[x]' : '[ ]';
+      return `${mark} ${s.name.padEnd(10)} {${C.dim}-fg}${s.desc}{/${C.dim}-fg}`;
+    });
     const consoleSize = getWinConsoleSize();
     const selectScreen = blessed.screen({
       mouse: true, keyboard: true, dockBorders: false, useBCE: true,
@@ -449,18 +453,36 @@ forceWindowsTerminalResize();
     });
     blessed.text({
       parent: selectScreen, top: 0, left: 'center', tags: true, bold: true,
-      content: `{${C.acc}-fg}Benchmark suite{/${C.acc}-fg}`,
+      content: `{${C.acc}-fg}Benchmark suites{/${C.acc}-fg}`,
     });
     const list = blessed.list({
       parent: selectScreen, mouse: true, keys: true, vi: true, tags: true,
       style: { selected: { bg: C.acc, fg: 'black' }, item: { fg: C.fg } },
-      top: 2, left: 'center', width: 76, height: 9,
-      items: suites.map(s => `${s.name.padEnd(10)} {${C.dim}-fg}${s.desc}{/${C.dim}-fg}`),
+      top: 2, left: 'center', width: 80, height: 8,
+      items: rows(),
+    });
+    blessed.text({
+      parent: selectScreen, bottom: 0, left: 'center', tags: true,
+      content: `{${C.dim}-fg}Space select  Enter run  ESC cancel{/${C.dim}-fg}`,
     });
     list.focus();
-    list.on('select', (item, index) => {
+    const toggle = () => {
+      const index = list.selected;
+      const name = suites[index].name;
+      if (picked.has(name)) picked.delete(name);
+      else picked.add(name);
+      list.setItems(rows());
+      list.select(index);
+      selectScreen.render();
+    };
+    list.key(['space'], toggle);
+    list.on('select', () => {
+      if (!picked.size) {
+        toggle();
+        return;
+      }
       selectScreen.destroy();
-      callback(suites[index].name);
+      callback([...picked].join(','));
     });
     selectScreen.key(['escape', 'q', 'C-c'], () => {
       selectScreen.destroy();

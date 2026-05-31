@@ -107,7 +107,7 @@
 | mbpp | refusal, pass@1, gsm8k, kl |
 | gsm8k | refusal, gsm8k, kl |
 | refusal | refusal, compliance, category refusal, kl |
-| deepswe | local humaneval fallback, refusal, gsm8k, kl |
+| all | humaneval, mbpp, gsm8k, refusal |
 
 | judge | default |
 |---|---|
@@ -123,6 +123,8 @@ apostate ablate --model Qwen/Qwen2.5-7B-Instruct --out qwen-apostate
 apostate ablate --model Qwen/Qwen2.5-7B-Instruct --out qwen-apostate --resume
 apostate test --model qwen-apostate --base Qwen/Qwen2.5-7B-Instruct --suite humaneval
 apostate test --model qwen-apostate --base Qwen/Qwen2.5-7B-Instruct --suite gsm8k
+apostate test --model qwen-apostate --base Qwen/Qwen2.5-7B-Instruct --suite humaneval,gsm8k,refusal
+apostate test --model qwen-apostate --base Qwen/Qwen2.5-7B-Instruct --suite all
 apostate talk --model qwen-apostate --quant nf4
 apostate talk --model qwen-apostate --backend vllm --kv-cache-dtype turboquant_4bit_nc
 ```

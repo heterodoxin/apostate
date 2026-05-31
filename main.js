@@ -31,7 +31,7 @@ async function run(args, commandLabel) {
   tui                             interactive menu (default)
   setup                           install deps, check gpu (wizard)
   ablate [--model M] [--out D]    remove refusals (--resume reuses activation cache)
-  test   [--model D] [--base M]   benchmark (--suite humaneval|mbpp|deepswe|gsm8k|refusal)
+  test   [--model D] [--base M]   benchmark (--suite humaneval,mbpp,gsm8k,refusal or all)
   talk   [--model D] [--backend]  chat (vllm: --kv-cache-dtype fp8|turboquant_4bit_nc)
   list                            checkpoints
     `);

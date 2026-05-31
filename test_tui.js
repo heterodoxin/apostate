@@ -17,6 +17,7 @@ child.onData((d) => termEmu.write(d));
 
 const KEYS = {
   enter: "\r", esc: "\x1b", up: "\x1b[A", down: "\x1b[B",
+  space: " ",
   "1": "1", "2": "2", "3": "3", "4": "4", "5": "5", "0": "0",
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
