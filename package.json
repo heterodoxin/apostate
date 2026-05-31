@@ -3,11 +3,13 @@
   "version": "1.0.0",
   "description": "Decensor LLMs via rank-1 subspace ablation",
   "bin": {
-    "apostate": "./apostate.cmd"
+    "apostate": "main.js"
   },
   "scripts": {
     "start": "node main.js",
-    "test": "node test_tui.js"
+    "setup": "node setup.js",
+    "test": "node test_tui.js",
+    "build-exe": "npx --yes pkg setup.js --targets node18-win-x64 --output Apostate-Setup.exe"
   },
   "engines": {
     "node": ">=18.0.0"

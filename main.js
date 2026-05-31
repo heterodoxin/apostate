@@ -28,10 +28,10 @@ async function run(args) {
   } else if (cmd === "-h" || cmd === "--help") {
     console.log(`
   tui                             interactive menu (default)
-  ablate [--model M] [--out D]    remove refusals only
-  boost  [--model M] [--out D]    ablate + cached improvement
+  setup                           install deps, check gpu (wizard)
+  ablate [--model M] [--out D]    remove refusals
   test   [--model D] [--base M]   benchmark
-  talk   [--model D]              chat
+  talk   [--model D] [--backend]  chat (backend: local | vllm)
   list                            checkpoints
     `);
     return;
@@ -47,6 +47,10 @@ async function run(args) {
   if (cmd === "tui") {
     const tuiPath = path.join(ROOT, "tui.js");
     const proc = spawn(process.execPath, [tuiPath], { stdio: "inherit" });
+    proc.on("close", (code) => process.exit(code || 0));
+    return;
+  } else if (cmd === "setup") {
+    const proc = spawn(process.execPath, [path.join(ROOT, "setup.js"), ...args], { stdio: "inherit" });
     proc.on("close", (code) => process.exit(code || 0));
     return;
   } else if (cmd === "boost" || cmd === "ablate") {

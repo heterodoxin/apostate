@@ -28,3 +28,6 @@ _*.sh
 .DS_Store
 .vscode/
 .idea/
+
+# built installer
+*.exe
