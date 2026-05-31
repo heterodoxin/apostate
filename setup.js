@@ -51,11 +51,11 @@ const PY_DEPS = ["torch", "transformers", "datasets", "safetensors", "optuna", "
   }
 
   // node deps
-  console.log("\n[1/3] node deps ...");
+  console.log("\n[1/4] node deps ...");
   run("npm", ["install", "--omit=dev"]);
 
   // python deps
-  if (yes(await ask(`\n[2/3] install python deps (${PY_DEPS.join(" ")})? [Y/n] `))) {
+  if (yes(await ask(`\n[2/4] install python deps (${PY_DEPS.join(" ")})? [Y/n] `))) {
     run(PY, ["-m", "pip", "install", "-U", "--quiet", ...PY_DEPS]);
   }
 
