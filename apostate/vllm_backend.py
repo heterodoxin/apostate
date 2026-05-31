@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import time
@@ -31,14 +32,11 @@ def _wsl_check():
 
 
 def _to_wsl_path(win_path: str) -> str:
-    try:
-        out = subprocess.check_output(["wsl", "wslpath", "-a", win_path], timeout=20)
-        return out.decode().strip()
-    except Exception:
-        p = win_path.replace("\\", "/")
-        if len(p) > 1 and p[1] == ":":
-            p = "/mnt/" + p[0].lower() + p[2:]
-        return p
+    """pure-python C:\\a\\b -> /mnt/c/a/b (wslpath mangles backslashes through wsl.exe)."""
+    p = win_path.replace("\\", "/")
+    if len(p) > 1 and p[1] == ":":
+        p = "/mnt/" + p[0].lower() + p[2:]
+    return p
 
 
 def _wait_ready(base: str, proc, timeout: int = 1800) -> bool:
@@ -117,13 +115,10 @@ def _serve_via_wsl(model: str, temperature: float, max_tokens: int, port: int) -
     if not ok:
         print("vllm needs WSL on Windows.\n  " + msg, flush=True)
         return False
-    wsl_model = _to_wsl_path(model)
-    inner = (f"(python3 -c 'import vllm' 2>/dev/null || pip install -q vllm) && "
-             f"python3 -m vllm.entrypoints.openai.api_server "
-             f"--model '{wsl_model}' --served-model-name {SERVED} "
-             f"--host 0.0.0.0 --port {port}")
-    print("routing vllm through WSL (auto-installs on first run) ...", flush=True)
-    proc = _launch(["wsl", "bash", "-lc", inner])
+    script = _to_wsl_path(os.path.join(os.path.dirname(__file__), "vllm_serve.sh"))
+    model_wsl = _to_wsl_path(model)
+    print("routing vllm through WSL (first run auto-installs uv + vllm, slow) ...", flush=True)
+    proc = _launch(["wsl", "-u", "root", "bash", script, model_wsl, str(port)])
     return _drive(proc, port, temperature, max_tokens)
 
 

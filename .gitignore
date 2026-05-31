@@ -21,6 +21,7 @@ dbg.log
 diag_run.log
 **/report.json
 _*.py
+_*.sh
 
 # env / editor
 .env
