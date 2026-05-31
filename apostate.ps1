@@ -8,5 +8,5 @@ $host.UI.RawUI.BufferSize = New-Object System.Management.Automation.Host.Size($m
 $host.UI.RawUI.WindowSize = New-Object System.Management.Automation.Host.Size([Math]::Min($maxWidth, $host.UI.RawUI.LargestWindowWidth), [Math]::Min($maxHeight, $host.UI.RawUI.LargestWindowHeight))
 $host.UI.RawUI.WindowTitle = 'apostate'
 
-# Launch TUI
-& node "$PSScriptRoot/tui.js" @args
+# Launch dispatcher (no args -> tui; talk/ablate/test/... -> command)
+& node "$PSScriptRoot/main.js" @args
