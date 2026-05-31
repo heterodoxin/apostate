@@ -77,8 +77,9 @@ def _repl(v1: str, served: str, temperature: float, max_tokens: int):
         messages.append({"role": "user", "content": user})
         print("\033[35mmodel>\033[0m ", end="", flush=True)
         acc = ""
-        payload = {"model": served, "messages": messages, "temperature": temperature,
-                   "max_tokens": max_tokens, "stream": True}
+        payload = {"model": served, "messages": messages, "temperature": temperature, "stream": True}
+        if max_tokens and max_tokens > 0:   # 0 -> server runs until EOS / context
+            payload["max_tokens"] = max_tokens
         try:
             with requests.post(v1 + "/chat/completions", json=payload, stream=True, timeout=600) as r:
                 r.raise_for_status()

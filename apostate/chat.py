@@ -70,7 +70,7 @@ def main(argv=None):
 
     ap = argparse.ArgumentParser(prog="apostate.chat")
     ap.add_argument("--model", required=True)
-    ap.add_argument("--max-new-tokens", type=int, default=256)
+    ap.add_argument("--max-new-tokens", type=int, default=0, help="0 = until the model stops (EOS / context)")
     ap.add_argument("--temperature", type=float, default=0.7)
     ap.add_argument("--quant", default="nf4", choices=MODES, help="inference quant")
     ap.add_argument("--backend", default="local", choices=["local", "vllm"], help="inference backend")
@@ -115,6 +115,7 @@ def main(argv=None):
     print(f"loaded on {next(model.parameters()).device} ({load_quant})", flush=True)
 
     think = a.think
+    mnt = a.max_new_tokens or 8192   # 0 -> run until EOS (high cap, model stops on its own)
     messages = []
     print("\nchat ready.  /reset  /think  /exit\n", flush=True)
     while True:
@@ -146,7 +147,7 @@ def main(argv=None):
         print("\033[35mmodel>\033[0m ", end="", flush=True)
         with torch.no_grad():
             out = model.generate(
-                **enc, max_new_tokens=a.max_new_tokens, do_sample=a.temperature > 0,
+                **enc, max_new_tokens=mnt, do_sample=a.temperature > 0,
                 temperature=max(a.temperature, 1e-5), top_p=0.9,
                 streamer=streamer, pad_token_id=tok.pad_token_id)
         resp = tok.decode(out[0, enc["input_ids"].shape[1]:], skip_special_tokens=True)
