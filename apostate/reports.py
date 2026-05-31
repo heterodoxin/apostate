@@ -78,6 +78,9 @@ def write_run_report(cfg: Any, report: dict, benchmark: Optional[dict] = None, c
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, "report.md")
     command = command or report.get("command")
+    base_label = "Baseline refusal"
+    if report.get("baseline_eval_n"):
+        base_label = f"Baseline refusal (n={report.get('baseline_eval_n')})"
 
     lines = [
         "# Apostate Run Report",
@@ -92,7 +95,7 @@ def write_run_report(cfg: Any, report: dict, benchmark: Optional[dict] = None, c
                 ["Layers", report.get("num_layers", "n/a")],
                 ["Hidden size", report.get("hidden_size", "n/a")],
                 ["Direction layer", report.get("direction_layer", "n/a")],
-                ["Baseline refusal", _pct(report.get("baseline_refusal_rate"))],
+                [base_label, _pct(report.get("baseline_refusal_rate"))],
                 ["Edited refusal", _pct(report.get("edited_refusal_rate"))],
                 ["Harmless KL", _num(report.get("harmless_kl_nats"))],
                 ["Target refusal", _pct(_cfg_get(cfg, "target_refusal", report.get("target_refusal")))],
@@ -147,6 +150,10 @@ def write_run_report(cfg: Any, report: dict, benchmark: Optional[dict] = None, c
 
     if report.get("pruned_layers"):
         lines += ["", "## Pruning", f"Pruned layers: `{report.get('pruned_layers')}`."]
+
+    timings = report.get("timings_sec") or {}
+    if timings:
+        lines += ["", "## Timings", _table(["Phase", "Seconds"], [[k, v] for k, v in timings.items()])]
 
     lines += [
         "",

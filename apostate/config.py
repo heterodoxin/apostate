@@ -34,6 +34,7 @@ class ApostateConfig:
     n_eval: int = 300                          # eval size
     max_new_tokens: int = 32                   # refusal signal tokens
     batch_size: int = 24                       # batch
+    baseline_eval_n: int = 24                  # base eval
 
     # subspace
     refusal_rank: int = 1                      # mean diff
@@ -56,6 +57,7 @@ class ApostateConfig:
     refine_steps: int = 6
     refine_deescalate: bool = True             # kl shrink
     refine_kl_steps: int = 10                  # kl shrink
+    refine_scale_rerank_k: int = 2             # scale exact
     refine_kl_layer_steps: int = 10            # layer trim
     refine_kl_layer_candidates: int = 8        # trim width
     repair_steps: int = 10                     # repair iters
@@ -65,6 +67,8 @@ class ApostateConfig:
     repair_probe_ref_n: int = 12               # probe harmful
     repair_probe_kl_n: int = 16                # probe harmless
     repair_probe_positions: int = 8            # probe kl
+    repair_refusal_regress_slack: float = 0.01 # ref regress
+    repair_stop_kl_frac: float = 0.80          # stop kl
     repair_eval_n: int = 48                    # repair harmful
     repair_kl_n: int = 64                      # repair harmless
     refine_refusal_slack: float = 0.01         # target slack

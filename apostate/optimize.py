@@ -9,7 +9,7 @@ from .model import ModelBundle
 from .projectors import ProjectionController
 from .directions import refusal_subspace, gram_schmidt_remove
 import math
-from .evaluate import refusal_rate, refusal_logit_margin, kl_harmless
+from .evaluate import refusal_rate, refusal_rate_bounded, refusal_logit_margin, kl_harmless
 from .data import format_chat
 from .search import run_search
 
@@ -31,6 +31,8 @@ def _refusal_loss(refusal: float, cfg) -> float:
 
 
 def _ref_attr(h: dict) -> float:
+    if h.get("refusal_complete") is False:
+        return 1.0
     return float(h.get("refusal", h.get("refusal_proxy", 1.0)))
 
 
@@ -218,25 +220,39 @@ def optimize_profile(
         "embed_scale": ("float", 0.0, 0.35),
     }
 
+    best_seen = [float("inf")]
+
     def objective(params):
         _apply_profile(bundle, controller, ah, al, params, causal_shape, cfg, preserve_basis, preserve_lookup)
+        kl = kl_harmless(bundle, controller, eval_harmless, cfg.batch_size, positions=cfg.kl_positions)
+        kl_part = _kl_loss(kl, cfg)
+        if kl_part >= best_seen[0] - 1e-4:
+            return kl_part, {"refusal_proxy": 1.0, "refusal_complete": False, "kl": round(kl, 4)}
+
         with controller.active():
             if cfg.opt_objective == "generation":
-                proxy = refusal_rate(bundle, eval_harmful, cfg.opt_gen_tokens, cfg.batch_size)
+                proxy, complete = refusal_rate_bounded(
+                    bundle, eval_harmful, cfg.opt_gen_tokens, cfg.batch_size,
+                    should_stop=lambda floor, _seen, _total: (
+                        _refusal_loss(floor, cfg) + kl_part >= best_seen[0] - 1e-4
+                    ),
+                )
             else:
-                # margin proxy
                 margin = refusal_logit_margin(bundle, eval_harmful, cfg.batch_size)
                 proxy = 1.0 / (1.0 + math.exp(-margin))
-        kl = kl_harmless(bundle, controller, eval_harmless, cfg.batch_size, positions=cfg.kl_positions)
+                complete = True
         cap_lp = base_cap
         cap_drift = 0.0
         if base_cap is not None:
             with controller.active():
                 cap_lp = _target_logprob(bundle, cap_samples, cfg.batch_size)
             cap_drift = max(0.0, base_cap - cap_lp)
-        value = _refusal_loss(proxy, cfg) + _kl_loss(kl, cfg) + cfg.opt_capability_weight * cap_drift
+        value = _refusal_loss(proxy, cfg) + kl_part + cfg.opt_capability_weight * cap_drift
+        if value < best_seen[0]:
+            best_seen[0] = value
         attrs = {
             "refusal_proxy": round(proxy, 4),
+            "refusal_complete": complete,
             "kl": round(kl, 4),
         }
         if base_cap is not None:
