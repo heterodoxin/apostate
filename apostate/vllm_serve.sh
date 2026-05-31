@@ -11,5 +11,19 @@ export PATH="$HOME/.local/bin:$PATH"
 V="$HOME/.apostate-vllm"
 [ -x "$V/bin/python" ] || uv venv --python 3.12 "$V"
 "$V/bin/python" -c 'import vllm' 2>/dev/null || uv pip install -q --python "$V/bin/python" vllm
+
+# /mnt (9p) can't be mmap'd by safetensors -> copy to ext4 once
+case "$MODEL" in
+  /mnt/*)
+    DEST="$HOME/.apostate-models/$(basename "$MODEL")"
+    if [ ! -d "$DEST" ]; then
+      echo "copying model to WSL filesystem (one-time, large) ..."
+      mkdir -p "$HOME/.apostate-models"
+      cp -r "$MODEL" "$DEST.partial" && mv "$DEST.partial" "$DEST"
+    fi
+    MODEL="$DEST"
+    ;;
+esac
+
 exec "$V/bin/python" -m vllm.entrypoints.openai.api_server \
   --model "$MODEL" --served-model-name apostate --host 0.0.0.0 --port "$PORT"
