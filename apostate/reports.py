@@ -43,6 +43,17 @@ def _benchmark_rows(benchmark: Optional[dict]) -> list[list[str]]:
     base = benchmark.get("base", {})
     cand = benchmark.get("candidate", {})
     rows: list[list[str]] = []
+    if "pass@1" not in base and "pass@1" not in cand:
+        code_suites = sorted(set((base.get("code") or {}).keys()) | set((cand.get("code") or {}).keys()))
+        for suite in code_suites:
+            bv = (base.get("code") or {}).get(suite, {}).get("pass@1")
+            cv = (cand.get("code") or {}).get(suite, {}).get("pass@1")
+            try:
+                delta = float(cv) - float(bv)
+                d = f"{delta * 100:+.1f} pts"
+            except Exception:
+                d = "n/a"
+            rows.append([f"{suite} pass@1", _pct(bv), _pct(cv), d])
     for key, label, fmt in (
         ("refusal_rate", "Refusal", _pct),
         ("complied_rate", "Complied", _pct),
