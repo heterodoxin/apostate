@@ -32,12 +32,8 @@ def quant_kwargs(mode: str, tokenizer=None, calib=None) -> dict:
         ds = calib or ["The quick brown fox jumps over the lazy dog."] * 128
         kw = dict(bits=4, dataset=ds, tokenizer=tokenizer)
         if mode == "marlin":
-            kw["checkpoint_format"] = "marlin"   # fast int4 kernel
-        try:
-            return {"quantization_config": GPTQConfig(**kw)}
-        except TypeError:
-            kw.pop("checkpoint_format", None)     # older transformers: marlin auto-selected
-            return {"quantization_config": GPTQConfig(**kw)}
+            kw["format"] = "marlin"   # fast int4 kernel
+        return {"quantization_config": GPTQConfig(**kw)}
 
     if mode == "awq":
         return {}   # awq dir carries its own config

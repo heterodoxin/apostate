@@ -7,24 +7,24 @@ Decensor instruction-tuned LLMs by ablating the refusal direction from the resid
 Qwen2.5-7B-Instruct, 4-bit, single RTX-class GPU:
 
 | metric | base | apostate |
-|---|---|---|
+|--------|------|----------|
 | refusal rate | 95% | 5% |
 | harmless KL (nats) | 0 | 0.16 |
-| wall time | — | 749s |
-| disk overhead | — | 0 (in-place) |
+| wall time | N/A | 749s |
+| disk overhead | N/A | 0 (in-place) |
 
-Refusal is graded by a dedicated classifier (`protectai/distilroberta-base-rejection-v1`), not keyword matching — it counts soft refusals and deflections, not just "I can't help." Numbers are from a disjoint test split never seen during the search: hyperparameters tune on a validation half, refusal/KL are reported on the held-out test half. Eval prompts come from JailbreakBench + harmful_behaviors test (refusal) and harmless_alpaca test (KL). 12-trial TPE search, 28 layers, rank-1 subspace.
+Refusal is graded by a classifier (`protectai/distilroberta-base-rejection-v1`) instead of keyword matching. It counts soft refusals and deflections, not just "I can't help." Numbers come from a disjoint test split held out during the search: hyperparameters are tuned on a validation half, refusal and KL are reported on the test half. Eval prompts are from JailbreakBench + harmful_behaviors test (for refusal) and harmless_alpaca test (for KL). Uses a 12-trial TPE search over 28 layers with a rank-1 subspace.
 
 ## How it works
 
-1. **subspace** — rank-1 mean-difference of harmful vs harmless residuals
-2. **causal targeting** — per-layer ablation strength scored by single-layer patching
-3. **preservation** — Gram-Schmidt protected directions out of the edit
-4. **guard** — re-checks residual leakage, re-ablates where it reappears
-5. **refine** — escalates strength to drive refusal to target within a KL budget
-6. **bake** — folds the projection into fp16/bf16 weights, saves a standalone model
+- Subspace: rank-1 mean difference of harmful vs harmless residuals.
+- Causal targeting: per-layer ablation strength scored by single-layer patching.
+- Preservation: Gram-Schmidt protected directions out of the edit.
+- Guard: rechecks residual leakage, re-ablates where it reappears.
+- Refine: escalates strength to drive refusal to target within a KL budget.
+- Bake: folds the projection into fp16/bf16 weights, saves a standalone model.
 
-TPE search co-minimizes refusal and harmless KL. Edits are runtime hooks during the search, so every trial is a few forward passes with no reloads.
+TPE search minimizes both refusal and harmless KL. Edits are runtime hooks during the search, so every trial is a few forward passes with no reloads.
 
 ## Install
 
@@ -42,7 +42,7 @@ apostate test  --model qwen-apostate --base Qwen/Qwen2.5-7B-Instruct
 apostate talk  --model qwen-apostate --quant nf4
 ```
 
-`talk --quant` picks the inference path: `bf16`/`fp16` (no quant, fastest if VRAM fits), `nf4`/`fp4`/`int8` (bitsandbytes, instant load), `gptq`/`marlin` (int4 Marlin kernel — fastest 4-bit on Ampere+, needs `pip install gptqmodel optimum` and quantizes on first load), `awq` (load a pre-quantized AWQ checkpoint).
+`talk --quant` picks the inference path: `bf16`/`fp16` (no quant, fastest if VRAM fits), `nf4`/`fp4`/`int8` (bitsandbytes, instant load), `gptq`/`marlin` (int4 Marlin kernel, fastest 4-bit on Ampere+, needs `pip install gptqmodel optimum` and quantizes on first load), `awq` (load a pre-quantized AWQ checkpoint).
 
 ## Data
 

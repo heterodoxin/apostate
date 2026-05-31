@@ -3,13 +3,55 @@
 from __future__ import annotations
 
 import argparse
+import os
+import sys
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, TextStreamer
 
 from .quant import quant_kwargs, MODES
 
+_ACCEL_QUANTS = {"nf4", "fp4", "int8", "gptq", "marlin"}
+
+
+def _accelerator_device() -> str | None:
+    if torch.cuda.is_available():
+        return "cuda"
+    xpu = getattr(torch, "xpu", None)
+    if xpu is not None and xpu.is_available():
+        return "xpu"
+    mps = getattr(torch.backends, "mps", None)
+    if mps is not None and mps.is_available():
+        return "mps"
+    return None
+
+
+def _force_utf8_stdio():
+    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
+def _device_map(device: str | None) -> dict:
+    if device == "cuda":
+        return {"": 0}
+    if device:
+        return {"": device}
+    return {"": "cpu"}
+
+
+def _load_model(model_id: str, quant: str, tok, device: str | None):
+    kw = quant_kwargs(quant, tokenizer=tok)
+    return AutoModelForCausalLM.from_pretrained(
+        model_id, device_map=_device_map(device), low_cpu_mem_usage=True,
+        trust_remote_code=True, **kw)
+
 
 def main(argv=None):
+    _force_utf8_stdio()
+
     ap = argparse.ArgumentParser(prog="apostate.chat")
     ap.add_argument("--model", required=True)
     ap.add_argument("--max-new-tokens", type=int, default=256)
@@ -25,23 +67,28 @@ def main(argv=None):
     tok = AutoTokenizer.from_pretrained(a.model, trust_remote_code=True)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
+    device = _accelerator_device()
+    load_quant = a.quant
+    if device is None and load_quant in _ACCEL_QUANTS:
+        print(f"  {load_quant} needs an accelerator; falling back to bf16 on CPU.", flush=True)
+        load_quant = "bf16"
     try:
-        kw = quant_kwargs(a.quant, tokenizer=tok)
+        quant_kwargs(load_quant, tokenizer=tok)
     except RuntimeError as e:
-        print(f"{a.quant} backend unavailable: {e}\n  pip install gptqmodel optimum", flush=True)
+        print(f"{load_quant} backend unavailable: {e}\n  pip install gptqmodel optimum", flush=True)
         return
-    if a.quant in ("gptq", "marlin"):
+    if load_quant in ("gptq", "marlin"):
         print("  quantizing on first load (slow) ...", flush=True)
     try:
-        model = AutoModelForCausalLM.from_pretrained(
-            a.model, device_map={"": 0}, trust_remote_code=True, **kw)
+        model = _load_model(a.model, load_quant, tok, device)
     except Exception as e:
-        print(f"{a.quant} load failed: {str(e)[:160]}\n  falling back to nf4. "
+        fallback = "nf4" if device is not None and load_quant != "nf4" else "bf16"
+        print(f"{load_quant} load failed: {str(e)[:160]}\n  falling back to {fallback}. "
               f"(gptq/marlin need a transformers version gptqmodel supports)", flush=True)
-        from .quant import quant_kwargs as _qk
-        model = AutoModelForCausalLM.from_pretrained(
-            a.model, device_map={"": 0}, trust_remote_code=True, **_qk("nf4"))
+        load_quant = fallback
+        model = _load_model(a.model, fallback, tok, device)
     model.eval()
+    print(f"loaded on {next(model.parameters()).device} ({load_quant})", flush=True)
 
     think = a.think
     messages = []
@@ -70,7 +117,7 @@ def main(argv=None):
             prompt = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=think)
         except TypeError:
             prompt = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        enc = tok(prompt, return_tensors="pt").to(model.device)
+        enc = tok(prompt, return_tensors="pt").to(next(model.parameters()).device)
         streamer = TextStreamer(tok, skip_prompt=True, skip_special_tokens=True)
         print("\033[35mmodel>\033[0m ", end="", flush=True)
         with torch.no_grad():
