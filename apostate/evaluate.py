@@ -63,7 +63,7 @@ def _encoded_batches(bundle, instructions, batch_size, device):
     if cache is None:
         cache = {}
         setattr(bundle, "_enc_cache", cache)
-    key = (tuple(instructions), batch_size)
+    key = (tuple(instructions), batch_size, str(device))
     if key not in cache:
         prompts = format_chat(bundle.tokenizer, instructions)
         batches = []
@@ -75,7 +75,7 @@ def _encoded_batches(bundle, instructions, batch_size, device):
     return cache[key]
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def refusal_logit_margin(
     bundle: ModelBundle,
     instructions: List[str],
@@ -97,17 +97,13 @@ def refusal_logit_margin(
     return float(torch.cat(margins).mean().item())
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def generate(bundle: ModelBundle, instructions: List[str], max_new_tokens: int, batch_size: int) -> List[str]:
     tok = bundle.tokenizer
     model = bundle.model
     device = next(model.parameters()).device
-    prompts = format_chat(tok, instructions)
     outs: List[str] = []
-    for i in range(0, len(prompts), batch_size):
-        batch = prompts[i : i + batch_size]
-        enc = tok(batch, return_tensors="pt", padding=True, add_special_tokens=False)
-        enc = {k: v.to(device) for k, v in enc.items()}
+    for enc in _encoded_batches(bundle, instructions, batch_size, device):
         gen = model.generate(
             **enc, max_new_tokens=max_new_tokens, do_sample=False,
             pad_token_id=tok.pad_token_id,
@@ -130,6 +126,8 @@ def is_refusal(text: str) -> bool:
 
 _CLF = "protectai/distilroberta-base-rejection-v1"
 _GRADER: dict = {}
+_JUDGE_CACHE: dict = {}
+_JUDGE_CACHE_MAX = 8192
 
 
 def _grader(device):
@@ -156,25 +154,45 @@ def _degenerate(t: str) -> bool:
     return False
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def judge_refusal(bundle: ModelBundle, responses: List[str], batch_size: int = 16) -> List[bool]:
     """ml judge"""
     device = next(bundle.model.parameters()).device
+    flags: List[Optional[bool]] = [None] * len(responses)
+    pending = []
+    for idx, response in enumerate(responses):
+        key = (str(device), response)
+        cached = _JUDGE_CACHE.get(key)
+        if cached is not None:
+            flags[idx] = cached
+            continue
+        if _degenerate(response):
+            flags[idx] = True
+            if len(_JUDGE_CACHE) < _JUDGE_CACHE_MAX:
+                _JUDGE_CACHE[key] = True
+            continue
+        pending.append((idx, response, key))
+
+    if not pending:
+        return [bool(f) for f in flags]
+
     tok, mdl, rej = _grader(device)
-    flags: List[bool] = []
-    for i in range(0, len(responses), batch_size):
-        chunk = responses[i : i + batch_size]
-        deg = [_degenerate(r) for r in chunk]
-        batch = [(r.strip() or "x") for r in chunk]
+    for i in range(0, len(pending), batch_size):
+        chunk = pending[i : i + batch_size]
+        batch = [(r.strip() or "x") for _, r, _ in chunk]
         enc = tok(batch, return_tensors="pt", padding=True, truncation=True, max_length=512)
         enc = {k: v.to(device) for k, v in enc.items()}
         pred = mdl(**enc).logits.argmax(-1)
         rej_flags = (pred == rej).tolist()
-        flags.extend([d or f for d, f in zip(deg, rej_flags)])   # bad output
-    return flags
+        for (idx, _response, key), flag in zip(chunk, rej_flags):
+            val = bool(flag)
+            flags[idx] = val
+            if len(_JUDGE_CACHE) < _JUDGE_CACHE_MAX:
+                _JUDGE_CACHE[key] = val
+    return [bool(f) for f in flags]
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def refusal_rate(bundle: ModelBundle, instructions: List[str], max_new_tokens: int, batch_size: int) -> float:
     completions = generate(bundle, instructions, max_new_tokens, batch_size)
     if not completions:
@@ -187,7 +205,7 @@ def refusal_rate(bundle: ModelBundle, instructions: List[str], max_new_tokens: i
         return sum(is_refusal(c) for c in completions) / len(completions)
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def kl_harmless(
     bundle: ModelBundle,
     controller: ProjectionController,
