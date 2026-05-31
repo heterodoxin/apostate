@@ -45,6 +45,14 @@ def _hidden_state_collect(model, batches, num_layers):
     return torch.stack([torch.cat(chunks, dim=0) for chunks in per_layer], dim=0)
 
 
+def _hidden_state_collect_layer(model, batches, layer_idx):
+    chunks: List[torch.Tensor] = []
+    for enc in batches:
+        out = model(**enc, output_hidden_states=True, use_cache=False)
+        chunks.append(out.hidden_states[layer_idx + 1][:, -1, :].detach().float().cpu())
+    return torch.cat(chunks, dim=0)
+
+
 @torch.inference_mode()
 def collect_activations(
     bundle: ModelBundle,
@@ -81,3 +89,35 @@ def collect_activations(
         return _hidden_state_collect(model, batches, bundle.num_layers)
 
     return torch.stack([torch.cat(chunks, dim=0) for chunks in per_layer], dim=0)
+
+
+@torch.inference_mode()
+def collect_layer_activations(
+    bundle: ModelBundle,
+    instructions: List[str],
+    layer_idx: int,
+    batch_size: int = 16,
+    preformatted: bool = False,
+) -> torch.Tensor:
+    """collect layer"""
+    tok = bundle.tokenizer
+    model = bundle.model
+    device = next(model.parameters()).device
+    prompts = instructions if preformatted else format_chat(tok, instructions)
+    batches = _prompt_batches(bundle, tok, prompts, batch_size, device)
+    chunks: List[torch.Tensor] = []
+
+    def hook(_mod, _inp, out):
+        t = _out_tensor(out)
+        chunks.append(t[:, -1, :].detach().float().cpu())
+
+    handle = bundle.layers()[layer_idx].register_forward_hook(hook)
+    try:
+        for enc in batches:
+            model(**enc, use_cache=False)
+    finally:
+        handle.remove()
+
+    if not chunks:
+        return _hidden_state_collect_layer(model, batches, layer_idx)
+    return torch.cat(chunks, dim=0)

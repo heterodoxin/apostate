@@ -16,6 +16,7 @@ bench/
 *.bin
 
 # run artifacts
+runs/
 *.log
 dbg.log
 diag_run.log

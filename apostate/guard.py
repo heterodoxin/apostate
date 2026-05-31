@@ -7,7 +7,7 @@ import torch
 
 from .model import ModelBundle
 from .projectors import ProjectionController
-from .activations import collect_activations
+from .activations import collect_layer_activations
 from .directions import refusal_subspace, gram_schmidt_remove, augment_subspace, separation
 from .evaluate import refusal_rate, kl_harmless
 
@@ -30,11 +30,11 @@ def run_guard(
 
     for it in range(cfg.guard_max_iters):
         with controller.active():
-            ah = collect_activations(bundle, harmful, cfg.batch_size)
-            al = collect_activations(bundle, harmless, cfg.batch_size)
+            ah = collect_layer_activations(bundle, harmful, direction_layer, cfg.batch_size)
+            al = collect_layer_activations(bundle, harmless, direction_layer, cfg.batch_size)
             ref = refusal_rate(bundle, eval_harmful, cfg.opt_gen_tokens, cfg.batch_size)
         kl = kl_harmless(bundle, controller, eval_harmless, cfg.batch_size, positions=cfg.kl_positions)
-        sep = separation(ah[direction_layer], al[direction_layer])
+        sep = separation(ah, al)
         ratio = sep / (initial_sep + 1e-8)
         rank = 0 if controller.R is None else controller.R.shape[1]
         history.append({
@@ -51,7 +51,7 @@ def run_guard(
         prev_alpha = dict(controller.alpha)
 
         new_basis, _ = refusal_subspace(
-            ah[direction_layer], al[direction_layer],
+            ah, al,
             rank=cfg.refusal_rank, variance_threshold=cfg.variance_threshold,
             max_rank=cfg.max_rank, seed=cfg.seed,
         )

@@ -41,7 +41,7 @@ def run_search(objective: Objective, space: Space, n_trials: int, seed: int = 0,
                 elif kind == "cat":
                     params[name] = trial.suggest_categorical(name, spec[1])
 
-            print(f"\n[Trial {len(history) + 1}/{actual_trials}]")
+            print(f"\n[Trial {len(history) + 1}/{n_trials}]")
             print(f"  Parameters: {params}")
 
             value, attrs = objective(params)
