@@ -1,107 +1,95 @@
 # Apostate
 
-## Reference Run
+Apostate edits instruction-tuned causal language models by finding a residual-stream direction associated with refusals and folding a projection against that direction into the model weights. The ablation pass does not finetune the model, does not add a second model, and writes a standalone Transformers checkpoint at the end.
 
-| field | value |
-|---|---:|
-| base model | Qwen2.5-7B-Instruct |
-| load mode | 4-bit nf4 |
-| gpu class | consumer |
-| trials | 12 |
-| layers | 28 |
-| refusal rank | 1 |
-| fit harmful prompts | 600 |
-| fit harmless prompts | 600 |
-| eval split | validation/test |
+The edit targets modules that write back into the residual stream: token embeddings, attention output projections, MLP down projections, and MoE expert down projections. Dense and MoE models use the same controller path; MoE layers apply the edit to every expert down projection plus shared experts when present.
 
-## Function
+## Reference Result
 
-| component | behavior |
-|---|---|
-| edit type | low-rank residual projection |
-| target signal | harmful minus harmless activation mean |
-| edited modules | token embedding, attention output projections, mlp down projections |
-| moe handling | every expert down projection plus shared experts |
-| training | none |
-| generation model | single edited model |
-| bake output | standalone transformers checkpoint |
-
-## Mechanism
-
-| step | operation | measured output |
-|---|---|---|
-| activation collection | run harmful and harmless prompts through the base model | residual activations per layer |
-| refusal direction | compute rank-k harmful-minus-harmless basis | refusal subspace |
-| preservation | remove benign principal directions from the refusal basis | protected subspace rank |
-| causal scoring | ablate one layer at a time and score refusal drop | per-layer alpha prior |
-| profile search | tune layer band, strength, direction layer, embed scale | refusal, kl, capability drift |
-| guard | remeasure reconstruction leakage and add corrective directions | guard history |
-| deescalation | scale down passing edits until refusal reaches slack boundary | lower validation kl |
-| layer trim | zero or shrink high-kl layers if refusal remains under target | lower validation kl |
-| bake | fold projection matrices into residual writer weights | checkpoint files |
-
-## Objective
-
-| term | source | direction |
-|---|---|---|
-| refusal | classifier-judged generations on harmful validation prompts | minimize |
-| harmless kl | token distribution shift on harmless prompts | minimize |
-| kl target loss | penalty above `kl_target` | minimize |
-| kl budget loss | penalty above `max_kl` | reject/penalize |
-| capability drift | canonical-answer logprob drop on small code/math set | minimize |
-
-## KL Measurement
-
-| field | value |
-|---|---|
-| base distribution | original model logits |
-| edited distribution | hooked or baked edited model logits |
-| prompt class | harmless validation/test prompts |
-| token window | last `kl_positions` tokens |
-| unit | nats |
-| cache | base harmless logits cached per prompt/window |
-
-## Metrics
+Qwen2.5-7B-Instruct, 4-bit NF4 load, 12 optimization trials, 600 harmful fit prompts, 600 harmless fit prompts, held-out validation/test split:
 
 | metric | base | edited | delta |
 |---|---:|---:|---:|
 | refusal rate | 95.0% | 5.0% | -90.0 pts |
-| harmless kl nats | 0.000 | 0.160 | +0.160 |
+| harmless KL nats | 0.000 | 0.160 | +0.160 |
 | wall time | n/a | 749s | n/a |
 | disk overhead | n/a | 0 | n/a |
 
-## KL Controls
+## How It Works
 
-| parameter | value |
-|---|---:|
-| profile | balanced |
-| max_kl | 0.18 |
-| kl_target | 0.08 |
-| kl_weight | 2.5 |
-| kl_target_weight | 8.0 |
-| kl_quad_weight | 10.0 |
-| kl_over_budget_weight | 24.0 |
-| kl_positions | 32 |
-| preserve_rank | 8 |
-| preserve_source | harmless activations |
-| causal_floor | 0.10 |
-| refine_deescalate | true |
-| refine_kl_steps | 8 |
-| refine_kl_layer_steps | 8 |
-| refine_kl_layer_candidates | 6 |
-| refine_refusal_slack | 0.015 |
-| opt_capability | true |
-| opt_capability_weight | 1.0 |
-| opt_capability_code_n | 4 |
-| opt_capability_math_n | 4 |
-| search strength range | 0.08-1.15 |
-| search band width | 0.08-0.65 |
-| search causal power | 1.0-3.0 |
-| search embed scale | 0.0-0.35 |
+Apostate first runs harmful and harmless prompts through the base model and records residual activations by layer. It computes a low-rank basis from the harmful-minus-harmless activation mean. That basis is treated as the refusal subspace.
 
-## Benchmarks
+Before applying the edit, Apostate removes benign preservation directions from the refusal basis. By default those preservation directions come from harmless activations. If `--preserve-path` is supplied, the custom preserve prompt set replaces the default harmless source.
 
-| suite | metrics |
+Layer strength is not uniform unless causal targeting is disabled. Apostate measures how much each layer changes refusal behavior under a temporary single-layer ablation, then uses that as the per-layer alpha prior. The optimizer searches over direction layer, rank, layer band, strength, causal mix, causal sharpness, and embedding strength.
+
+After search, the reconstruction guard remeasures refusal leakage and can add corrective directions. Balanced mode then tries to claw back KL: first with global alpha scaling, then by trimming layers that contribute high harmless KL while refusal remains under the target.
+
+The final bake step folds the projection into the model's residual writer weights. The saved checkpoint loads normally through Transformers without runtime hooks.
+
+## Optimization Target
+
+The search objective combines four measured costs:
+
+- classifier-judged refusal rate on harmful validation prompts
+- harmless-token KL against the original model
+- extra penalty above `kl_target`
+- capability drift from canonical-answer logprob on small code/math samples
+
+Balanced defaults use `kl_target=0.08`, `max_kl=0.18`, `preserve_rank=8`, `refine_deescalate=true`, `refine_kl_steps=8`, and `refine_kl_layer_steps=8`. The hard budget is still `max_kl`; the lower target exists so the search does not treat 0.18 as the desired landing zone.
+
+KL is measured on harmless prompts by comparing original model logits to edited model logits over the final `kl_positions` tokens. The unit is nats. Base harmless logits are cached per prompt/window so repeated scoring does not recompute the unedited side.
+
+## Install
+
+```bash
+apostate setup
+```
+
+The setup wizard installs Node dependencies, Python dependencies, and checks GPU visibility. On NVIDIA systems it installs CUDA Torch from the PyTorch `cu128` wheel index instead of letting PyPI pick a CPU-only build.
+
+Manual install:
+
+```bash
+npm install
+python -m pip install --index-url https://download.pytorch.org/whl/cu128 torch torchvision torchaudio
+python -m pip install transformers datasets safetensors optuna bitsandbytes
+```
+
+## Ablate
+
+```bash
+apostate ablate --model Qwen/Qwen2.5-7B-Instruct --out qwen-apostate
+```
+
+Use `--resume` to reuse activation cache files after a failed or interrupted run:
+
+```bash
+apostate ablate --model Qwen/Qwen2.5-7B-Instruct --out qwen-apostate --resume
+```
+
+Main output files:
+
+- `report.json`: raw run metrics
+- `report.md`: readable run report with params, alphas, guard history, and benchmark deltas
+- `apostate_config.json`: full resolved config
+- `README.md`: model card for the edited checkpoint
+- `activation_cache/*.pt`: cached activations for `--resume`
+
+## Benchmark
+
+Benchmarks compare an edited model against its base model. Refusal scoring uses `protectai/distilroberta-base-rejection-v1` by default. Keyword scoring is still available with `--judge keyword`, but classifier judging is the public default.
+
+```bash
+apostate test --model qwen-apostate --base Qwen/Qwen2.5-7B-Instruct --suite humaneval
+apostate test --model qwen-apostate --base Qwen/Qwen2.5-7B-Instruct --suite gsm8k
+apostate test --model qwen-apostate --base Qwen/Qwen2.5-7B-Instruct --suite humaneval,gsm8k,refusal
+apostate test --model qwen-apostate --base Qwen/Qwen2.5-7B-Instruct --suite all
+```
+
+The TUI benchmark screen is a multi-select list. Space toggles a suite, Enter runs the selected set.
+
+| suite | measured fields |
 |---|---|
 | humaneval | refusal, pass@1, gsm8k, kl |
 | mbpp | refusal, pass@1, gsm8k, kl |
@@ -109,71 +97,40 @@
 | refusal | refusal, compliance, category refusal, kl |
 | all | humaneval, mbpp, gsm8k, refusal |
 
-| judge | default |
-|---|---|
-| refusal classifier | protectai/distilroberta-base-rejection-v1 |
-| keyword mode | `--judge keyword` |
+Benchmark output is written to `benchcode.json` and `benchcode.md`. If the candidate directory contains an Apostate `report.json`, the benchmark result is also merged into the candidate report and model card.
 
-## Commands
+## Chat
 
 ```bash
-apostate setup
-apostate
-apostate ablate --model Qwen/Qwen2.5-7B-Instruct --out qwen-apostate
-apostate ablate --model Qwen/Qwen2.5-7B-Instruct --out qwen-apostate --resume
-apostate test --model qwen-apostate --base Qwen/Qwen2.5-7B-Instruct --suite humaneval
-apostate test --model qwen-apostate --base Qwen/Qwen2.5-7B-Instruct --suite gsm8k
-apostate test --model qwen-apostate --base Qwen/Qwen2.5-7B-Instruct --suite humaneval,gsm8k,refusal
-apostate test --model qwen-apostate --base Qwen/Qwen2.5-7B-Instruct --suite all
 apostate talk --model qwen-apostate --quant nf4
 apostate talk --model qwen-apostate --backend vllm --kv-cache-dtype turboquant_4bit_nc
 ```
 
-## Quantization
+`--quant` controls local weight loading: `auto`, `bf16`, `fp16`, `nf4`, `fp4`, `int8`, `gptq`, `marlin`, or `awq`.
 
-| path | flag | values |
-|---|---|---|
-| local weights | `--quant` | auto, bf16, fp16, nf4, fp4, int8, gptq, marlin, awq |
-| vllm kv cache | `--kv-cache-dtype` | auto, fp8, turboquant_k8v4, turboquant_4bit_nc, turboquant_k3v4_nc, turboquant_3bit_nc |
-| windows vllm | `--shutdown-wsl` | true |
-| keep wsl | `APOSTATE_KEEP_WSL` | 1 |
+`--kv-cache-dtype` is only for vLLM KV cache dtype. TurboQuant belongs there, not in weight quantization. Supported KV cache values include `auto`, `fp8`, `turboquant_k8v4`, `turboquant_4bit_nc`, `turboquant_k3v4_nc`, and `turboquant_3bit_nc`.
 
-## Outputs
-
-| file | contents |
-|---|---|
-| report.json | run metrics |
-| report.md | tables, params, alphas, deltas |
-| apostate_config.json | full config |
-| README.md | model card |
-| benchcode.json | benchmark metrics |
-| benchcode.md | benchmark table |
-| activation_cache/*.pt | cached activations |
+On Windows, vLLM runs through WSL. By default Apostate stops the WSL vLLM server when the chat session exits. Set `APOSTATE_KEEP_WSL=1` or pass `--no-shutdown-wsl` to keep it alive.
 
 ## Data
 
-| split | source |
-|---|---|
-| harmful fit | mlabonne/harmful_behaviors train, data/harmful.txt |
-| harmless fit | mlabonne/harmless_alpaca train, data/harmless.txt |
-| harmful eval | mlabonne/harmful_behaviors test, JailbreakBench/JBB-Behaviors |
-| harmless eval | mlabonne/harmless_alpaca test |
-| custom format | repo:split:col |
-| custom config | repo@config:split:col |
-| multi source | source_a\|source_b |
+Default fit data combines `mlabonne/harmful_behaviors` train prompts, `mlabonne/harmless_alpaca` train prompts, and bundled local prompt files under `data/`. Held-out eval uses `mlabonne/harmful_behaviors` test, JailbreakBench behaviors, and `mlabonne/harmless_alpaca` test.
 
-## Architecture Coverage
+Custom data specs use `repo:split:col`, `repo@config:split:col`, or several sources joined with `|`. Local text files are accepted as sources.
 
-| family | status |
-|---|---|
-| llama 2/3 | dense |
-| qwen2/2.5/3 | dense, moe |
-| mistral | dense |
-| mixtral | moe |
-| deepseek | dense, moe |
-| gemma/gemma2 | dense |
-| phi-3 | dense |
-| gpt-neox/pythia | dense |
+Examples:
+
+```text
+mlabonne/harmful_behaviors:test:text
+JailbreakBench/JBB-Behaviors@behaviors:harmful:Goal
+data/custom_harmful.txt|my_org/my_dataset:train:prompt
+```
+
+## Model Coverage
+
+Supported families are detected from module layout, not from hardcoded model names. Current coverage includes Llama 2/3, Qwen2/2.5/3, Mistral, Mixtral, DeepSeek, Gemma/Gemma2, Phi-3, GPT-NeoX, and Pythia. Dense and MoE decoder stacks are supported when the residual writer modules can be located.
+
+Architectures with nonstandard residual writers may need adapter support before the bake step is correct. State-space models without attention/MLP residual writers are outside the current edit path.
 
 ## Requirements
 
@@ -182,5 +139,5 @@ apostate talk --model qwen-apostate --backend vllm --kv-cache-dtype turboquant_4
 | python | 3.10 |
 | node | 18 |
 | cuda | enabled |
-| vram 7b | 16gb |
-| packages | torch/cu128, torchvision/cu128, torchaudio/cu128, transformers, datasets, safetensors, optuna, bitsandbytes |
+| vram for 7b | 16gb |
+| core packages | torch/cu128, torchvision/cu128, torchaudio/cu128, transformers, datasets, safetensors, optuna, bitsandbytes |
