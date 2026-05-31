@@ -60,6 +60,7 @@ class ApostateConfig:
     refine_kl_layer_candidates: int = 8        # trim width
     repair_steps: int = 10                     # repair iters
     repair_candidates: int = 10                # repair width
+    repair_rerank_k: int = 4                   # repair rerank
     repair_eval_n: int = 48                    # repair harmful
     repair_kl_n: int = 64                      # repair harmless
     refine_refusal_slack: float = 0.01         # target slack

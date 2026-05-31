@@ -81,29 +81,66 @@ def _capability_samples(cfg) -> List[Tuple[str, str]]:
     return samples
 
 
-@torch.no_grad()
-def _target_logprob(bundle: ModelBundle, samples: List[Tuple[str, str]]) -> float:
-    if not samples:
-        return 0.0
+def _capability_batches(bundle: ModelBundle, samples: List[Tuple[str, str]], batch_size: int):
     tok = bundle.tokenizer
     model = bundle.model
     device = next(model.parameters()).device
-    vals: List[float] = []
+    cache = getattr(bundle, "_cap_cache", None)
+    if cache is None:
+        cache = {}
+        setattr(bundle, "_cap_cache", cache)
+    key = (tuple(samples), batch_size, str(device))
+    if key in cache:
+        return cache[key]
+
+    pad = tok.pad_token_id
+    if pad is None:
+        pad = tok.eos_token_id or 0
+    rows = []
     for prompt, target in samples:
         prompt_text = format_chat(tok, [prompt])[0]
         prompt_ids = tok(prompt_text, add_special_tokens=False).input_ids
         target_ids = tok(target, add_special_tokens=False).input_ids
         if not prompt_ids or not target_ids:
             continue
-        ids = torch.tensor([prompt_ids + target_ids], device=device)
-        logits = model(ids, use_cache=False).logits[:, :-1, :].float()
-        labels = ids[:, 1:]
+        ids = prompt_ids + target_ids
+        start = max(0, len(prompt_ids) - 1)
+        end = start + len(target_ids)
+        rows.append((ids, start, end))
+
+    batches = []
+    for i in range(0, len(rows), batch_size):
+        chunk = rows[i : i + batch_size]
+        max_len = max(len(ids) for ids, _start, _end in chunk)
+        input_ids = torch.full((len(chunk), max_len), pad, dtype=torch.long, device=device)
+        mask = torch.zeros((len(chunk), max_len), dtype=torch.long, device=device)
+        target = torch.zeros((len(chunk), max_len - 1), dtype=torch.bool, device=device)
+        for row, (ids, start, end) in enumerate(chunk):
+            n = len(ids)
+            input_ids[row, :n] = torch.tensor(ids, dtype=torch.long, device=device)
+            mask[row, :n] = 1
+            target[row, start:end] = True
+        batches.append((input_ids, mask, target))
+
+    cache[key] = batches
+    return batches
+
+
+@torch.inference_mode()
+def _target_logprob(bundle: ModelBundle, samples: List[Tuple[str, str]], batch_size: int = 8) -> float:
+    if not samples:
+        return 0.0
+    model = bundle.model
+    vals: List[float] = []
+    for input_ids, mask, target_mask in _capability_batches(bundle, samples, batch_size):
+        logits = model(input_ids=input_ids, attention_mask=mask, use_cache=False).logits[:, :-1, :].float()
+        labels = input_ids[:, 1:]
         logp = torch.log_softmax(logits, dim=-1)
         tok_logp = logp.gather(-1, labels.unsqueeze(-1)).squeeze(-1)
-        start = max(0, len(prompt_ids) - 1)
-        sol_logp = tok_logp[:, start:start + len(target_ids)]
-        if sol_logp.numel():
-            vals.append(float(sol_logp.mean().item()))
+        for row in range(input_ids.shape[0]):
+            sol_logp = tok_logp[row][target_mask[row]]
+            if sol_logp.numel():
+                vals.append(float(sol_logp.mean().item()))
     return sum(vals) / max(1, len(vals))
 
 
@@ -166,7 +203,7 @@ def optimize_profile(
     base_cap = None
     if cap_samples:
         with controller.bypassed():
-            base_cap = _target_logprob(bundle, cap_samples)
+            base_cap = _target_logprob(bundle, cap_samples, cfg.batch_size)
         print(f"[apostate] capability logprob baseline: {base_cap:.4f}", flush=True)
 
     space = {
@@ -195,7 +232,7 @@ def optimize_profile(
         cap_drift = 0.0
         if base_cap is not None:
             with controller.active():
-                cap_lp = _target_logprob(bundle, cap_samples)
+                cap_lp = _target_logprob(bundle, cap_samples, cfg.batch_size)
             cap_drift = max(0.0, base_cap - cap_lp)
         value = _refusal_loss(proxy, cfg) + _kl_loss(kl, cfg) + cfg.opt_capability_weight * cap_drift
         attrs = {
@@ -223,7 +260,7 @@ def optimize_profile(
             _apply_profile(bundle, controller, ah, al, h["params"], causal_shape, cfg, preserve_basis, preserve_lookup)
             with controller.active():
                 ref = refusal_rate(bundle, eval_harmful, cfg.opt_gen_tokens, cfg.batch_size)
-                cap_lp = _target_logprob(bundle, cap_samples) if base_cap is not None else None
+                cap_lp = _target_logprob(bundle, cap_samples, cfg.batch_size) if base_cap is not None else None
             kl = kl_harmless(bundle, controller, eval_harmless, cfg.batch_size, positions=cfg.kl_positions)
             cap_drift = max(0.0, base_cap - cap_lp) if base_cap is not None else 0.0
             v = _refusal_loss(ref, cfg) + _kl_loss(kl, cfg) + cfg.opt_capability_weight * cap_drift

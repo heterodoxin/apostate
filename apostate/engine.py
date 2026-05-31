@@ -5,6 +5,7 @@ from __future__ import annotations
 import gc
 import hashlib
 import json
+import math
 import os
 import time
 from typing import Optional
@@ -19,7 +20,7 @@ from .directions import refusal_subspace, preservation_subspace, gram_schmidt_re
 from .projectors import ProjectionController
 from .causal import causal_layer_scores
 from .guard import run_guard
-from .evaluate import refusal_rate, kl_harmless
+from .evaluate import refusal_logit_margin, refusal_rate, kl_harmless
 from .optimize import optimize_profile
 from .search import _has_optuna
 from .bake import bake
@@ -272,6 +273,11 @@ def _repair_loss(ref: float, kl: float, cfg) -> float:
     )
 
 
+def _margin_refusal(bundle, instructions, batch_size: int) -> float:
+    margin = refusal_logit_margin(bundle, instructions, batch_size)
+    return 1.0 / (1.0 + math.exp(-margin))
+
+
 def _repair_alphas(bundle, controller, cfg, eval_harmful, eval_harmless):
     hset = eval_harmful[: max(24, cfg.repair_eval_n)]
     lset = eval_harmless[: max(48, cfg.repair_kl_n)]
@@ -293,7 +299,7 @@ def _repair_alphas(bundle, controller, cfg, eval_harmful, eval_harmless):
         if not items:
             break
 
-        accepted = None
+        cheap = []
         for item in items:
             start = _alpha_get(controller, item)
             for scale in (0.0, 0.25, 0.50, 0.75, 0.90, 1.10, 1.25, 1.45):
@@ -302,13 +308,22 @@ def _repair_alphas(bundle, controller, cfg, eval_harmful, eval_harmless):
                     continue
                 controller.alpha = dict(best_alpha)
                 _alpha_set(controller, item, value)
-                with controller.active():
-                    trial_ref = refusal_rate(bundle, hset, cfg.max_new_tokens, cfg.batch_size)
                 trial_kl = kl_harmless(bundle, controller, lset, cfg.batch_size, positions=cfg.kl_positions)
-                trial_score = _repair_loss(trial_ref, trial_kl, cfg)
-                if trial_score < best_score - 1e-4:
-                    if accepted is None or trial_score < accepted[0]:
-                        accepted = (trial_score, trial_ref, trial_kl, item, scale, dict(controller.alpha))
+                with controller.active():
+                    proxy_ref = _margin_refusal(bundle, hset, cfg.batch_size)
+                proxy_score = _repair_loss(proxy_ref, trial_kl, cfg)
+                cheap.append((proxy_score, trial_kl, item, scale, dict(controller.alpha)))
+
+        accepted = None
+        cheap.sort(key=lambda x: (x[0], x[1]))
+        for _proxy_score, trial_kl, item, scale, alpha in cheap[: cfg.repair_rerank_k]:
+            controller.alpha = dict(alpha)
+            with controller.active():
+                trial_ref = refusal_rate(bundle, hset, cfg.max_new_tokens, cfg.batch_size)
+            trial_score = _repair_loss(trial_ref, trial_kl, cfg)
+            if trial_score < best_score - 1e-4:
+                if accepted is None or trial_score < accepted[0]:
+                    accepted = (trial_score, trial_ref, trial_kl, item, scale, dict(controller.alpha))
 
         if accepted is None:
             break
