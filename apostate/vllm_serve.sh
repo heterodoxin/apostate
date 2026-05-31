@@ -14,6 +14,12 @@ V="$HOME/.apostate-vllm"
 "$V/bin/python" -c 'import vllm' 2>/dev/null || uv pip install -q --python "$V/bin/python" vllm
 "$V/bin/python" -c 'import bitsandbytes' 2>/dev/null || uv pip install -q --python "$V/bin/python" bitsandbytes
 
+# setup-only: deps installed, don't serve
+if [ -z "$MODEL" ] || [ "$MODEL" = "setup" ]; then
+  echo "vllm ready in WSL ($("$V/bin/python" -c 'import vllm;print(vllm.__version__)'))."
+  exit 0
+fi
+
 # /mnt (9p) can't be mmap'd by safetensors -> copy to ext4 once
 case "$MODEL" in
   /mnt/*)

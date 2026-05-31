@@ -27,6 +27,12 @@ function have(cmd) {
   const r = spawnSync(isWin ? "where" : "which", [cmd], { encoding: "utf8" });
   return r.status === 0;
 }
+function toWsl(p) {
+  p = p.replace(/\\/g, "/");
+  if (/^[A-Za-z]:/.test(p)) p = "/mnt/" + p[0].toLowerCase() + p.slice(2);
+  return p;
+}
+const optedYes = (a) => ["y", "yes"].includes((a || "").trim().toLowerCase());
 
 const PY_DEPS = ["torch", "transformers", "datasets", "safetensors", "optuna", "bitsandbytes"];
 
@@ -54,10 +60,28 @@ const PY_DEPS = ["torch", "transformers", "datasets", "safetensors", "optuna", "
   }
 
   // gpu check
-  console.log("\n[3/3] gpu ...");
+  console.log("\n[3/4] gpu ...");
   console.log("  " + out(PY, ["-c",
     "import torch;print('cuda', torch.cuda.is_available(),"
     + "(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'cpu-only'))"]));
+
+  // fast serving (vLLM)
+  console.log("\n[4/4] fast serving (vLLM, optional) ...");
+  const q = isWin
+    ? "  set up vLLM via WSL now? (installs uv+vLLM in WSL, several GB) [y/N] "
+    : "  install vLLM for fast serving? (several GB) [y/N] ";
+  if (optedYes(await ask(q))) {
+    if (isWin) {
+      if (spawnSync("wsl", ["-e", "echo", "ok"], { stdio: "ignore" }).status === 0) {
+        const script = toWsl(path.join(ROOT, "apostate", "vllm_serve.sh"));
+        run("wsl", ["-u", "root", "bash", script, "setup"]);
+      } else {
+        console.log("  WSL not ready. Install once (admin PowerShell): wsl --install  then reboot and re-run setup.");
+      }
+    } else {
+      run(PY, ["-m", "pip", "install", "-q", "vllm"]);
+    }
+  }
 
   console.log("\nready.");
   console.log("  apostate                      # menu");
