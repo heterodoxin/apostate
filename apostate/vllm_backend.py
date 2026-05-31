@@ -112,9 +112,11 @@ SERVER_LOG = os.path.join(tempfile.gettempdir(), "apostate_vllm.log")
 
 
 def _launch(args: list):
-    # no stdin (else the server steals the chat's keystrokes); logs to a file, not the chat
-    return subprocess.Popen(args, stdin=subprocess.DEVNULL,
-                            stdout=open(SERVER_LOG, "wb"), stderr=subprocess.STDOUT)
+    # detach from the console + no stdin, else wsl.exe grabs CONIN$ and steals the chat's keystrokes
+    kw = dict(stdin=subprocess.DEVNULL, stdout=open(SERVER_LOG, "wb"), stderr=subprocess.STDOUT)
+    if sys.platform.startswith("win"):
+        kw["creationflags"] = subprocess.CREATE_NO_WINDOW
+    return subprocess.Popen(args, **kw)
 
 
 def _serve_via_wsl(model: str, temperature: float, max_tokens: int, port: int) -> bool:
