@@ -5,6 +5,7 @@ MODEL="$1"
 PORT="$2"
 export DEBIAN_FRONTEND=noninteractive
 command -v curl >/dev/null || (apt-get update -qq && apt-get install -y -qq curl ca-certificates)
+command -v gcc  >/dev/null || (apt-get update -qq && apt-get install -y -qq build-essential)
 export PATH="$HOME/.local/bin:$PATH"
 command -v uv >/dev/null || (curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null)
 export PATH="$HOME/.local/bin:$PATH"
@@ -26,4 +27,5 @@ case "$MODEL" in
 esac
 
 exec "$V/bin/python" -m vllm.entrypoints.openai.api_server \
-  --model "$MODEL" --served-model-name apostate --host 0.0.0.0 --port "$PORT"
+  --model "$MODEL" --served-model-name apostate --host 0.0.0.0 --port "$PORT" \
+  --enforce-eager
