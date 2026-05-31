@@ -1,4 +1,4 @@
-"""vllm backend: auto setup, serve, stream."""
+"""vllm backend: auto setup, serve, stream. windows routes through wsl."""
 
 from __future__ import annotations
 
@@ -8,27 +8,42 @@ import subprocess
 import sys
 import time
 
+SERVED = "apostate"
+
 
 def _have_vllm() -> bool:
     return importlib.util.find_spec("vllm") is not None
 
 
-def ensure_vllm() -> bool:
-    """install vllm on first use (linux/wsl only)."""
-    if _have_vllm():
-        return True
-    if sys.platform.startswith("win"):
-        print("vllm runs on linux/wsl, not native windows.\n"
-              "  open WSL and: pip install vllm", flush=True)
-        return False
-    print("setting up vllm (one-time) ...", flush=True)
-    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "vllm"])
-    return _have_vllm()
+def _wsl_check():
+    """(ok, message). distinguishes missing vs broken wsl."""
+    try:
+        r = subprocess.run(["wsl", "-e", "echo", "ok"], capture_output=True, timeout=30)
+    except FileNotFoundError:
+        return False, "WSL not installed. Admin PowerShell: wsl --install   then reboot."
+    except Exception as e:
+        return False, f"WSL check failed: {e}"
+    if r.returncode == 0:
+        return True, ""
+    err = (r.stdout + r.stderr).decode("utf-16le", "replace").replace("\x00", "").strip()
+    return False, ("WSL is installed but not starting:\n  " + err[:300] +
+                   "\n  repair: wsl --unregister Ubuntu  then  wsl --install -d Ubuntu")
 
 
-def _wait_ready(base: str, proc, timeout: int = 600) -> bool:
+def _to_wsl_path(win_path: str) -> str:
+    try:
+        out = subprocess.check_output(["wsl", "wslpath", "-a", win_path], timeout=20)
+        return out.decode().strip()
+    except Exception:
+        p = win_path.replace("\\", "/")
+        if len(p) > 1 and p[1] == ":":
+            p = "/mnt/" + p[0].lower() + p[2:]
+        return p
+
+
+def _wait_ready(base: str, proc, timeout: int = 1800) -> bool:
     import requests
-    print("starting vllm server ...", flush=True)
+    print("starting vllm server (first run installs + downloads, slow) ...", flush=True)
     t0 = time.time()
     while time.time() - t0 < timeout:
         if proc.poll() is not None:
@@ -39,11 +54,11 @@ def _wait_ready(base: str, proc, timeout: int = 600) -> bool:
                 return True
         except Exception:
             pass
-        time.sleep(2)
+        time.sleep(3)
     return False
 
 
-def _repl(v1: str, model: str, temperature: float, max_tokens: int):
+def _repl(v1: str, served: str, temperature: float, max_tokens: int):
     import requests
     messages = []
     print("\nchat ready (vllm).  /reset  /exit\n", flush=True)
@@ -64,7 +79,7 @@ def _repl(v1: str, model: str, temperature: float, max_tokens: int):
         messages.append({"role": "user", "content": user})
         print("\033[35mmodel>\033[0m ", end="", flush=True)
         acc = ""
-        payload = {"model": model, "messages": messages, "temperature": temperature,
+        payload = {"model": served, "messages": messages, "temperature": temperature,
                    "max_tokens": max_tokens, "stream": True}
         try:
             with requests.post(v1 + "/chat/completions", json=payload, stream=True, timeout=600) as r:
@@ -93,19 +108,44 @@ def _repl(v1: str, model: str, temperature: float, max_tokens: int):
     print("bye.")
 
 
-def serve_and_chat(model: str, temperature: float, max_tokens: int, port: int = 8000) -> bool:
-    """ensure vllm, launch server, stream a chat. returns False if unavailable."""
-    if not ensure_vllm():
+def _launch(args: list):
+    return subprocess.Popen(args)
+
+
+def _serve_via_wsl(model: str, temperature: float, max_tokens: int, port: int) -> bool:
+    ok, msg = _wsl_check()
+    if not ok:
+        print("vllm needs WSL on Windows.\n  " + msg, flush=True)
         return False
+    wsl_model = _to_wsl_path(model)
+    inner = (f"(python3 -c 'import vllm' 2>/dev/null || pip install -q vllm) && "
+             f"python3 -m vllm.entrypoints.openai.api_server "
+             f"--model '{wsl_model}' --served-model-name {SERVED} "
+             f"--host 0.0.0.0 --port {port}")
+    print("routing vllm through WSL (auto-installs on first run) ...", flush=True)
+    proc = _launch(["wsl", "bash", "-lc", inner])
+    return _drive(proc, port, temperature, max_tokens)
+
+
+def _serve_native(model: str, temperature: float, max_tokens: int, port: int) -> bool:
+    if not _have_vllm():
+        print("setting up vllm (one-time) ...", flush=True)
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "vllm"])
+        if not _have_vllm():
+            print("vllm install failed.", flush=True)
+            return False
+    proc = _launch([sys.executable, "-m", "vllm.entrypoints.openai.api_server",
+                    "--model", model, "--served-model-name", SERVED, "--port", str(port)])
+    return _drive(proc, port, temperature, max_tokens)
+
+
+def _drive(proc, port, temperature, max_tokens) -> bool:
     base = f"http://localhost:{port}"
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "vllm.entrypoints.openai.api_server",
-         "--model", model, "--port", str(port)])
     try:
         if not _wait_ready(base, proc):
             print("vllm server did not become ready.", flush=True)
-            return True   # handled (don't fall back to a slow local load)
-        _repl(base + "/v1", model, temperature, max_tokens)
+            return True
+        _repl(base + "/v1", SERVED, temperature, max_tokens)
     finally:
         proc.terminate()
         try:
@@ -113,3 +153,10 @@ def serve_and_chat(model: str, temperature: float, max_tokens: int, port: int = 
         except Exception:
             proc.kill()
     return True
+
+
+def serve_and_chat(model: str, temperature: float, max_tokens: int, port: int = 8000) -> bool:
+    """ensure vllm, serve, stream. windows -> wsl. returns False if unavailable."""
+    if sys.platform.startswith("win"):
+        return _serve_via_wsl(model, temperature, max_tokens, port)
+    return _serve_native(model, temperature, max_tokens, port)
