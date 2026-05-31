@@ -61,6 +61,10 @@ class ApostateConfig:
     repair_steps: int = 10                     # repair iters
     repair_candidates: int = 10                # repair width
     repair_rerank_k: int = 4                   # repair rerank
+    repair_probe_candidates: int = 24          # probe cap
+    repair_probe_ref_n: int = 12               # probe harmful
+    repair_probe_kl_n: int = 16                # probe harmless
+    repair_probe_positions: int = 8            # probe kl
     repair_eval_n: int = 48                    # repair harmful
     repair_kl_n: int = 64                      # repair harmless
     refine_refusal_slack: float = 0.01         # target slack
