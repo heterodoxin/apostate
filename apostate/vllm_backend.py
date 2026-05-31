@@ -138,8 +138,10 @@ def _serve_native(model: str, temperature: float, max_tokens: int, port: int) ->
         if not _have_vllm():
             print("vllm install failed.", flush=True)
             return False
+    os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")   # avoid nvcc JIT
     proc = _launch([sys.executable, "-m", "vllm.entrypoints.openai.api_server",
-                    "--model", model, "--served-model-name", SERVED, "--port", str(port)])
+                    "--model", model, "--served-model-name", SERVED, "--port", str(port),
+                    "--enforce-eager"])
     return _drive(proc, port, temperature, max_tokens)
 
 

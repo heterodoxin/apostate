@@ -28,10 +28,20 @@ TPE search minimizes both refusal and harmless KL. Edits are runtime hooks durin
 
 ## Install
 
+One-shot wizard (autodetects OS, installs node + python deps, checks GPU):
+
+```
+apostate setup            # or: npm run setup
+```
+
+Windows: double-click `Apostate-Setup.cmd` (or build a standalone `Apostate-Setup.exe` with `npm run build-exe`). Linux/macOS: `./setup.sh`. Manual:
+
 ```
 npm install
-pip install torch transformers datasets safetensors optuna
+pip install torch transformers datasets safetensors optuna bitsandbytes
 ```
+
+Runs on Windows and Linux (the CLI autodetects the platform; vLLM serving routes through WSL on Windows, native on Linux). Dense and **MoE** architectures are autodetected and ablated (every expert's down-projection is edited).
 
 ## Use
 
