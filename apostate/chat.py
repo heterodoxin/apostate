@@ -8,7 +8,7 @@ import sys
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, TextStreamer
 
-from .quant import quant_kwargs, MODES
+from .quant import quant_kwargs, auto_quant, MODES
 
 _ACCEL_QUANTS = {"nf4", "fp4", "int8", "gptq", "marlin"}
 
@@ -72,7 +72,7 @@ def main(argv=None):
     ap.add_argument("--model", required=True)
     ap.add_argument("--max-new-tokens", type=int, default=0, help="0 = until the model stops (EOS / context)")
     ap.add_argument("--temperature", type=float, default=0.7)
-    ap.add_argument("--quant", default="nf4", choices=MODES, help="inference quant")
+    ap.add_argument("--quant", default="auto", choices=MODES, help="inference quant (auto = turboquant)")
     ap.add_argument("--backend", default="local", choices=["local", "vllm"], help="inference backend")
     ap.add_argument("--port", type=int, default=8000, help="vllm server port")
     ap.add_argument("--think", action="store_true", help="start with thinking enabled (Qwen3)")
@@ -93,6 +93,9 @@ def main(argv=None):
         tok.pad_token = tok.eos_token
     device = _accelerator_device()
     load_quant = a.quant
+    if load_quant == "auto":
+        load_quant = auto_quant(a.model)
+        print(f"  turboquant -> {load_quant}", flush=True)
     if device is None and load_quant in _ACCEL_QUANTS:
         print(f"  {load_quant} needs an accelerator; falling back to bf16 on CPU.", flush=True)
         load_quant = "bf16"

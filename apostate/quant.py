@@ -2,9 +2,35 @@
 
 from __future__ import annotations
 
+import glob
+import os
 import torch
 
-MODES = ["bf16", "fp16", "nf4", "fp4", "int8", "gptq", "marlin", "awq"]
+MODES = ["auto", "bf16", "fp16", "nf4", "fp4", "int8", "gptq", "marlin", "awq"]
+
+
+def _model_size_gb(path: str) -> float:
+    if not os.path.isdir(path):
+        return 0.0
+    total = 0
+    for pat in ("*.safetensors", "*.bin"):
+        for f in glob.glob(os.path.join(path, pat)):
+            total += os.path.getsize(f)
+    return total / 1e9
+
+
+def auto_quant(model_path: str) -> str:
+    """turboquant: fastest quant that fits free VRAM. bf16 if it fits, else nf4."""
+    try:
+        if not torch.cuda.is_available():
+            return "bf16"                      # cpu: bnb gives no speedup
+        free = torch.cuda.mem_get_info()[0] / 1e9
+    except Exception:
+        return "nf4"
+    size = _model_size_gb(model_path)          # on-disk (~bf16) weight size
+    if size and free > size * 1.25 + 1.5:      # room for weights + kv cache + overhead
+        return "bf16"
+    return "nf4"
 
 
 def quant_kwargs(mode: str, tokenizer=None, calib=None) -> dict:

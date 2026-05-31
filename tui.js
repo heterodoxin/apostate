@@ -349,8 +349,9 @@ forceWindowsTerminalResize();
   // pick inference quant
   function selectQuant(callback) {
     const quants = [
+      { name: 'auto', desc: 'turboquant: fastest that fits VRAM (recommended)' },
       { name: 'vllm', desc: 'auto-serve via vLLM, fastest (Linux/WSL)' },
-      { name: 'nf4', desc: '4-bit, low VRAM (default)' },
+      { name: 'nf4', desc: '4-bit, low VRAM' },
       { name: 'marlin', desc: 'int4 Marlin kernel, fastest (Ampere+)' },
       { name: 'bf16', desc: 'no quant, fastest if VRAM fits' },
       { name: 'int8', desc: '8-bit, balanced' },
