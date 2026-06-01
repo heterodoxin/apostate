@@ -5,6 +5,7 @@ const blessed = require('blessed');
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 
 const C = {
     acc:  '#cba6f7',
@@ -216,11 +217,7 @@ forceWindowsTerminalResize();
   }
 
   function selectModel(action) {
-    const models = [
-      { name: 'Qwen/Qwen2.5-7B-Instruct', desc: 'Base model (HF)' },
-      ...findCheckpoints(),
-      { name: 'Custom model ID/path...', desc: 'paste HF ID or local path', custom: true },
-    ];
+    const models = modelChoices('Custom model ID/path...');
 
     {
       const consoleSize = getWinConsoleSize();
@@ -370,11 +367,7 @@ forceWindowsTerminalResize();
   }
 
   function selectBase(callback) {
-    const models = [
-      { name: 'Qwen/Qwen2.5-7B-Instruct', desc: 'Base model (HF)' },
-      ...findCheckpoints(),
-      { name: 'Custom base ID/path...', desc: 'paste HF ID or local path', custom: true },
-    ];
+    const models = modelChoices('Custom base ID/path...');
 
     {
       const consoleSize = getWinConsoleSize();
@@ -569,6 +562,78 @@ forceWindowsTerminalResize();
       backToMenu();
     });
     selectScreen.render();
+  }
+
+  // model choices
+  function modelChoices(customName) {
+    return uniqueModels([
+      { name: 'Qwen/Qwen2.5-7B-Instruct', desc: 'default HF' },
+      ...findHFModels(),
+      ...findCheckpoints(),
+      { name: customName, desc: 'paste HF ID or local path', custom: true },
+    ]);
+  }
+
+  // dedupe models
+  function uniqueModels(items) {
+    const out = [];
+    const seen = new Set();
+    for (const item of items) {
+      const key = String(item.name).toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(item);
+    }
+    return out;
+  }
+
+  // hf cache roots
+  function hfCacheRoots() {
+    const roots = [];
+    const add = (p) => {
+      if (!p) return;
+      const full = path.resolve(p);
+      if (!roots.includes(full) && fs.existsSync(full)) roots.push(full);
+    };
+    add(process.env.HUGGINGFACE_HUB_CACHE);
+    if (process.env.HF_HOME) add(path.join(process.env.HF_HOME, 'hub'));
+    add(path.join(os.homedir(), '.cache', 'huggingface', 'hub'));
+    return roots;
+  }
+
+  // hf snapshots
+  function hasModelSnapshot(dir) {
+    if (fs.existsSync(path.join(dir, 'config.json'))) return true;
+    const snapRoot = path.join(dir, 'snapshots');
+    let snaps = [];
+    try { snaps = fs.readdirSync(snapRoot, { withFileTypes: true }); } catch (e) { return false; }
+    return snaps.some(s => {
+      if (!s.isDirectory()) return false;
+      const p = path.join(snapRoot, s.name);
+      return fs.existsSync(path.join(p, 'config.json')) ||
+             fs.existsSync(path.join(p, 'tokenizer_config.json')) ||
+             fs.existsSync(path.join(p, 'processor_config.json'));
+    });
+  }
+
+  // scan hf cache
+  function findHFModels() {
+    const out = [];
+    const seen = new Set();
+    for (const root of hfCacheRoots()) {
+      let entries = [];
+      try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch (e) { continue; }
+      for (const d of entries) {
+        if (!d.isDirectory() || !d.name.startsWith('models--')) continue;
+        const id = d.name.slice('models--'.length).split('--').join('/');
+        if (!id || seen.has(id.toLowerCase())) continue;
+        const dir = path.join(root, d.name);
+        if (!hasModelSnapshot(dir)) continue;
+        seen.add(id.toLowerCase());
+        out.push({ name: id, desc: 'HF cache' });
+      }
+    }
+    return out.sort((a, b) => a.name.localeCompare(b.name));
   }
 
   // scan checkpoints
