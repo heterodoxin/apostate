@@ -60,8 +60,9 @@ def run_guard(
         controller.set_subspace(merged)
         for L in range(bundle.num_layers):
             a = controller.get_layer_alpha(L)
-            if a < 1.0:
-                controller.set_layer_alpha(L, min(1.0, a + cfg.guard_alpha_step))
+            if abs(a) < 1.0:
+                sign = -1.0 if a < 0.0 else 1.0
+                controller.set_layer_alpha(L, sign * min(1.0, abs(a) + cfg.guard_alpha_step))
 
         new_kl = kl_harmless(bundle, controller, eval_harmless, cfg.batch_size, positions=cfg.kl_positions)
         if new_kl > cfg.max_kl:

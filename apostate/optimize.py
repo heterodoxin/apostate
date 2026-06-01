@@ -100,6 +100,31 @@ def _candidate_pool(history: list, cfg) -> list:
     return pool
 
 
+def _anchor_profiles(bundle: ModelBundle, space: dict) -> list:
+    if bundle.can_edit_embed():
+        return []
+    rank_hi = int(space["refusal_rank"][2])
+    strength_hi = float(space["strength"][2])
+    rows = []
+    for direction_sign in (1.0, -1.0):
+        for direction_layer_frac, band_center, band_width, strength, causal_mix, causal_power in (
+            (0.58, 0.58, 0.78, 1.15, 0.25, 1.50),
+            (0.70, 0.76, 0.72, strength_hi, 0.45, 2.00),
+        ):
+            rows.append({
+                "direction_layer_frac": direction_layer_frac,
+                "refusal_rank": min(1, rank_hi),
+                "strength": min(strength, strength_hi),
+                "band_center": band_center,
+                "band_width": band_width,
+                "causal_mix": causal_mix,
+                "causal_power": causal_power,
+                "ablate_embed": False,
+                "direction_sign": direction_sign,
+            })
+    return rows
+
+
 def _capability_samples(cfg) -> List[Tuple[str, str]]:
     samples: List[Tuple[str, str]] = []
     if not cfg.opt_capability:
@@ -218,7 +243,7 @@ def _apply_profile(
         hi = min(1.0, params["band_center"] + width * 0.5)
     else:
         lo, hi = sorted((params["band_lo"], params["band_hi"]))
-    strength = params["strength"]
+    strength = params["strength"] * params.get("direction_sign", 1.0)
     cmix = params["causal_mix"]
     power = params.get("causal_power", 1.0)
     for L in range(n):
@@ -252,14 +277,17 @@ def optimize_profile(
             base_cap = _target_logprob(bundle, cap_samples, cfg.batch_size)
         print(f"[apostate] capability logprob baseline: {base_cap:.4f}", flush=True)
 
+    strength_hi = 1.70 if not bundle.can_edit_embed() else 1.25
+    width_hi = 0.82 if not bundle.can_edit_embed() else 0.65
     space = {
         "direction_layer_frac": ("float", 0.30, 0.82),
         "refusal_rank": ("int", 1, min(3, cfg.max_rank)),
-        "strength": ("float", 0.08, 1.15),
+        "strength": ("float", 0.08, strength_hi),
         "band_center": ("float", 0.15, 0.90),
-        "band_width": ("float", 0.08, 0.65),
+        "band_width": ("float", 0.08, width_hi),
         "causal_mix": ("float", 0.0, 1.0),
         "causal_power": ("float", 1.0, 3.0),
+        "direction_sign": ("cat", [1.0, -1.0]),
     }
     if bundle.can_edit_embed():
         space["ablate_embed"] = ("cat", [False, True])
@@ -310,16 +338,27 @@ def optimize_profile(
             })
         return value, attrs
 
+    anchor_history = []
+    for idx, params in enumerate(_anchor_profiles(bundle, space), 1):
+        print(f"\n[Seed {idx}/4]")
+        print(f"  Parameters: {params}")
+        value, attrs = objective(params)
+        print(f"  Metrics: {attrs}")
+        print(f"  Loss: {value:.6f}")
+        anchor_history.append({"params": params, "value": value, **attrs})
+
     best_params, best_attrs, best_value, history = run_search(
         objective, space, cfg.n_trials, cfg.seed,
         early_stop=cfg.opt_early_stop, early_stop_margin=cfg.opt_early_stop_margin,
         adaptive=cfg.adaptive_trials
     )
+    history = anchor_history + history
 
     # exact rerank
     if history:
         exact = []
-        for h in _candidate_pool(history, cfg):
+        pool = _candidate_pool(history, cfg)
+        for idx, h in enumerate(pool, 1):
             _apply_profile(bundle, controller, ah, al, h["params"], causal_shape, cfg, preserve_basis, preserve_lookup)
             with controller.active():
                 ref = refusal_rate(bundle, eval_harmful, cfg.opt_gen_tokens, cfg.batch_size)
@@ -327,6 +366,7 @@ def optimize_profile(
             kl = kl_harmless(bundle, controller, eval_harmless, cfg.batch_size, positions=cfg.kl_positions)
             cap_drift = max(0.0, base_cap - cap_lp) if base_cap is not None else 0.0
             v = _refusal_loss(ref, cfg) + _kl_loss(kl, cfg) + cfg.opt_capability_weight * cap_drift
+            print(f"[apostate] exact rerank {idx}/{len(pool)}: refusal={ref:.3f} kl={kl:.3f}", flush=True)
             item = {
                 "params": h["params"],
                 "value": v,
