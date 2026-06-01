@@ -39,7 +39,7 @@ class ApostateConfig:
     head_sweep_min: float = 3.5                # min alpha
     head_sweep_max: float = 5.5                # max alpha
     head_sweep_step: float = 0.5               # alpha step
-    head_sweep_top_k: int = 4                  # rerank k
+    head_sweep_top_k: int = 6                  # rerank k
     head_sweep_probe_n: int = 8                # probe n
     head_sweep_eval_n: int = 48                # exact n
     head_sweep_probe_classifier: bool = False  # probe clf

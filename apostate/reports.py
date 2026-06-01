@@ -161,7 +161,7 @@ def write_run_report(cfg: Any, report: dict, benchmark: Optional[dict] = None, c
         _table(
             ["field", "value"],
             [
-                ["refusal judge", "classifier"],
+                ["refusal judge", "classifier + hard refusal guard"],
                 ["preservation metric", "harmless kl"],
                 ["capability suites", "gsm8k, humaneval, mbpp"],
             ],
@@ -224,7 +224,7 @@ def write_model_card(cfg: Any, report: dict, benchmark: Optional[dict] = None, c
             ["field", "value"],
             [
                 ["edit type", "weight projection"],
-                ["refusal judge", "classifier"],
+                ["refusal judge", "classifier + hard refusal guard"],
                 ["preservation metric", "harmless kl"],
             ],
         ),

@@ -152,6 +152,24 @@ def _cached_prompts(cfg: ApostateConfig, name: str, spec: str, n: int, seed: int
     return prompts
 
 
+def _refusal_calibration_prompts() -> list[str]:
+    path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "refusal_calibration.txt")
+    if not os.path.isfile(path):
+        return []
+    with open(path, "r", encoding="utf-8") as f:
+        return [ln.strip() for ln in f if ln.strip() and not ln.startswith("#")]
+
+
+def _append_unique(items: list[str], extra: list[str]) -> list[str]:
+    seen = set(items)
+    out = list(items)
+    for item in extra:
+        if item not in seen:
+            seen.add(item)
+            out.append(item)
+    return out
+
+
 def _persist_reports(cfg: ApostateConfig, report: dict, command: Optional[str]):
     os.makedirs(cfg.output_dir, exist_ok=True)
     with open(os.path.join(cfg.output_dir, "report.json"), "w", encoding="utf-8") as f:
@@ -419,6 +437,7 @@ def _head_token_sweep(bundle, controller, cfg, eval_harmful, eval_harmless):
     hprobe = eval_harmful[: max(4, min(len(eval_harmful), cfg.head_sweep_probe_n))]
     lprobe = eval_harmless[: max(8, min(len(eval_harmless), cfg.head_sweep_probe_n))]
     hset = eval_harmful[: max(8, min(len(eval_harmful), cfg.head_sweep_eval_n))]
+    hset = _append_unique(hset, _refusal_calibration_prompts())
     lset = eval_harmless[: max(16, min(len(eval_harmless), cfg.head_sweep_eval_n))]
     rows = []
     best_score = float("inf")
@@ -466,7 +485,7 @@ def _head_token_sweep(bundle, controller, cfg, eval_harmful, eval_harmless):
             if len(top) >= cap:
                 break
 
-    anchors = [row for row in rows if row["params"]["head_alpha"] in (4.65,)]
+    anchors = [row for row in rows if row["params"]["head_alpha"] in (4.65, 4.85, 5.0)]
     add_top(anchors, min(top_n, len(anchors)))
     add_top(sorted(rows, key=lambda h: (h["value"], h["kl"])), max(1, top_n // 2))
     add_top(sorted(rows, key=lambda h: (
@@ -492,7 +511,13 @@ def _head_token_sweep(bundle, controller, cfg, eval_harmful, eval_harmless):
 
     exact_feasible = [h for h in exact if h.get("kl", 99.0) <= cfg.max_kl]
     if exact_feasible:
-        best = min(exact_feasible, key=lambda h: (h.get("refusal", 1.0), h["kl"], h["value"]))
+        best_ref = min(h.get("refusal", 1.0) for h in exact_feasible)
+        ref_tol = max(0.005, float(cfg.refine_refusal_slack))
+        near = [h for h in exact_feasible if h.get("refusal", 1.0) <= best_ref + ref_tol]
+        if best_ref > cfg.target_refusal + ref_tol:
+            best = min(near, key=lambda h: (-h["params"]["head_alpha"], h["kl"], h["value"]))
+        else:
+            best = min(near, key=lambda h: (h["kl"], h["value"]))
     else:
         best = min(exact or rows, key=lambda h: (h["value"], h["kl"]))
     _apply_head_alpha(controller, best["params"]["head_alpha"])
