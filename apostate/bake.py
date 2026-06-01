@@ -7,7 +7,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from .config import ApostateConfig
-from .model import ModelBundle
+from .model import ModelBundle, model_metadata, set_config_value
 
 _DTYPES = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}
 
@@ -44,8 +44,8 @@ def bake(cfg: ApostateConfig, export: dict, tokenizer=None, drop_layers=None) ->
         model.lm_head.weight = torch.nn.Parameter(model.lm_head.weight.data.clone())
         model.config.tie_word_embeddings = False
 
-    bundle = ModelBundle(model=model, tokenizer=tokenizer, num_layers=model.config.num_hidden_layers,
-                         hidden_size=model.config.hidden_size)
+    n_layers, hidden = model_metadata(model)
+    bundle = ModelBundle(model=model, tokenizer=tokenizer, num_layers=n_layers, hidden_size=hidden)
     emb = bundle.embed()
     layers = bundle.layers()
 
@@ -70,8 +70,21 @@ def bake(cfg: ApostateConfig, export: dict, tokenizer=None, drop_layers=None) ->
         drop = set(drop_layers)
         keep = [layers[i] for i in range(len(layers)) if i not in drop]
         dec = bundle._decoder()
+        if hasattr(dec, "embed_tokens_per_layer"):
+            raise ValueError("Layer pruning is not supported for per-layer embeddings.")
         dec.layers = torch.nn.ModuleList(keep)
-        model.config.num_hidden_layers = len(keep)
+        section = set_config_value(model.config, "num_hidden_layers", len(keep))
+        layer_types = None
+        if isinstance(section, dict):
+            layer_types = section.get("layer_types")
+        else:
+            layer_types = getattr(section, "layer_types", None)
+        if layer_types is not None and len(layer_types) == len(layers):
+            new_types = [layer_types[i] for i in range(len(layers)) if i not in drop]
+            if isinstance(section, dict):
+                section["layer_types"] = new_types
+            else:
+                section.layer_types = new_types
         for new_i, layer in enumerate(keep):       # cache index
             for an in ("self_attn", "attention", "attn"):
                 attn = getattr(layer, an, None)

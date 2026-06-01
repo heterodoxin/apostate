@@ -131,7 +131,9 @@ data/custom_harmful.txt|my_org/my_dataset:train:prompt
 
 ## Model Coverage
 
-Supported families are detected from module layout, not from hardcoded model names. Current coverage includes Llama 2/3, Qwen2/2.5/3, Mistral, Mixtral, DeepSeek, Gemma/Gemma2, Phi-3, GPT-NeoX, and Pythia. Dense and MoE decoder stacks are supported when the residual writer modules can be located.
+Supported families are detected from module layout, not from hardcoded model names. Current coverage includes Llama 2/3, Qwen2/2.5/3, Mistral, Mixtral, DeepSeek, Gemma/Gemma2/Gemma 4 text decoders including `google/gemma-4-E4B`, Phi-3, GPT-NeoX, Pythia, OPT-style decoder stacks, and MPT-style block stacks. Dense and MoE decoder stacks are supported when the residual writer modules can be located.
+
+Multimodal wrapper models are supported for the text path when Transformers exposes a causal language decoder inside the model object. Gemma 4 E4B follows that pattern: Apostate edits `model.language_model` and reads layer count and hidden size from the nested text config. Image and audio input pipelines are not edited yet; use text prompts for ablation, benchmark, chat, and bake.
 
 Architectures with nonstandard residual writers may need adapter support before the bake step is correct. State-space models without attention/MLP residual writers are outside the current edit path.
 

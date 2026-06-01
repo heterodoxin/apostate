@@ -54,6 +54,28 @@ def _is_prequantized(model_id: str) -> bool:
     return False
 
 
+def _plain_chat(messages):
+    lines = []
+    for msg in messages:
+        role = "User" if msg.get("role") == "user" else "Assistant"
+        lines.append(f"{role}: {msg.get('content', '')}")
+    lines.append("Assistant:")
+    return "\n".join(lines)
+
+
+def _format_chat(tok, messages, think: bool) -> str:
+    """chat text"""
+    try:
+        return tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=think)
+    except TypeError:
+        try:
+            return tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        except Exception:
+            return _plain_chat(messages)
+    except Exception:
+        return _plain_chat(messages)
+
+
 def _load_model(model_id: str, quant: str, tok, device: str | None):
     if _is_prequantized(model_id):   # saved quant
         return AutoModelForCausalLM.from_pretrained(
@@ -148,10 +170,7 @@ def main(argv=None):
             continue
 
         messages.append({"role": "user", "content": user})
-        try:
-            prompt = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=think)
-        except TypeError:
-            prompt = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        prompt = _format_chat(tok, messages, think)
         enc = tok(prompt, return_tensors="pt").to(next(model.parameters()).device)
         streamer = TextStreamer(tok, skip_prompt=True, skip_special_tokens=True)
         print("\033[35mmodel>\033[0m ", end="", flush=True)
