@@ -369,12 +369,22 @@ def _repair_alphas(bundle, controller, cfg, eval_harmful, eval_harmless, start_r
     best_alpha = dict(controller.alpha)
     best_score = _repair_loss(best_ref, best_kl, cfg)
     steps = 0
+    min_alpha = getattr(cfg, "repair_min_alpha", 1e-3)
+    min_kl_gain = getattr(cfg, "repair_min_kl_gain", 0.003)
+    min_ref_gain = getattr(cfg, "repair_min_refusal_gain", 0.005)
+    min_score_gain = getattr(cfg, "repair_min_score_gain", 0.01)
 
     for step in range(cfg.repair_steps):
         controller.alpha = dict(best_alpha)
+        levels = [
+            (item, abs(_alpha_get(controller, item)))
+            for item in ([-2, -1] + list(range(controller.num_layers)))
+        ]
+        max_level = max((v for _item, v in levels), default=0.0)
+        floor = max(min_alpha, max_level * 0.01)
         active = [
-            item for item in ([-2, -1] + list(range(controller.num_layers)))
-            if abs(_alpha_get(controller, item)) > 1e-6
+            item for item, value in levels
+            if value >= floor or (item == -2 and value > 1e-6)
         ]
         active.sort(key=lambda item: abs(_alpha_get(controller, item)), reverse=True)
         items = active[: cfg.repair_candidates]
@@ -430,6 +440,12 @@ def _repair_alphas(bundle, controller, cfg, eval_harmful, eval_harmless, start_r
                 skipped += 1
                 continue
             trial_score = _repair_loss(trial_ref, trial_kl, cfg)
+            ref_gain = best_ref - trial_ref
+            kl_gain = best_kl - trial_kl
+            score_gain = best_score - trial_score
+            if ref_gain < min_ref_gain and kl_gain < min_kl_gain and score_gain < min_score_gain:
+                skipped += 1
+                continue
             if trial_score < best_score - 1e-4:
                 if accepted is None or trial_score < accepted[0]:
                     accepted = (trial_score, trial_ref, trial_kl, item, scale, dict(controller.alpha))

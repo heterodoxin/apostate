@@ -138,6 +138,23 @@ def _anchor_profiles(bundle: ModelBundle, space: dict) -> list:
     strength_hi = float(space["strength"][2])
     head_ok = "ablate_head" in space
     rows = []
+    if "head_alpha" in space:
+        for alpha in (3.5, 4.0, 4.5, 4.65, 5.0):
+            rows.append({
+                "direction_source": "head_tokens",
+                "direction_layer_frac": 0.58,
+                "refusal_rank": 1,
+                "strength": 0.0,
+                "band_center": 0.58,
+                "band_width": 0.78,
+                "causal_mix": 0.0,
+                "causal_power": 1.0,
+                "ablate_embed": False,
+                "direction_sign": 1.0,
+                "ablate_head": True,
+                "head_scale": 0.0,
+                "head_alpha": alpha,
+            })
     for direction_sign in (1.0, -1.0):
         for direction_layer_frac, rank, band_center, band_width, strength, causal_mix, causal_power, head, head_scale in (
             (0.58, 1, 0.58, 0.78, 1.15, 0.25, 1.50, False, 0.0),
@@ -158,23 +175,6 @@ def _anchor_profiles(bundle: ModelBundle, space: dict) -> list:
                 "direction_sign": direction_sign,
                 "ablate_head": head if head_ok else False,
                 "head_scale": head_scale if head_ok else 0.0,
-            })
-    if "head_alpha" in space:
-        for alpha in (3.5, 4.0, 4.5, 5.0):
-            rows.append({
-                "direction_source": "head_tokens",
-                "direction_layer_frac": 0.58,
-                "refusal_rank": 1,
-                "strength": 0.0,
-                "band_center": 0.58,
-                "band_width": 0.78,
-                "causal_mix": 0.0,
-                "causal_power": 1.0,
-                "ablate_embed": False,
-                "direction_sign": 1.0,
-                "ablate_head": True,
-                "head_scale": 0.0,
-                "head_alpha": alpha,
             })
     return rows
 

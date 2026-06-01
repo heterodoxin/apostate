@@ -72,6 +72,10 @@ class ApostateConfig:
     repair_probe_positions: int = 8            # probe kl
     repair_refusal_regress_slack: float = 0.01 # ref regress
     repair_stop_kl_frac: float = 0.80          # stop kl
+    repair_min_alpha: float = 1e-3             # alpha floor
+    repair_min_kl_gain: float = 0.003          # kl gain
+    repair_min_refusal_gain: float = 0.005     # ref gain
+    repair_min_score_gain: float = 0.01        # score gain
     repair_eval_n: int = 48                    # repair harmful
     repair_kl_n: int = 64                      # repair harmless
     refine_refusal_slack: float = 0.01         # target slack
