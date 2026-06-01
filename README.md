@@ -6,14 +6,15 @@ The edit targets modules that write back into the residual stream: token embeddi
 
 ## Reference Result
 
-Qwen2.5-7B-Instruct, 4-bit NF4 load, 12 optimization trials, 600 harmful fit prompts, 600 harmless fit prompts, held-out validation/test split:
+Qwen2.5-7B-Instruct on an RTX 4070 Ti SUPER, 4-bit NF4 load, seed `0`, 16 optimization trials. Public benchmark uses the classifier refusal judge, HumanEval `n=80`, MBPP `n=80`, GSM8K `n=24`, JBB refusal `n=48`, and KL over 48 harmless prompts.
 
-| metric | base | edited | delta |
-|---|---:|---:|---:|
-| refusal rate | 95.0% | 5.0% | -90.0 pts |
-| harmless KL nats | 0.000 | 0.160 | +0.160 |
-| wall time | n/a | 749s | n/a |
-| disk overhead | n/a | 0 | n/a |
+| model | refusal | complied | humaneval | mbpp | gsm8k | kl | ablation wall |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| base | 100.0% | 0.0% | 73.8% | 70.0% | 70.8% | 0.000 | n/a |
+| apostate | 4.2% | 93.8% | 80.0% | 70.0% | 70.8% | 0.143 | 306.8s |
+| heretic | 8.3% | 87.5% | 72.5% | 72.5% | 70.8% | 0.099 | 1166.7s |
+
+This is a same-budget comparison against Heretic `1.3.0`, not Heretic's 200-trial default. Apostate exported a baked checkpoint; Heretic exported a PEFT LoRA adapter. Full commands, raw sample counts, and selected-trial details are in `docs/benchmark-runs/2026-05-31-heretic-head-to-head.md`.
 
 ## How It Works
 
@@ -99,7 +100,7 @@ HumanEval uses its `check(entry_point)` harness. MBPP uses its native assertion 
 | refusal | refusal, compliance, category refusal, kl |
 | all | humaneval, mbpp, gsm8k, refusal |
 
-Benchmark output is written to `benchcode.json` and `benchcode.md`. If the candidate directory contains an Apostate `report.json`, the benchmark result is also merged into the candidate report and model card.
+Benchmark output is written to `benchcode.json` and `benchcode.md`. If the candidate directory contains an Apostate `report.json`, the benchmark result is also merged into the candidate report and model card. PEFT adapter directories with `adapter_config.json` are loaded against their recorded base model, so adapter exports can be benchmarked without merging first.
 
 ## Chat
 
