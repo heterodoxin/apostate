@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, Tuple
 import argparse
 import json
 import gc
+import os
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
@@ -37,17 +38,29 @@ BENIGN_TEXT = (
 
 
 def _load(path: str):
+    adapter_dir = None
+    base_path = path
+    adapter_cfg = os.path.join(path, "adapter_config.json")
+    if os.path.exists(adapter_cfg):
+        with open(adapter_cfg, "r", encoding="utf-8") as f:
+            base_path = json.load(f)["base_model_name_or_path"]
+        adapter_dir = path
+
     bnb = BitsAndBytesConfig(
         load_in_4bit=True, bnb_4bit_quant_type="nf4",
         bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=torch.bfloat16,
     )
-    tok = AutoTokenizer.from_pretrained(path, trust_remote_code=True)
+    tok = AutoTokenizer.from_pretrained(base_path, trust_remote_code=True)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
     tok.padding_side = "left"
     model = AutoModelForCausalLM.from_pretrained(
-        path, quantization_config=bnb, device_map={"": 0}, trust_remote_code=True,
+        base_path, quantization_config=bnb, device_map={"": 0}, trust_remote_code=True,
     )
+    if adapter_dir:
+        from peft import PeftModel
+
+        model = PeftModel.from_pretrained(model, adapter_dir)
     model.eval()
     gc_cfg = getattr(model, "generation_config", None)
     if gc_cfg is not None:
