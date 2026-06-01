@@ -58,7 +58,7 @@ def run_search(objective: Objective, space: Space, n_trials: int, seed: int = 0,
                 best_v = sorted_h[0]["value"]
                 worst_v = sorted_h[2]["value"]
                 if worst_v - best_v <= early_stop_margin * best_v and len(history) >= 8:
-                    print("  → Early stopping triggered")
+                    print("  early stop")
                     raise optuna.TrialPruned()
             return value
 
@@ -96,6 +96,6 @@ def run_search(objective: Objective, space: Space, n_trials: int, seed: int = 0,
         history.append({"params": params, "value": value, **attrs})
         if best is None or value < best[2]:
             best = (params, attrs, value)
-            print(f"  ✓ New best!")
+            print("  new best")
 
     return best[0], best[1], best[2], history
