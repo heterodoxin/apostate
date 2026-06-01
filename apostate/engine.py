@@ -21,7 +21,7 @@ from .projectors import ProjectionController
 from .causal import causal_layer_scores
 from .guard import run_guard
 from .evaluate import generate, refusal_logit_margin, refusal_rate, refusal_rate_bounded, kl_harmless
-from .optimize import optimize_profile
+from .optimize import optimize_profile, _head_token_subspace
 from .search import _has_optuna
 from .bake import bake
 from .reports import write_model_card, write_run_report
@@ -122,6 +122,34 @@ def _response_fit_activations(bundle, fit_harmful, harmless, cfg):
     ah = _cached_collect(bundle, hpairs, cfg.batch_size, cfg, "fit_harmful_response_acts", preformatted=True)
     al = _cached_collect(bundle, lpairs, cfg.batch_size, cfg, "fit_harmless_response_acts", preformatted=True)
     return ah, al
+
+
+def _cached_prompts(cfg: ApostateConfig, name: str, spec: str, n: int, seed: int):
+    if not cfg.cache_activations:
+        return resolve_prompts(spec, n, seed)
+    cache_dir = _activation_cache_dir(cfg)
+    os.makedirs(cache_dir, exist_ok=True)
+    meta = {"name": name, "spec": spec, "count": n, "seed": seed}
+    key = hashlib.sha256(json.dumps(meta, sort_keys=True).encode("utf-8")).hexdigest()[:20]
+    path = os.path.join(cache_dir, f"prompts-{name}-{key}.json")
+    if cfg.resume and os.path.isfile(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                obj = json.load(f)
+            prompts = obj.get("prompts", [])
+            if obj.get("meta") == meta and len(prompts) <= n:
+                _log(f"prompt cache hit: {name}")
+                return prompts[:n]
+        except Exception as e:
+            _log(f"prompt cache ignored for {name}: {e}")
+    prompts = resolve_prompts(spec, n, seed)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"meta": meta, "prompts": prompts}, f)
+        _log(f"prompt cache saved: {name}")
+    except Exception as e:
+        _log(f"prompt cache save failed for {name}: {e}")
+    return prompts
 
 
 def _persist_reports(cfg: ApostateConfig, report: dict, command: Optional[str]):
@@ -334,6 +362,148 @@ def _margin_refusal(bundle, instructions, batch_size: int) -> float:
     return 1.0 / (1.0 + math.exp(-margin))
 
 
+def _head_sweep_enabled(bundle, cfg) -> bool:
+    return bool(
+        cfg.optimize and cfg.head_sweep
+        and not bundle.can_edit_embed()
+        and bundle.final_norm() is not None
+        and bundle.lm_head() is not None
+    )
+
+
+def _head_params(alpha: float) -> dict:
+    return {
+        "direction_source": "head_tokens",
+        "direction_layer_frac": 0.58,
+        "refusal_rank": 1,
+        "strength": 0.0,
+        "band_center": 0.58,
+        "band_width": 0.78,
+        "causal_mix": 0.0,
+        "causal_power": 1.0,
+        "direction_sign": 1.0,
+        "ablate_embed": False,
+        "ablate_head": True,
+        "head_scale": 0.0,
+        "head_alpha": float(alpha),
+    }
+
+
+def _head_alphas(cfg) -> list[float]:
+    vals = set()
+    x = float(cfg.head_sweep_min)
+    hi = float(cfg.head_sweep_max)
+    step = max(0.01, float(cfg.head_sweep_step))
+    while x <= hi + 1e-9:
+        vals.add(round(x, 4))
+        x += step
+    for x in (4.65, 4.85, 5.15):
+        if float(cfg.head_sweep_min) <= x <= hi:
+            vals.add(x)
+    return sorted(vals)
+
+
+def _prepare_head_profile(bundle, controller):
+    controller.set_subspace(_head_token_subspace(bundle))
+    for L in range(controller.num_layers):
+        controller.set_layer_alpha(L, 0.0)
+    controller.set_embed_alpha(0.0)
+
+
+def _apply_head_alpha(controller, alpha: float):
+    controller.set_head_alpha(float(alpha))
+
+
+def _head_token_sweep(bundle, controller, cfg, eval_harmful, eval_harmless):
+    _prepare_head_profile(bundle, controller)
+    hprobe = eval_harmful[: max(4, min(len(eval_harmful), cfg.head_sweep_probe_n))]
+    lprobe = eval_harmless[: max(8, min(len(eval_harmless), cfg.head_sweep_probe_n))]
+    hset = eval_harmful[: max(8, min(len(eval_harmful), cfg.head_sweep_eval_n))]
+    lset = eval_harmless[: max(16, min(len(eval_harmless), cfg.head_sweep_eval_n))]
+    rows = []
+    best_score = float("inf")
+    alphas = _head_alphas(cfg)
+    for idx, alpha in enumerate(alphas, 1):
+        _apply_head_alpha(controller, alpha)
+        kl = kl_harmless(bundle, controller, lprobe, cfg.batch_size, positions=cfg.kl_positions)
+        if cfg.head_sweep_probe_classifier:
+            with controller.active():
+                ref, complete = refusal_rate_bounded(
+                    bundle, hprobe, cfg.opt_gen_tokens, cfg.batch_size,
+                    should_stop=lambda floor, _seen, _total: _repair_loss(floor, kl, cfg) >= best_score - 1e-4,
+                )
+            scored_ref = min(1.0, ref + (0.15 if not complete else 0.0))
+        else:
+            with controller.active():
+                ref = _margin_refusal(bundle, hprobe, cfg.batch_size)
+            complete = True
+            scored_ref = ref
+        score = _repair_loss(scored_ref, kl, cfg)
+        best_score = min(best_score, score)
+        row = {
+            "params": _head_params(alpha),
+            "value": score,
+            "refusal_proxy": round(ref, 4),
+            "refusal_complete": complete,
+            "kl": round(kl, 4),
+        }
+        rows.append(row)
+        label = "refusal" if cfg.head_sweep_probe_classifier else "proxy"
+        _log(f"  head {idx}/{len(alphas)}: alpha={alpha:.3f} {label}={ref:.3f} kl={kl:.3f}")
+
+    exact = []
+    top_n = max(1, cfg.head_sweep_top_k)
+    seen = set()
+    top = []
+
+    def add_top(candidates, cap):
+        for row in candidates:
+            alpha = row["params"]["head_alpha"]
+            if alpha in seen:
+                continue
+            seen.add(alpha)
+            top.append(row)
+            if len(top) >= cap:
+                break
+
+    anchors = [row for row in rows if row["params"]["head_alpha"] in (4.65,)]
+    add_top(anchors, min(top_n, len(anchors)))
+    add_top(sorted(rows, key=lambda h: (h["value"], h["kl"])), max(1, top_n // 2))
+    add_top(sorted(rows, key=lambda h: (
+        h.get("refusal_proxy", 1.0) + (0.15 if h.get("refusal_complete") is False else 0.0),
+        h["kl"],
+    )), top_n)
+    for idx, row in enumerate(top, 1):
+        alpha = row["params"]["head_alpha"]
+        _apply_head_alpha(controller, alpha)
+        with controller.active():
+            ref = refusal_rate(bundle, hset, cfg.opt_gen_tokens, cfg.batch_size)
+        kl = kl_harmless(bundle, controller, lset, cfg.batch_size, positions=cfg.kl_positions)
+        score = _repair_loss(ref, kl, cfg)
+        item = {
+            "params": _head_params(alpha),
+            "value": score,
+            "refusal": round(ref, 4),
+            "refusal_complete": True,
+            "kl": round(kl, 4),
+        }
+        exact.append(item)
+        _log(f"  head exact {idx}/{len(top)}: alpha={alpha:.3f} refusal={ref:.3f} kl={kl:.3f}")
+
+    exact_feasible = [h for h in exact if h.get("kl", 99.0) <= cfg.max_kl]
+    if exact_feasible:
+        best = min(exact_feasible, key=lambda h: (h.get("refusal", 1.0), h["kl"], h["value"]))
+    else:
+        best = min(exact or rows, key=lambda h: (h["value"], h["kl"]))
+    _apply_head_alpha(controller, best["params"]["head_alpha"])
+    attrs = {
+        k: best[k]
+        for k in ("refusal_proxy", "refusal", "kl")
+        if k in best
+    }
+    return best["params"], attrs, rows + exact
+
+
 def _repair_scales(best_ref: float, best_kl: float, cfg):
     target = cfg.target_refusal + cfg.refine_refusal_slack
     if best_kl > cfg.kl_target and best_ref <= target:
@@ -519,16 +689,16 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
     _log(f"{bundle.num_layers} layers, hidden={bundle.hidden_size}, {arch}, direction layer={L_dir}")
     mark("load_model")
 
-    harmful = resolve_prompts(cfg.harmful_path, cfg.n_harmful + cfg.n_eval, cfg.seed)
-    harmless = resolve_prompts(cfg.harmless_path, cfg.n_harmless, cfg.seed)
+    harmful = _cached_prompts(cfg, "harmful_fit", cfg.harmful_path, cfg.n_harmful + cfg.n_eval, cfg.seed)
+    harmless = _cached_prompts(cfg, "harmless_fit", cfg.harmless_path, cfg.n_harmless, cfg.seed)
     fit_harmful = harmful[: cfg.n_harmful]
     if cfg.harmful_test:
-        eval_harmful = resolve_prompts(cfg.harmful_test, cfg.n_eval, cfg.seed)
+        eval_harmful = _cached_prompts(cfg, "harmful_eval", cfg.harmful_test, cfg.n_eval, cfg.seed)
     else:
         tail = harmful[cfg.n_harmful : cfg.n_harmful + cfg.n_eval]
         eval_harmful = tail if len(tail) >= cfg.n_eval else harmful[: cfg.n_eval]
     if cfg.harmless_test:
-        eval_harmless = resolve_prompts(cfg.harmless_test, cfg.n_eval, cfg.seed)
+        eval_harmless = _cached_prompts(cfg, "harmless_eval", cfg.harmless_test, cfg.n_eval, cfg.seed)
     else:
         tail = harmless[cfg.n_harmless - cfg.n_eval : cfg.n_harmless]
         eval_harmless = tail if len(tail) >= cfg.n_eval else harmless[: cfg.n_eval]
@@ -552,32 +722,61 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
     _log(f"baseline refusal rate (test): {base_refusal:.3f}")
     mark("baseline_refusal")
 
-    _log("collecting activations (original model) ...")
-    if cfg.fit_response_activations:
-        ah, al = _response_fit_activations(bundle, fit_harmful, harmless, cfg)
-    else:
-        ah = _cached_collect(bundle, fit_harmful, cfg.batch_size, cfg, "fit_harmful")
-        al = _cached_collect(bundle, harmless, cfg.batch_size, cfg, "fit_harmless")
-
-    preserve_acts = None
-    preserve_source = "none"
-    if cfg.preserve_rank > 0 and cfg.preserve_path:
-        preserve = resolve_prompts(cfg.preserve_path, cfg.n_harmless, cfg.seed)
-        preserve_acts = _cached_collect(bundle, preserve, cfg.batch_size, cfg, "preserve")
-        preserve_source = "custom"
-    elif cfg.preserve_rank > 0:
-        preserve_acts = al
-        preserve_source = "harmless"
-    preserve_lookup = _preservation_lookup(preserve_acts, cfg.preserve_rank)
-    preserve_basis = preserve_lookup(L_dir)
-    if preserve_basis is not None:
-        _log(f"preservation subspace rank={preserve_basis.shape[1]} source={preserve_source}")
-    mark("activation_fit")
-
     report_extra: dict = {"optimized": cfg.optimize}
 
     head_only_profile = False
-    if cfg.optimize:
+    head_sweep_profile = _head_sweep_enabled(bundle, cfg)
+    head_sweep_attrs = None
+    ah = al = None
+    preserve_source = "none"
+    preserve_lookup = _preservation_lookup(None, 0)
+    preserve_basis = None
+    if head_sweep_profile:
+        _log("activation fit skipped: head sweep")
+        mark("activation_fit")
+    else:
+        _log("collecting activations (original model) ...")
+        if cfg.fit_response_activations:
+            ah, al = _response_fit_activations(bundle, fit_harmful, harmless, cfg)
+        else:
+            ah = _cached_collect(bundle, fit_harmful, cfg.batch_size, cfg, "fit_harmful")
+            al = _cached_collect(bundle, harmless, cfg.batch_size, cfg, "fit_harmless")
+
+        preserve_acts = None
+        if cfg.preserve_rank > 0 and cfg.preserve_path:
+            preserve = _cached_prompts(cfg, "preserve", cfg.preserve_path, cfg.n_harmless, cfg.seed)
+            preserve_acts = _cached_collect(bundle, preserve, cfg.batch_size, cfg, "preserve")
+            preserve_source = "custom"
+        elif cfg.preserve_rank > 0:
+            preserve_acts = al
+            preserve_source = "harmless"
+        preserve_lookup = _preservation_lookup(preserve_acts, cfg.preserve_rank)
+        preserve_basis = preserve_lookup(L_dir)
+        if preserve_basis is not None:
+            _log(f"preservation subspace rank={preserve_basis.shape[1]} source={preserve_source}")
+        mark("activation_fit")
+
+    if head_sweep_profile:
+        _log("optimizing head token profile ...")
+        best_params, best_attrs, opt_hist = _head_token_sweep(
+            bundle, controller, cfg,
+            eval_harmful, eval_harmless,
+        )
+        shown = {k: (round(v, 3) if isinstance(v, float) else v) for k, v in best_params.items()}
+        _log(f"best head sweep: refusal={best_attrs.get('refusal', best_attrs.get('refusal_proxy'))} "
+             f"kl={best_attrs.get('kl')} | {shown}")
+        L_dir = max(0, min(bundle.num_layers - 1, int(bundle.num_layers * best_params["direction_layer_frac"])))
+        head_only_profile = True
+        head_sweep_attrs = best_attrs
+        report_extra.update({
+            "best_params": best_params,
+            "best_trial": best_attrs,
+            "n_trials": 0,
+            "head_sweep": True,
+            "head_sweep_trials": len(opt_hist),
+        })
+        mark("head_sweep")
+    elif cfg.optimize:
         Rseed, _ = refusal_subspace(ah[L_dir], al[L_dir], rank=1, max_rank=cfg.max_rank, seed=cfg.seed)
         controller.set_subspace(gram_schmidt_remove(Rseed, preserve_basis))
         if cfg.causal_targeting:
@@ -635,7 +834,7 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
             controller.set_uniform_alpha(1.0)
         mark("profile_setup")
 
-    initial_sep = separation(ah[L_dir], al[L_dir])
+    initial_sep = 0.0 if head_sweep_profile else separation(ah[L_dir], al[L_dir])
     controller.enable()
 
     guard_hist = []
@@ -669,7 +868,11 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
     )
     refine_ref = None
     refine_kl = None
-    if should_refine:
+    if head_sweep_profile and head_sweep_attrs is not None:
+        refine_ref = head_sweep_attrs.get("refusal", head_sweep_attrs.get("refusal_proxy"))
+        refine_kl = head_sweep_attrs.get("kl")
+        _log("refine: skipped (head sweep exact)")
+    elif should_refine:
         _log("refining to target refusal ...")
         rr, rk = _refine_refusal(bundle, controller, cfg, eval_harmful, eval_harmless)
         refine_ref, refine_kl = rr, rk
@@ -692,7 +895,7 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
 
     kl_layer_steps = 0
     repair_steps = 0
-    if cfg.refine_deescalate and edited_refusal <= cfg.target_refusal + cfg.refine_refusal_slack:
+    if (not head_sweep_profile) and cfg.refine_deescalate and edited_refusal <= cfg.target_refusal + cfg.refine_refusal_slack:
         _log("minimizing kl scale ...")
         edited_refusal, kl = _minimize_kl_scale(bundle, controller, cfg, eval_harmful, eval_harmless)
         refine_ref = None
@@ -707,7 +910,7 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
             refine_kl = None
             _log(f"kl layer result: refusal={edited_refusal:.3f} kl={kl:.3f} steps={kl_layer_steps}")
 
-    if cfg.refine_deescalate and (edited_refusal > cfg.target_refusal or kl > cfg.kl_target):
+    if (not head_sweep_profile) and cfg.refine_deescalate and (edited_refusal > cfg.target_refusal or kl > cfg.kl_target):
         _log("repairing refusal/kl tradeoff ...")
         edited_refusal, kl, repair_steps = _repair_alphas(
             bundle, controller, cfg, eval_harmful, eval_harmless,
@@ -812,6 +1015,7 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
         _log(f"baked edited model -> {out}")
         mark("bake")
         report["baked_to"] = out
+        report["elapsed_sec"] = round(time.time() - t0, 1)
         _persist_reports(cfg, report, command)
 
     _log(f"done in {report['elapsed_sec']}s | refusal {base_refusal:.2f} -> {edited_refusal:.2f}, KL {kl:.3f}")
