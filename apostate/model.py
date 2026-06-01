@@ -10,6 +10,99 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from .config import ApostateConfig
 
 _DTYPES = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}
+_DECODER_PATHS = (
+    ("model",),
+    ("model", "language_model"),
+    ("language_model",),
+    ("model", "text_model"),
+    ("model", "model"),
+    ("model", "model", "language_model"),
+    ("text_model",),
+    ("model", "decoder"),
+    ("decoder",),
+    ("transformer",),
+    ("gpt_neox",),
+    ("base_model", "model"),
+    ("base_model", "model", "model"),
+    ("base_model", "model", "language_model"),
+    ("base_model", "model", "model", "language_model"),
+)
+_CONFIG_SECTIONS = ("text_config", "llm_config", "language_config")
+
+
+def _path_get(root, path):
+    cur = root
+    for name in path:
+        if not hasattr(cur, name):
+            return None
+        cur = getattr(cur, name)
+    return cur
+
+
+def _as_decoder(mod):
+    if mod is None:
+        return None
+    if hasattr(mod, "layers"):
+        return mod
+    for alias in ("h", "blocks"):
+        if hasattr(mod, alias):
+            mod.layers = getattr(mod, alias)
+            return mod
+    return None
+
+
+def _config_sections(config):
+    yield config
+    for name in _CONFIG_SECTIONS:
+        child = getattr(config, name, None)
+        if child is not None:
+            yield child
+
+
+def config_section(config, name: str):
+    """config part"""
+    for section in _config_sections(config):
+        if isinstance(section, dict):
+            if name in section:
+                return section
+        elif hasattr(section, name):
+            return section
+    return config
+
+
+def config_value(config, name: str, default=None):
+    """config value"""
+    section = config_section(config, name)
+    if isinstance(section, dict):
+        return section.get(name, default)
+    return getattr(section, name, default)
+
+
+def set_config_value(config, name: str, value):
+    """config set"""
+    section = config_section(config, name)
+    if isinstance(section, dict):
+        section[name] = value
+    else:
+        setattr(section, name, value)
+    return section
+
+
+def model_metadata(model: torch.nn.Module) -> tuple[int, int]:
+    """model dims"""
+    bundle = ModelBundle(model=model, tokenizer=None, num_layers=0, hidden_size=0)
+    n_layers = config_value(model.config, "num_hidden_layers")
+    if n_layers is None:
+        n_layers = len(bundle.layers())
+    hidden = config_value(model.config, "hidden_size")
+    if hidden is None:
+        emb = bundle.embed()
+        hidden = getattr(emb, "embedding_dim", None)
+        if hidden is None and hasattr(emb, "weight"):
+            hidden = emb.weight.shape[-1]
+    if hidden is None:
+        raise AttributeError("Could not locate hidden size on this model.")
+    return int(n_layers), int(hidden)
 
 
 @dataclass
@@ -22,15 +115,15 @@ class ModelBundle:
     # model access
     def _decoder(self):
         m = self.model
-        # decoder paths
-        for path in ("model", "transformer", "gpt_neox"):
-            if hasattr(m, path):
-                inner = getattr(m, path)
-                if hasattr(inner, "layers"):
-                    return inner
-                if hasattr(inner, "h"):           # gpt style
-                    inner.layers = inner.h
-                    return inner
+        seen = set()
+        for path in _DECODER_PATHS:
+            inner = _path_get(m, path)
+            if inner is None or id(inner) in seen:
+                continue
+            seen.add(id(inner))
+            dec = _as_decoder(inner)
+            if dec is not None:
+                return dec
         raise AttributeError("Could not locate decoder stack on this model.")
 
     def layers(self) -> List[torch.nn.Module]:
@@ -158,6 +251,5 @@ def load_model(cfg: ApostateConfig) -> ModelBundle:
             if hasattr(gen_cfg, attr):
                 setattr(gen_cfg, attr, None)
 
-    n_layers = model.config.num_hidden_layers
-    hidden = model.config.hidden_size
+    n_layers, hidden = model_metadata(model)
     return ModelBundle(model=model, tokenizer=tok, num_layers=n_layers, hidden_size=hidden)
