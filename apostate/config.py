@@ -35,6 +35,14 @@ class ApostateConfig:
     max_new_tokens: int = 32                   # refusal signal tokens
     batch_size: int = 24                       # batch
     baseline_eval_n: int = 24                  # base eval
+    head_sweep: bool = True                    # head sweep
+    head_sweep_min: float = 3.5                # min alpha
+    head_sweep_max: float = 5.5                # max alpha
+    head_sweep_step: float = 0.5               # alpha step
+    head_sweep_top_k: int = 4                  # rerank k
+    head_sweep_probe_n: int = 8                # probe n
+    head_sweep_eval_n: int = 48                # exact n
+    head_sweep_probe_classifier: bool = False  # probe clf
     fit_response_activations: bool = False     # response fit
     fit_response_n: int = 160                  # response count
     fit_response_tokens: int = 32              # response tokens
