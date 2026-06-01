@@ -8,6 +8,7 @@ import sys
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, TextStreamer
 
+from .data import fallback_chat_text
 from .quant import quant_kwargs, auto_quant, MODES, KV_CACHE_DTYPES
 
 _ACCEL_QUANTS = {"nf4", "fp4", "int8", "gptq", "marlin"}
@@ -71,9 +72,9 @@ def _format_chat(tok, messages, think: bool) -> str:
         try:
             return tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         except Exception:
-            return _plain_chat(messages)
+            return fallback_chat_text(tok, messages) or _plain_chat(messages)
     except Exception:
-        return _plain_chat(messages)
+        return fallback_chat_text(tok, messages) or _plain_chat(messages)
 
 
 def _load_model(model_id: str, quant: str, tok, device: str | None):

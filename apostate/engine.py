@@ -546,7 +546,11 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
             )
             for L in range(bundle.num_layers):
                 controller.set_layer_alpha(L, alphas[L])
-            controller.set_embed_alpha(1.0)
+            if bundle.can_edit_embed():
+                controller.set_embed_alpha(1.0)
+            else:
+                controller.set_embed_alpha(0.0)
+                _log("embed edit disabled: per-layer embeddings")
             top = sorted(range(len(alphas)), key=lambda i: -alphas[i])[:5]
             _log(f"top causal layers: {[(i, round(alphas[i],2)) for i in top]}")
         else:
