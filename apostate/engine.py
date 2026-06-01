@@ -576,6 +576,7 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
 
     report_extra: dict = {"optimized": cfg.optimize}
 
+    head_only_profile = False
     if cfg.optimize:
         Rseed, _ = refusal_subspace(ah[L_dir], al[L_dir], rank=1, max_rank=cfg.max_rank, seed=cfg.seed)
         controller.set_subspace(gram_schmidt_remove(Rseed, preserve_basis))
@@ -599,6 +600,11 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
              f"kl={best_attrs.get('kl')} | {shown}")
         L_dir = max(0, min(bundle.num_layers - 1, int(bundle.num_layers * best_params["direction_layer_frac"])))
         preserve_basis = preserve_lookup(L_dir)
+        head_only_profile = (
+            best_params.get("direction_source") == "head_tokens"
+            and bool(best_params.get("ablate_head", False))
+            and abs(float(best_params.get("strength", 0.0))) <= 0.01
+        )
         report_extra.update({"best_params": best_params, "best_trial": best_attrs, "n_trials": cfg.n_trials})
         mark("optimize_profile")
     else:
@@ -634,11 +640,12 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
 
     guard_hist = []
     skip_guard = False
-    if ((not cfg.optimize) or cfg.opt_guard) and cfg.opt_early_stop:
+    guard_skip_reason = "head token profile" if head_only_profile and cfg.opt_guard else None
+    if guard_skip_reason is None and ((not cfg.optimize) or cfg.opt_guard) and cfg.opt_early_stop:
         with controller.active():
             ref_quick = refusal_rate(bundle, eval_harmful[:min(24, len(eval_harmful))], cfg.max_new_tokens, cfg.batch_size)
         skip_guard = ref_quick <= cfg.target_refusal
-    if ((not cfg.optimize) or cfg.opt_guard) and not skip_guard:
+    if guard_skip_reason is None and ((not cfg.optimize) or cfg.opt_guard) and not skip_guard:
         _log("running reconstruction guard ...")
         gcap = max(256, cfg.opt_eval_n)   # guard subset
         guard_hist = run_guard(
@@ -649,11 +656,17 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
         for h in guard_hist:
             _log(f"  guard iter {h['iter']}: sep={h['separation']} ratio={h['ratio']} "
                  f"rank={h['rank']} refusal={h.get('refusal')} kl={h.get('kl')}")
+    elif guard_skip_reason is not None:
+        _log(f"guard: skipped ({guard_skip_reason})")
     elif skip_guard:
         _log(f"guard: skipped (refusal {ref_quick:.3f} <= target {cfg.target_refusal:.3f})")
     mark("guard")
 
-    should_refine = cfg.refine_refusal and (skip_guard or (len(guard_hist) > 0 and guard_hist[-1].get("refusal", 1.0) > cfg.target_refusal))
+    should_refine = cfg.refine_refusal and (
+        head_only_profile
+        or skip_guard
+        or (len(guard_hist) > 0 and guard_hist[-1].get("refusal", 1.0) > cfg.target_refusal)
+    )
     refine_ref = None
     refine_kl = None
     if should_refine:
