@@ -47,6 +47,7 @@ def bake(cfg: ApostateConfig, export: dict, tokenizer=None, drop_layers=None) ->
     n_layers, hidden = model_metadata(model)
     bundle = ModelBundle(model=model, tokenizer=tokenizer, num_layers=n_layers, hidden_size=hidden)
     emb = bundle.embed()
+    head = bundle.lm_head()
     layers = bundle.layers()
 
     print("[bake] applying edits...", flush=True)
@@ -56,6 +57,9 @@ def bake(cfg: ApostateConfig, export: dict, tokenizer=None, drop_layers=None) ->
         a_emb = float(e["embed_alpha"])
         if a_emb != 0:
             emb.weight.data = _edit_embed(emb.weight.data, R, sign * a_emb)
+        a_head = float(e.get("head_alpha", 0.0))
+        if a_head != 0 and head is not None:
+            head.weight.data = _edit_embed(head.weight.data, R, sign * a_head)
         for L, layer in enumerate(layers):
             a = float(e["layer_alphas"][L])
             if a == 0:
