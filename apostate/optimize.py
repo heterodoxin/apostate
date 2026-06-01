@@ -31,9 +31,10 @@ def _refusal_loss(refusal: float, cfg) -> float:
 
 
 def _ref_attr(h: dict) -> float:
+    ref = float(h.get("refusal", h.get("refusal_proxy", 1.0)))
     if h.get("refusal_complete") is False:
-        return 1.0
-    return float(h.get("refusal", h.get("refusal_proxy", 1.0)))
+        return min(1.0, ref + 0.15)
+    return ref
 
 
 def _low_kl_pick(history: list, cfg):
@@ -50,10 +51,53 @@ def _low_kl_pick(history: list, cfg):
         ))
     under_budget = [h for h in history if float(h.get("kl", 99.0)) <= cfg.max_kl]
     if under_budget:
-        return min(under_budget, key=lambda h: (
+        best_under = min(under_budget, key=lambda h: (
             _ref_attr(h), float(h.get("capability_drift", 0.0)), float(h.get("kl", 99.0)), h["value"]
         ))
+        repair_cap = cfg.max_kl * 3.0
+        needed_gain = max(0.08, _ref_attr(best_under) * 0.25)
+        repairable = [
+            h for h in history
+            if float(h.get("kl", 99.0)) <= repair_cap
+            and _ref_attr(h) + needed_gain < _ref_attr(best_under)
+            and float(h.get("capability_drift", 0.0)) <= max(0.05, float(best_under.get("capability_drift", 0.0)) + 0.05)
+        ]
+        if repairable:
+            return min(repairable, key=lambda h: (
+                _ref_attr(h), max(0.0, float(h.get("kl", 99.0)) - cfg.max_kl),
+                float(h.get("capability_drift", 0.0)), float(h.get("kl", 99.0)), h["value"]
+            ))
+        return best_under
+    repairable = [h for h in history if float(h.get("kl", 99.0)) <= cfg.max_kl * 3.0]
+    if repairable:
+        return min(repairable, key=lambda h: (
+            _ref_attr(h), max(0.0, float(h.get("kl", 99.0)) - cfg.max_kl),
+            float(h.get("capability_drift", 0.0)), h["value"]
+        ))
     return min(history, key=lambda h: h["value"])
+
+
+def _candidate_pool(history: list, cfg) -> list:
+    seen = set()
+    pool = []
+
+    def add(rows):
+        for h in rows:
+            params = h.get("params", {})
+            sig = tuple((k, params[k]) for k in sorted(params))
+            if sig in seen:
+                continue
+            seen.add(sig)
+            pool.append(h)
+
+    k = max(1, cfg.opt_rerank_k)
+    add(sorted(history, key=lambda h: h["value"])[:k])
+    add(sorted(history, key=lambda h: (_ref_attr(h), float(h.get("kl", 99.0)), h["value"]))[: max(3, k)])
+    add(sorted(
+        [h for h in history if float(h.get("kl", 99.0)) <= cfg.max_kl * 3.0],
+        key=lambda h: (_ref_attr(h), max(0.0, float(h.get("kl", 99.0)) - cfg.max_kl), h["value"]),
+    )[: max(3, k)])
+    return pool
 
 
 def _capability_samples(cfg) -> List[Tuple[str, str]]:
@@ -272,11 +316,10 @@ def optimize_profile(
         adaptive=cfg.adaptive_trials
     )
 
-    # rerank candidates
-    if cfg.opt_objective != "generation" and history:
-        topk = sorted(history, key=lambda h: h["value"])[: max(1, cfg.opt_rerank_k)]
-        best = None
-        for h in topk:
+    # exact rerank
+    if history:
+        exact = []
+        for h in _candidate_pool(history, cfg):
             _apply_profile(bundle, controller, ah, al, h["params"], causal_shape, cfg, preserve_basis, preserve_lookup)
             with controller.active():
                 ref = refusal_rate(bundle, eval_harmful, cfg.opt_gen_tokens, cfg.batch_size)
@@ -284,17 +327,20 @@ def optimize_profile(
             kl = kl_harmless(bundle, controller, eval_harmless, cfg.batch_size, positions=cfg.kl_positions)
             cap_drift = max(0.0, base_cap - cap_lp) if base_cap is not None else 0.0
             v = _refusal_loss(ref, cfg) + _kl_loss(kl, cfg) + cfg.opt_capability_weight * cap_drift
-            if best is None or v < best[0]:
-                attrs = {"refusal": round(ref, 4), "kl": round(kl, 4)}
-                if base_cap is not None:
-                    attrs.update({
-                        "capability_logprob": round(cap_lp, 4),
-                        "capability_drift": round(cap_drift, 4),
-                    })
-                best = (v, h["params"], attrs)
-        best_params, best_attrs = best[1], best[2]
-    elif history:
-        low_kl = _low_kl_pick(history, cfg)
+            item = {
+                "params": h["params"],
+                "value": v,
+                "refusal": round(ref, 4),
+                "refusal_complete": True,
+                "kl": round(kl, 4),
+            }
+            if base_cap is not None:
+                item.update({
+                    "capability_logprob": round(cap_lp, 4),
+                    "capability_drift": round(cap_drift, 4),
+                })
+            exact.append(item)
+        low_kl = _low_kl_pick(exact or history, cfg)
         best_params = low_kl["params"]
         best_attrs = {
             k: low_kl[k]
