@@ -120,8 +120,13 @@ class ApostateConfig:
         if (self.profile or "").lower() == "balanced":
             self.refine_deescalate = True
         model_l = (self.model or "").lower()
-        if ("gemma-4" in model_l or "gemma4" in model_l) and self.batch_size == 24:
-            self.batch_size = 12
+        if "gemma-4" in model_l or "gemma4" in model_l:
+            if self.batch_size == 24:
+                self.batch_size = 12
+            if self.max_rank == 1:
+                self.max_rank = 3
+            if self.preserve_rank == 8:
+                self.preserve_rank = 4
         here = os.path.dirname(__file__)
         data = os.path.join(os.path.dirname(here), "data")
         if self.harmful_path is None:

@@ -107,13 +107,14 @@ def _anchor_profiles(bundle: ModelBundle, space: dict) -> list:
     strength_hi = float(space["strength"][2])
     rows = []
     for direction_sign in (1.0, -1.0):
-        for direction_layer_frac, band_center, band_width, strength, causal_mix, causal_power in (
-            (0.58, 0.58, 0.78, 1.15, 0.25, 1.50),
-            (0.70, 0.76, 0.72, strength_hi, 0.45, 2.00),
+        for direction_layer_frac, rank, band_center, band_width, strength, causal_mix, causal_power in (
+            (0.58, 1, 0.58, 0.78, 1.15, 0.25, 1.50),
+            (0.62, min(2, rank_hi), 0.62, 0.82, 1.35, 0.20, 1.25),
+            (0.70, rank_hi, 0.76, 0.72, strength_hi, 0.45, 2.00),
         ):
             rows.append({
                 "direction_layer_frac": direction_layer_frac,
-                "refusal_rank": min(1, rank_hi),
+                "refusal_rank": rank,
                 "strength": min(strength, strength_hi),
                 "band_center": band_center,
                 "band_width": band_width,
@@ -339,8 +340,9 @@ def optimize_profile(
         return value, attrs
 
     anchor_history = []
-    for idx, params in enumerate(_anchor_profiles(bundle, space), 1):
-        print(f"\n[Seed {idx}/4]")
+    anchors = _anchor_profiles(bundle, space)
+    for idx, params in enumerate(anchors, 1):
+        print(f"\n[Seed {idx}/{len(anchors)}]")
         print(f"  Parameters: {params}")
         value, attrs = objective(params)
         print(f"  Metrics: {attrs}")
