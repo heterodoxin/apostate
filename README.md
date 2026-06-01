@@ -135,7 +135,7 @@ Supported families are detected from module layout, not from hardcoded model nam
 
 Multimodal wrapper models are supported for the text path when Transformers exposes a causal language decoder inside the model object. Gemma 4 E4B follows that pattern: Apostate edits `model.language_model` and reads layer count and hidden size from the nested text config. Image and audio input pipelines are not edited yet; use text prompts for ablation, benchmark, chat, and bake.
 
-Gemma 4 uses per-layer embeddings. Apostate disables token-embedding edits for those models and defaults Gemma 4 runs to a smaller batch size, which avoids the high-KL embedding path and reduces desktop lag during search.
+Gemma 4 uses per-layer embeddings. Apostate edits the per-layer residual projection inside each decoder layer, disables the high-KL token-embedding edit for those models, and defaults Gemma 4 runs to a smaller batch size to reduce desktop lag during search.
 
 Architectures with nonstandard residual writers may need adapter support before the bake step is correct. State-space models without attention/MLP residual writers are outside the current edit path.
 
