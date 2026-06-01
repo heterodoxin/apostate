@@ -193,6 +193,9 @@ class ModelBundle:
         except AttributeError:
             pass
         out.extend(self.mlp_writers(layer))
+        ple = getattr(layer, "per_layer_projection", None)
+        if ple is not None:
+            out.append(ple)
         return out
 
     def is_moe(self) -> bool:
