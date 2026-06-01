@@ -3,9 +3,56 @@
 const { spawn } = require("child_process");
 const path = require("path");
 const fs = require("fs");
+const os = require("os");
 
 const ROOT = path.resolve(__dirname);
 const PY = process.platform === "win32" ? "python" : "python3";
+
+function hfCacheRoots() {
+  const roots = [];
+  const add = (p) => {
+    if (!p) return;
+    const full = path.resolve(p);
+    if (!roots.includes(full) && fs.existsSync(full)) roots.push(full);
+  };
+  add(process.env.HUGGINGFACE_HUB_CACHE);
+  if (process.env.HF_HOME) add(path.join(process.env.HF_HOME, "hub"));
+  add(path.join(os.homedir(), ".cache", "huggingface", "hub"));
+  return roots;
+}
+
+function hasModelSnapshot(dir) {
+  if (fs.existsSync(path.join(dir, "config.json"))) return true;
+  const snapRoot = path.join(dir, "snapshots");
+  let snaps = [];
+  try { snaps = fs.readdirSync(snapRoot, { withFileTypes: true }); } catch { return false; }
+  return snaps.some((s) => {
+    if (!s.isDirectory()) return false;
+    const p = path.join(snapRoot, s.name);
+    return fs.existsSync(path.join(p, "config.json")) ||
+           fs.existsSync(path.join(p, "tokenizer_config.json")) ||
+           fs.existsSync(path.join(p, "processor_config.json"));
+  });
+}
+
+function findHFModels() {
+  const out = [];
+  const seen = new Set();
+  for (const root of hfCacheRoots()) {
+    let entries = [];
+    try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch { continue; }
+    for (const d of entries) {
+      if (!d.isDirectory() || !d.name.startsWith("models--")) continue;
+      const id = d.name.slice("models--".length).split("--").join("/");
+      if (!id || seen.has(id.toLowerCase())) continue;
+      const dir = path.join(root, d.name);
+      if (!hasModelSnapshot(dir)) continue;
+      seen.add(id.toLowerCase());
+      out.push(id);
+    }
+  }
+  return out.sort((a, b) => a.localeCompare(b));
+}
 
 // run module
 async function run(args, commandLabel) {
@@ -95,6 +142,11 @@ async function run(args, commandLabel) {
     pyCmd = ["-m", "apostate.finetune", ...args];
   } else if (cmd === "list") {
     const seen = new Set();
+    console.log("hf cache:");
+    for (const id of findHFModels()) {
+      console.log("  " + id);
+    }
+    console.log("");
     console.log("checkpoints:");
     for (const base of [process.cwd(), ROOT]) {
       try {
