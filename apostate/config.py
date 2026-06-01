@@ -119,6 +119,9 @@ class ApostateConfig:
         import os
         if (self.profile or "").lower() == "balanced":
             self.refine_deescalate = True
+        model_l = (self.model or "").lower()
+        if ("gemma-4" in model_l or "gemma4" in model_l) and self.batch_size == 24:
+            self.batch_size = 12
         here = os.path.dirname(__file__)
         data = os.path.join(os.path.dirname(here), "data")
         if self.harmful_path is None:

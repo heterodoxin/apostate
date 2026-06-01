@@ -206,6 +206,15 @@ class ModelBundle:
             mods.extend(self.layer_writers(layer))
         return mods
 
+    def can_edit_embed(self) -> bool:
+        """embed ok"""
+        dec = self._decoder()
+        return not (
+            hasattr(dec, "embed_tokens_per_layer")
+            or hasattr(dec, "per_layer_model_projection")
+            or config_value(self.model.config, "vocab_size_per_layer_input") is not None
+        )
+
 
 def load_model(cfg: ApostateConfig) -> ModelBundle:
     torch.manual_seed(cfg.seed)

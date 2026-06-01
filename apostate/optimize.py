@@ -185,7 +185,7 @@ def _apply_profile(
         else:
             controller.set_layer_alpha(L, 0.0)
     embed_scale = params.get("embed_scale", 1.0)
-    controller.set_embed_alpha(strength * embed_scale if params["ablate_embed"] else 0.0)
+    controller.set_embed_alpha(strength * embed_scale if params.get("ablate_embed", False) else 0.0)
     return L_dir
 
 
@@ -216,9 +216,13 @@ def optimize_profile(
         "band_width": ("float", 0.08, 0.65),
         "causal_mix": ("float", 0.0, 1.0),
         "causal_power": ("float", 1.0, 3.0),
-        "ablate_embed": ("cat", [False, True]),
-        "embed_scale": ("float", 0.0, 0.35),
     }
+    if bundle.can_edit_embed():
+        space["ablate_embed"] = ("cat", [False, True])
+        space["embed_scale"] = ("float", 0.0, 0.35)
+    else:
+        space["ablate_embed"] = ("cat", [False])
+        print("[apostate] embed edit disabled: per-layer embeddings", flush=True)
 
     best_seen = [float("inf")]
 

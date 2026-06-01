@@ -74,6 +74,40 @@ def resolve_prompts(path_or_spec: str, n: int, seed: int = 0) -> List[str]:
     return pool[:n]
 
 
+def _content_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                parts.append(str(item.get("text", "")))
+            elif isinstance(item, str):
+                parts.append(item)
+        return "\n".join(p for p in parts if p)
+    return str(content)
+
+
+def fallback_chat_text(tokenizer, messages, add_generation_prompt: bool = True) -> Optional[str]:
+    """chat fallback"""
+    special = getattr(tokenizer, "special_tokens_map", {}) or {}
+    sot = special.get("sot_token") or getattr(tokenizer, "sot_token", None)
+    eot = special.get("eot_token") or getattr(tokenizer, "eot_token", None)
+    if sot and eot:
+        bos = getattr(tokenizer, "bos_token", None) or ""
+        chunks = []
+        for msg in messages:
+            role = msg.get("role", "user")
+            if role == "assistant":
+                role = "model"
+            chunks.append(f"{sot}{role}\n{_content_text(msg.get('content', ''))}{eot}")
+        text = bos + "\n".join(chunks)
+        if add_generation_prompt:
+            text += f"\n{sot}model\n"
+        return text
+    return None
+
+
 def format_chat(tokenizer, instructions: List[str]) -> List[str]:
     """chat format"""
     out = []
@@ -89,6 +123,6 @@ def format_chat(tokenizer, instructions: List[str]) -> List[str]:
                 msg, tokenize=False, add_generation_prompt=True
             )
         except Exception:
-            text = ins
+            text = fallback_chat_text(tokenizer, msg) or ins
         out.append(text)
     return out
