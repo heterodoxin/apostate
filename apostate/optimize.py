@@ -9,7 +9,15 @@ from .model import ModelBundle
 from .projectors import ProjectionController
 from .directions import refusal_subspace, gram_schmidt_remove
 import math
-from .evaluate import refusal_rate, refusal_rate_bounded, refusal_logit_margin, kl_harmless
+from .evaluate import (
+    _COMPLY_STARTS,
+    _REFUSAL_STARTS,
+    _first_token_ids,
+    refusal_rate,
+    refusal_rate_bounded,
+    refusal_logit_margin,
+    kl_harmless,
+)
 from .data import format_chat
 from .search import run_search
 
@@ -100,6 +108,29 @@ def _candidate_pool(history: list, cfg) -> list:
     return pool
 
 
+_HEAD_SUBSPACE_CACHE: dict = {}
+
+
+def _head_token_subspace(bundle: ModelBundle) -> torch.Tensor:
+    key = id(bundle.model)
+    cached = _HEAD_SUBSPACE_CACHE.get(key)
+    if cached is not None:
+        return cached
+    head = bundle.lm_head()
+    if head is None:
+        raise AttributeError("no lm head")
+    tok = bundle.tokenizer
+    device = next(bundle.model.parameters()).device
+    refusal_ids = torch.tensor(_first_token_ids(tok, _REFUSAL_STARTS), dtype=torch.long)
+    comply_ids = torch.tensor(_first_token_ids(tok, _COMPLY_STARTS), dtype=torch.long)
+    W = head.weight.detach().float().cpu()
+    direction = W[refusal_ids].mean(0) - W[comply_ids].mean(0)
+    direction = direction / (direction.norm() + 1e-8)
+    cached = direction.unsqueeze(1).to(device=device)
+    _HEAD_SUBSPACE_CACHE[key] = cached
+    return cached
+
+
 def _anchor_profiles(bundle: ModelBundle, space: dict) -> list:
     if bundle.can_edit_embed():
         return []
@@ -115,6 +146,7 @@ def _anchor_profiles(bundle: ModelBundle, space: dict) -> list:
             (0.70, rank_hi, 0.76, 0.72, strength_hi, 0.45, 2.00, False, 0.0),
         ):
             rows.append({
+                "direction_source": "activations",
                 "direction_layer_frac": direction_layer_frac,
                 "refusal_rank": rank,
                 "strength": min(strength, strength_hi),
@@ -126,6 +158,23 @@ def _anchor_profiles(bundle: ModelBundle, space: dict) -> list:
                 "direction_sign": direction_sign,
                 "ablate_head": head if head_ok else False,
                 "head_scale": head_scale if head_ok else 0.0,
+            })
+    if "head_alpha" in space:
+        for alpha in (3.5, 4.0, 4.5, 5.0):
+            rows.append({
+                "direction_source": "head_tokens",
+                "direction_layer_frac": 0.58,
+                "refusal_rank": 1,
+                "strength": 0.0,
+                "band_center": 0.58,
+                "band_width": 0.78,
+                "causal_mix": 0.0,
+                "causal_power": 1.0,
+                "ablate_embed": False,
+                "direction_sign": 1.0,
+                "ablate_head": True,
+                "head_scale": 0.0,
+                "head_alpha": alpha,
             })
     return rows
 
@@ -234,12 +283,15 @@ def _apply_profile(
     """apply trial"""
     n = bundle.num_layers
     L_dir = max(0, min(n - 1, int(n * params["direction_layer_frac"])))
-    R, _ = refusal_subspace(
-        ah[L_dir], al[L_dir],
-        rank=int(params["refusal_rank"]), max_rank=cfg.max_rank, seed=cfg.seed,
-    )
-    basis = preserve_lookup(L_dir) if preserve_lookup is not None else preserve_basis
-    R = gram_schmidt_remove(R, basis)
+    if params.get("direction_source") == "head_tokens":
+        R = _head_token_subspace(bundle)
+    else:
+        R, _ = refusal_subspace(
+            ah[L_dir], al[L_dir],
+            rank=int(params["refusal_rank"]), max_rank=cfg.max_rank, seed=cfg.seed,
+        )
+        basis = preserve_lookup(L_dir) if preserve_lookup is not None else preserve_basis
+        R = gram_schmidt_remove(R, basis)
     controller.set_subspace(R)
 
     if "band_center" in params:
@@ -260,8 +312,14 @@ def _apply_profile(
             controller.set_layer_alpha(L, 0.0)
     embed_scale = params.get("embed_scale", 1.0)
     controller.set_embed_alpha(strength * embed_scale if params.get("ablate_embed", False) else 0.0)
-    head_scale = params.get("head_scale", 1.0)
-    controller.set_head_alpha(strength * head_scale if params.get("ablate_head", False) else 0.0)
+    if params.get("ablate_head", False):
+        if "head_alpha" in params:
+            controller.set_head_alpha(params["head_alpha"] * params.get("direction_sign", 1.0))
+        else:
+            head_scale = params.get("head_scale", 1.0)
+            controller.set_head_alpha(strength * head_scale)
+    else:
+        controller.set_head_alpha(0.0)
     return L_dir
 
 
@@ -287,9 +345,10 @@ def optimize_profile(
     strength_hi = 1.70 if not bundle.can_edit_embed() else 1.25
     width_hi = 0.82 if not bundle.can_edit_embed() else 0.65
     space = {
+        "direction_source": ("cat", ["activations"]),
         "direction_layer_frac": ("float", 0.30, 0.82),
         "refusal_rank": ("int", 1, min(3, cfg.max_rank)),
-        "strength": ("float", 0.08, strength_hi),
+        "strength": ("float", 0.0, strength_hi),
         "band_center": ("float", 0.15, 0.90),
         "band_width": ("float", 0.08, width_hi),
         "causal_mix": ("float", 0.0, 1.0),
@@ -305,6 +364,9 @@ def optimize_profile(
     if bundle.final_norm() is not None and bundle.lm_head() is not None:
         space["ablate_head"] = ("cat", [False, True])
         space["head_scale"] = ("float", 0.0, 0.75 if not bundle.can_edit_embed() else 0.35)
+        space["head_alpha"] = ("float", 0.0, 6.0 if not bundle.can_edit_embed() else 2.0)
+        if not bundle.can_edit_embed():
+            space["direction_source"] = ("cat", ["activations", "head_tokens"])
     else:
         space["ablate_head"] = ("cat", [False])
 

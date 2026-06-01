@@ -35,6 +35,9 @@ class ApostateConfig:
     max_new_tokens: int = 32                   # refusal signal tokens
     batch_size: int = 24                       # batch
     baseline_eval_n: int = 24                  # base eval
+    fit_response_activations: bool = False     # response fit
+    fit_response_n: int = 160                  # response count
+    fit_response_tokens: int = 32              # response tokens
 
     # subspace
     refusal_rank: int = 1                      # mean diff
