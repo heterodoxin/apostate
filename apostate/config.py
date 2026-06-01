@@ -132,6 +132,10 @@ class ApostateConfig:
 
     def with_defaults(self) -> "ApostateConfig":
         import os
+        default_harmful_test = (
+            "mlabonne/harmful_behaviors:test:text|"
+            "JailbreakBench/JBB-Behaviors@behaviors:harmful:Goal"
+        )
         if (self.profile or "").lower() == "balanced":
             self.refine_deescalate = True
         model_l = (self.model or "").lower()
@@ -144,8 +148,11 @@ class ApostateConfig:
                 self.preserve_rank = 4
         here = os.path.dirname(__file__)
         data = os.path.join(os.path.dirname(here), "data")
+        refusal_cal = os.path.join(data, "refusal_calibration.txt")
         if self.harmful_path is None:
             self.harmful_path = "mlabonne/harmful_behaviors:train:text|" + os.path.join(data, "harmful.txt")
+        if self.harmful_test == default_harmful_test and os.path.exists(refusal_cal):
+            self.harmful_test = self.harmful_test + "|" + refusal_cal
         if self.harmless_path is None:
             self.harmless_path = "mlabonne/harmless_alpaca:train:text|" + os.path.join(data, "harmless.txt")
         return self
