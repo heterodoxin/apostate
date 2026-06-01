@@ -217,7 +217,7 @@ forceWindowsTerminalResize();
   }
 
   function selectModel(action) {
-    const models = modelChoices('Custom model ID/path...');
+    const models = modelChoicesForAction(action, 'Custom model ID/path...');
 
     {
       const consoleSize = getWinConsoleSize();
@@ -367,7 +367,7 @@ forceWindowsTerminalResize();
   }
 
   function selectBase(callback) {
-    const models = modelChoices('Custom base ID/path...');
+    const models = baseModelChoices('Custom base ID/path...');
 
     {
       const consoleSize = getWinConsoleSize();
@@ -565,11 +565,25 @@ forceWindowsTerminalResize();
   }
 
   // model choices
-  function modelChoices(customName) {
+  function modelChoicesForAction(action, customName) {
+    if (action === 'ablate') return baseModelChoices(customName);
+    if (action === 'talk' || action === 'test') return apostateModelChoices(customName);
+    return baseModelChoices(customName);
+  }
+
+  function baseModelChoices(customName) {
     return uniqueModels([
       { name: 'Qwen/Qwen2.5-7B-Instruct', desc: 'default HF' },
-      ...findHFModels(),
-      ...findCheckpoints(),
+      ...findHFModels({ excludeApostate: true }),
+      ...findCheckpoints({ apostate: false }),
+      { name: customName, desc: 'paste HF ID or local path', custom: true },
+    ]);
+  }
+
+  function apostateModelChoices(customName) {
+    return uniqueModels([
+      ...findApostateCheckpoints(),
+      ...findCheckpoints({ apostate: true }),
       { name: customName, desc: 'paste HF ID or local path', custom: true },
     ]);
   }
@@ -585,6 +599,10 @@ forceWindowsTerminalResize();
       out.push(item);
     }
     return out;
+  }
+
+  function isApostateName(name) {
+    return String(name || '').toLowerCase().includes('apostate');
   }
 
   // hf cache roots
@@ -617,7 +635,7 @@ forceWindowsTerminalResize();
   }
 
   // scan hf cache
-  function findHFModels() {
+  function findHFModels(opts = {}) {
     const out = [];
     const seen = new Set();
     for (const root of hfCacheRoots()) {
@@ -627,6 +645,7 @@ forceWindowsTerminalResize();
         if (!d.isDirectory() || !d.name.startsWith('models--')) continue;
         const id = d.name.slice('models--'.length).split('--').join('/');
         if (!id || seen.has(id.toLowerCase())) continue;
+        if (opts.excludeApostate && isApostateName(id)) continue;
         const dir = path.join(root, d.name);
         if (!hasModelSnapshot(dir)) continue;
         seen.add(id.toLowerCase());
@@ -637,7 +656,7 @@ forceWindowsTerminalResize();
   }
 
   // scan checkpoints
-  function findCheckpoints() {
+  function findCheckpoints(opts = {}) {
     const out = [];
     const seen = new Set();
     for (const base of [process.cwd(), __dirname]) {
@@ -649,12 +668,121 @@ forceWindowsTerminalResize();
         let files = [];
         try { files = fs.readdirSync(dir); } catch (e) { continue; }
         if (files.includes('config.json') && files.some(x => x.endsWith('.safetensors'))) {
+          const apostate = isApostateCheckpoint(dir, files);
+          if (opts.apostate === true && !apostate) continue;
+          if (opts.apostate === false && apostate) continue;
           seen.add(d.name);
-          out.push({ name: dir, desc: 'checkpoint' });
+          out.push({ name: dir, desc: apostate ? 'apostate checkpoint' : 'checkpoint' });
         }
       }
     }
     return out;
+  }
+
+  function isApostateCheckpoint(dir, files = null) {
+    const nameHit = isApostateName(path.basename(dir));
+    if (!files) {
+      try { files = fs.readdirSync(dir); } catch (e) { files = []; }
+    }
+    if (files.includes('apostate_config.json')) return true;
+    if (files.includes('report.json')) {
+      try {
+        const txt = fs.readFileSync(path.join(dir, 'report.json'), 'utf8').toLowerCase();
+        if (txt.includes('"optimized"') || txt.includes('"best_params"') || txt.includes('apostate')) return true;
+      } catch (e) {}
+    }
+    if (files.includes('README.md')) {
+      try {
+        if (fs.readFileSync(path.join(dir, 'README.md'), 'utf8').toLowerCase().includes('apostate')) return true;
+      } catch (e) {}
+    }
+    return nameHit;
+  }
+
+  function isModelDir(dir, files = null) {
+    if (!files) {
+      try { files = fs.readdirSync(dir); } catch (e) { return false; }
+    }
+    return files.includes('config.json') && files.some(x => x.endsWith('.safetensors') || x.endsWith('.bin'));
+  }
+
+  function isUnderAny(dir, roots) {
+    const clean = (p) => path.resolve(p).replace(/[\\/]+$/, '').toLowerCase();
+    const full = clean(dir);
+    return roots.some(root => {
+      const r = clean(root);
+      return full === r || full.startsWith(r + path.sep.toLowerCase());
+    });
+  }
+
+  function scanRoots() {
+    const roots = [];
+    const add = (p, depth) => {
+      if (!p) return;
+      const full = path.resolve(p);
+      if (!fs.existsSync(full)) return;
+      if (roots.some(r => r.root === full)) return;
+      roots.push({ root: full, depth });
+    };
+    const home = os.homedir();
+    const envRoots = String(process.env.APOSTATE_MODEL_ROOTS || '').split(path.delimiter).filter(Boolean);
+    for (const r of envRoots) add(r, 6);
+    add(path.join(home, 'OneDrive', 'Desktop', 'apostatehfmodels'), 3);
+    add(path.join(home, 'Desktop', 'apostatehfmodels'), 3);
+    add(path.join(home, 'OneDrive', 'Desktop'), 3);
+    add(path.join(home, 'Desktop'), 3);
+    add(path.join(home, 'OneDrive', 'Documents'), 3);
+    add(path.join(home, 'Documents'), 3);
+    add(process.cwd(), 3);
+    add(__dirname, 3);
+    if (process.platform === 'win32') {
+      for (let code = 68; code <= 90; code++) {
+        add(String.fromCharCode(code) + ':\\', 4);
+      }
+    }
+    return roots;
+  }
+
+  function shouldSkipDir(dir) {
+    const n = path.basename(dir).toLowerCase();
+    return [
+      '.git', '.hg', '.svn', 'node_modules', '__pycache__', '.venv', 'venv',
+      '.cache', 'cache', 'windows', 'program files', 'program files (x86)',
+      'programdata', 'appdata', '$recycle.bin', 'system volume information',
+    ].includes(n);
+  }
+
+  function findApostateCheckpoints() {
+    const out = [];
+    const seen = new Set();
+    const hfRoots = hfCacheRoots();
+    const start = Date.now();
+    const budgetMs = 2500;
+    const maxFound = 80;
+    for (const item of scanRoots()) {
+      const stack = [{ dir: item.root, depth: 0 }];
+      while (stack.length && Date.now() - start < budgetMs && out.length < maxFound) {
+        const { dir, depth } = stack.pop();
+        if (!dir || seen.has(dir.toLowerCase())) continue;
+        seen.add(dir.toLowerCase());
+        if (isUnderAny(dir, hfRoots) || shouldSkipDir(dir)) continue;
+        let entries = [];
+        try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { continue; }
+        const files = entries.filter(e => e.isFile()).map(e => e.name);
+        if (isModelDir(dir, files) && isApostateCheckpoint(dir, files)) {
+          out.push({ name: dir, desc: 'local apostate' });
+          continue;
+        }
+        if (depth >= item.depth) continue;
+        for (let i = entries.length - 1; i >= 0; i--) {
+          const e = entries[i];
+          if (!e.isDirectory()) continue;
+          const child = path.join(dir, e.name);
+          if (!shouldSkipDir(child)) stack.push({ dir: child, depth: depth + 1 });
+        }
+      }
+    }
+    return out.sort((a, b) => a.name.localeCompare(b.name));
   }
 
   // relaunch menu
