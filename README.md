@@ -1,3 +1,8 @@
+![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
+![Status](https://img.shields.io/badge/status-experimental-orange)
+![Python](https://img.shields.io/badge/python-3.10%2B-blue)
+
+
 # Apostate
 Apostate is Heretic-inspired but written from scratch. It uses runtime projection hooks to test edits, then bakes selected projections into model weights.
 Apostate edits instruction-tuned causal language models by finding a residual-stream direction associated with refusals and folding a projection against that direction into the model weights. The ablation pass does not finetune the model, does not add a second model, and writes a standalone Transformers checkpoint at the end.
