@@ -108,21 +108,38 @@ def fallback_chat_text(tokenizer, messages, add_generation_prompt: bool = True) 
     return None
 
 
+def format_messages(tokenizer, messages, add_generation_prompt: bool = True) -> str:
+    """chat format"""
+    try:
+        return tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=add_generation_prompt, enable_thinking=False
+        )
+    except TypeError:
+        return tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=add_generation_prompt
+        )
+    except Exception:
+        return fallback_chat_text(tokenizer, messages, add_generation_prompt=add_generation_prompt) or _content_text(
+            messages[-1].get("content", "") if messages else ""
+        )
+
+
 def format_chat(tokenizer, instructions: List[str]) -> List[str]:
     """chat format"""
     out = []
     for ins in instructions:
         msg = [{"role": "user", "content": ins}]
-        try:
-            # no thinking
-            text = tokenizer.apply_chat_template(
-                msg, tokenize=False, add_generation_prompt=True, enable_thinking=False
-            )
-        except TypeError:
-            text = tokenizer.apply_chat_template(
-                msg, tokenize=False, add_generation_prompt=True
-            )
-        except Exception:
-            text = fallback_chat_text(tokenizer, msg) or ins
-        out.append(text)
+        out.append(format_messages(tokenizer, msg, add_generation_prompt=True))
+    return out
+
+
+def format_chat_pairs(tokenizer, instructions: List[str], responses: List[str]) -> List[str]:
+    """pair format"""
+    out = []
+    for ins, response in zip(instructions, responses):
+        msg = [
+            {"role": "user", "content": ins},
+            {"role": "assistant", "content": response},
+        ]
+        out.append(format_messages(tokenizer, msg, add_generation_prompt=False))
     return out

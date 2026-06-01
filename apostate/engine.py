@@ -14,13 +14,13 @@ import torch
 
 from .config import ApostateConfig
 from .model import load_model
-from .data import resolve_prompts
+from .data import format_chat_pairs, resolve_prompts
 from .activations import collect_activations
 from .directions import refusal_subspace, preservation_subspace, gram_schmidt_remove, separation
 from .projectors import ProjectionController
 from .causal import causal_layer_scores
 from .guard import run_guard
-from .evaluate import refusal_logit_margin, refusal_rate, refusal_rate_bounded, kl_harmless
+from .evaluate import generate, refusal_logit_margin, refusal_rate, refusal_rate_bounded, kl_harmless
 from .optimize import optimize_profile
 from .search import _has_optuna
 from .bake import bake
@@ -43,9 +43,9 @@ def _activation_cache_dir(cfg: ApostateConfig) -> str:
     return cfg.activation_cache_dir or os.path.join(cfg.output_dir, "activation_cache")
 
 
-def _cached_collect(bundle, instructions, batch_size: int, cfg: ApostateConfig, name: str):
+def _cached_collect(bundle, instructions, batch_size: int, cfg: ApostateConfig, name: str, preformatted: bool = False):
     if not cfg.cache_activations:
-        return collect_activations(bundle, instructions, batch_size)
+        return collect_activations(bundle, instructions, batch_size, preformatted=preformatted)
     cache_dir = _activation_cache_dir(cfg)
     os.makedirs(cache_dir, exist_ok=True)
     meta = {
@@ -68,13 +68,60 @@ def _cached_collect(bundle, instructions, batch_size: int, cfg: ApostateConfig, 
                     return acts
         except Exception as e:
             _log(f"activation cache ignored for {name}: {e}")
-    acts = collect_activations(bundle, instructions, batch_size)
+    acts = collect_activations(bundle, instructions, batch_size, preformatted=preformatted)
     try:
         torch.save({"meta": meta, "activations": acts}, path)
         _log(f"activation cache saved: {name}")
     except Exception as e:
         _log(f"activation cache save failed for {name}: {e}")
     return acts
+
+
+def _cached_generate(bundle, instructions, batch_size: int, cfg: ApostateConfig, name: str):
+    if not cfg.cache_activations:
+        return generate(bundle, instructions, cfg.fit_response_tokens, batch_size)
+    cache_dir = _activation_cache_dir(cfg)
+    os.makedirs(cache_dir, exist_ok=True)
+    meta = {
+        "name": name,
+        "model": cfg.model,
+        "prompt_hash": _prompt_hash(instructions),
+        "count": len(instructions),
+        "tokens": cfg.fit_response_tokens,
+    }
+    key = hashlib.sha256(json.dumps(meta, sort_keys=True).encode("utf-8")).hexdigest()[:20]
+    path = os.path.join(cache_dir, f"{name}-{key}.json")
+    if cfg.resume and os.path.isfile(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                obj = json.load(f)
+            if obj.get("meta") == meta and len(obj.get("responses", [])) == len(instructions):
+                _log(f"response cache hit: {name}")
+                return obj["responses"]
+        except Exception as e:
+            _log(f"response cache ignored for {name}: {e}")
+    responses = generate(bundle, instructions, cfg.fit_response_tokens, batch_size)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"meta": meta, "responses": responses}, f)
+        _log(f"response cache saved: {name}")
+    except Exception as e:
+        _log(f"response cache save failed for {name}: {e}")
+    return responses
+
+
+def _response_fit_activations(bundle, fit_harmful, harmless, cfg):
+    n = max(1, min(cfg.fit_response_n, len(fit_harmful), len(harmless)))
+    hprompts = fit_harmful[:n]
+    lprompts = harmless[:n]
+    _log(f"collecting response activations ({n}) ...")
+    hresp = _cached_generate(bundle, hprompts, cfg.batch_size, cfg, "fit_harmful_responses")
+    lresp = _cached_generate(bundle, lprompts, cfg.batch_size, cfg, "fit_harmless_responses")
+    hpairs = format_chat_pairs(bundle.tokenizer, hprompts, hresp)
+    lpairs = format_chat_pairs(bundle.tokenizer, lprompts, lresp)
+    ah = _cached_collect(bundle, hpairs, cfg.batch_size, cfg, "fit_harmful_response_acts", preformatted=True)
+    al = _cached_collect(bundle, lpairs, cfg.batch_size, cfg, "fit_harmless_response_acts", preformatted=True)
+    return ah, al
 
 
 def _persist_reports(cfg: ApostateConfig, report: dict, command: Optional[str]):
@@ -490,8 +537,11 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
     mark("baseline_refusal")
 
     _log("collecting activations (original model) ...")
-    ah = _cached_collect(bundle, fit_harmful, cfg.batch_size, cfg, "fit_harmful")
-    al = _cached_collect(bundle, harmless, cfg.batch_size, cfg, "fit_harmless")
+    if cfg.fit_response_activations:
+        ah, al = _response_fit_activations(bundle, fit_harmful, harmless, cfg)
+    else:
+        ah = _cached_collect(bundle, fit_harmful, cfg.batch_size, cfg, "fit_harmful")
+        al = _cached_collect(bundle, harmless, cfg.batch_size, cfg, "fit_harmless")
 
     preserve_acts = None
     preserve_source = "none"
