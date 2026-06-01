@@ -105,12 +105,14 @@ def _anchor_profiles(bundle: ModelBundle, space: dict) -> list:
         return []
     rank_hi = int(space["refusal_rank"][2])
     strength_hi = float(space["strength"][2])
+    head_ok = "ablate_head" in space
     rows = []
     for direction_sign in (1.0, -1.0):
-        for direction_layer_frac, rank, band_center, band_width, strength, causal_mix, causal_power in (
-            (0.58, 1, 0.58, 0.78, 1.15, 0.25, 1.50),
-            (0.62, min(2, rank_hi), 0.62, 0.82, 1.35, 0.20, 1.25),
-            (0.70, rank_hi, 0.76, 0.72, strength_hi, 0.45, 2.00),
+        for direction_layer_frac, rank, band_center, band_width, strength, causal_mix, causal_power, head, head_scale in (
+            (0.58, 1, 0.58, 0.78, 1.15, 0.25, 1.50, False, 0.0),
+            (0.58, 1, 0.58, 0.78, 0.85, 0.25, 1.50, True, 0.55),
+            (0.62, min(2, rank_hi), 0.62, 0.82, 1.35, 0.20, 1.25, False, 0.0),
+            (0.70, rank_hi, 0.76, 0.72, strength_hi, 0.45, 2.00, False, 0.0),
         ):
             rows.append({
                 "direction_layer_frac": direction_layer_frac,
@@ -122,6 +124,8 @@ def _anchor_profiles(bundle: ModelBundle, space: dict) -> list:
                 "causal_power": causal_power,
                 "ablate_embed": False,
                 "direction_sign": direction_sign,
+                "ablate_head": head if head_ok else False,
+                "head_scale": head_scale if head_ok else 0.0,
             })
     return rows
 
@@ -256,6 +260,8 @@ def _apply_profile(
             controller.set_layer_alpha(L, 0.0)
     embed_scale = params.get("embed_scale", 1.0)
     controller.set_embed_alpha(strength * embed_scale if params.get("ablate_embed", False) else 0.0)
+    head_scale = params.get("head_scale", 1.0)
+    controller.set_head_alpha(strength * head_scale if params.get("ablate_head", False) else 0.0)
     return L_dir
 
 
@@ -296,6 +302,11 @@ def optimize_profile(
     else:
         space["ablate_embed"] = ("cat", [False])
         print("[apostate] embed edit disabled: per-layer embeddings", flush=True)
+    if bundle.final_norm() is not None and bundle.lm_head() is not None:
+        space["ablate_head"] = ("cat", [False, True])
+        space["head_scale"] = ("float", 0.0, 0.75 if not bundle.can_edit_embed() else 0.35)
+    else:
+        space["ablate_head"] = ("cat", [False])
 
     best_seen = [float("inf")]
 

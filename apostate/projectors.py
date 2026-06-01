@@ -18,20 +18,25 @@ class ProjectionController:
         self._modules: List[torch.nn.Module] = []
         self._layer_writers: List[Tuple[torch.nn.Module, torch.nn.Module]] = []
         self._embed: Optional[torch.nn.Module] = None
+        self._final: Optional[torch.nn.Module] = None
         # edits
         self.edits: List[dict] = []
         self._register()
         self.add_edit("primary", sign=-1.0, default_alpha=1.0)  # refusal edit
+        self.set_head_alpha(0.0)
 
     # registration
     def _register(self):
         b = self.bundle
         self._embed = b.embed()
         self._modules = [self._embed]
+        self._final = b.final_norm()
         for layer in b.layers():
             writers = b.layer_writers(layer)   # residual writers
             self._layer_writers.append(writers)
             self._modules.extend(writers)
+        if self._final is not None:
+            self._modules.append(self._final)
         # dedup modules
         seen, uniq = set(), []
         for m in self._modules:
@@ -107,9 +112,16 @@ class ProjectionController:
     def set_edit_embed_alpha(self, name: str, value: float):
         self._edit(name)["alpha"][id(self._embed)] = value
 
+    def set_edit_head_alpha(self, name: str, value: float):
+        if self._final is not None:
+            self._edit(name)["alpha"][id(self._final)] = value
+
     def set_edit_uniform_alpha(self, name: str, value: float):
         e = self._edit(name)
+        final_id = id(self._final) if self._final is not None else None
         for k in e["alpha"]:
+            if k == final_id:
+                continue
             e["alpha"][k] = value
 
     def get_edit_layer_alpha(self, name: str, layer_idx: int) -> float:
@@ -141,8 +153,16 @@ class ProjectionController:
     def set_embed_alpha(self, value: float):
         self.set_edit_embed_alpha("primary", value)
 
+    def set_head_alpha(self, value: float):
+        self.set_edit_head_alpha("primary", value)
+
     def get_embed_alpha(self) -> float:
         return self._edit("primary")["alpha"][id(self._embed)]
+
+    def get_head_alpha(self) -> float:
+        if self._final is None:
+            return 0.0
+        return self._edit("primary")["alpha"].get(id(self._final), 0.0)
 
     def get_layer_alpha(self, layer_idx: int) -> float:
         return self.get_edit_layer_alpha("primary", layer_idx)
@@ -200,6 +220,7 @@ class ProjectionController:
                 "sign": e["sign"],
                 "R": e["R"].detach().cpu(),
                 "embed_alpha": e["alpha"][id(self._embed)],
+                "head_alpha": e["alpha"].get(id(self._final), 0.0) if self._final is not None else 0.0,
                 "layer_alphas": layer_alphas,
             })
         return {"edits": out_edits}

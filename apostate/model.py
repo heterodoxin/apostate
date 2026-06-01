@@ -137,6 +137,19 @@ class ModelBundle:
                 return getattr(dec, name)
         raise AttributeError("Could not locate token embedding.")
 
+    def final_norm(self):
+        dec = self._decoder()
+        for name in ("norm", "ln_f", "final_layernorm"):
+            if hasattr(dec, name):
+                return getattr(dec, name)
+        return None
+
+    def lm_head(self):
+        for root in (self.model, self._decoder()):
+            if hasattr(root, "lm_head"):
+                return getattr(root, "lm_head")
+        return None
+
     def attn_writer(self, layer: torch.nn.Module) -> torch.nn.Module:
         """attn writer"""
         for attn_name in ("self_attn", "attention", "attn"):

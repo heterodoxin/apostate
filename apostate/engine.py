@@ -185,20 +185,26 @@ def _minimize_kl_scale(bundle, controller, cfg, eval_harmful, eval_harmless):
 
 
 def _alpha_get(controller, item: int) -> float:
-    if item < 0:
+    if item == -2:
+        return controller.get_head_alpha()
+    if item == -1:
         return controller.get_embed_alpha()
     return controller.get_layer_alpha(item)
 
 
 def _alpha_set(controller, item: int, value: float):
-    if item < 0:
+    if item == -2:
+        controller.set_head_alpha(value)
+    elif item == -1:
         controller.set_embed_alpha(value)
     else:
         controller.set_layer_alpha(item, value)
 
 
 def _alpha_label(item: int) -> str:
-    return "embed" if item < 0 else f"L{item}"
+    if item == -2:
+        return "head"
+    return "embed" if item == -1 else f"L{item}"
 
 
 def _minimize_kl_layers(bundle, controller, cfg, eval_harmful, eval_harmless):
@@ -212,7 +218,7 @@ def _minimize_kl_layers(bundle, controller, cfg, eval_harmful, eval_harmless):
     if best_ref > target or best_kl <= cfg.kl_target:
         return best_ref, best_kl, 0
 
-    items = [-1] + list(range(controller.num_layers))
+    items = [-2, -1] + list(range(controller.num_layers))
     kept = 0
     scales = (0.75, 0.50, 0.25, 0.0)
     for step in range(cfg.refine_kl_layer_steps):
@@ -320,7 +326,7 @@ def _repair_alphas(bundle, controller, cfg, eval_harmful, eval_harmless, start_r
     for step in range(cfg.repair_steps):
         controller.alpha = dict(best_alpha)
         active = [
-            item for item in ([-1] + list(range(controller.num_layers)))
+            item for item in ([-2, -1] + list(range(controller.num_layers)))
             if abs(_alpha_get(controller, item)) > 1e-6
         ]
         active.sort(key=lambda item: abs(_alpha_get(controller, item)), reverse=True)
@@ -695,6 +701,7 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
         "guard_history": guard_hist,
         "layer_alphas": [round(controller.get_layer_alpha(L), 3) for L in range(bundle.num_layers)],
         "embed_alpha": round(controller.get_embed_alpha(), 3),
+        "head_alpha": round(controller.get_head_alpha(), 3),
         "preserve_rank": cfg.preserve_rank,
         "preserve_source": preserve_source,
         "pruned_layers": drop_layers,
