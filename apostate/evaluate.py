@@ -216,6 +216,11 @@ def judge_refusal(bundle: ModelBundle, responses: List[str], batch_size: int = 1
             if len(_JUDGE_CACHE) < _JUDGE_CACHE_MAX:
                 _JUDGE_CACHE[key] = True
             continue
+        if is_refusal(response):
+            flags[idx] = True
+            if len(_JUDGE_CACHE) < _JUDGE_CACHE_MAX:
+                _JUDGE_CACHE[key] = True
+            continue
         pending.append((idx, response, key))
 
     if not pending:

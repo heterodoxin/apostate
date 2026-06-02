@@ -57,23 +57,9 @@ def _low_kl_pick(history: list, cfg):
         ))
     under_budget = [h for h in history if float(h.get("kl", 99.0)) <= cfg.max_kl]
     if under_budget:
-        best_under = min(under_budget, key=lambda h: (
+        return min(under_budget, key=lambda h: (
             _ref_attr(h), float(h.get("capability_drift", 0.0)), float(h.get("kl", 99.0)), h["value"]
         ))
-        repair_cap = cfg.max_kl * 3.0
-        needed_gain = max(0.08, _ref_attr(best_under) * 0.25)
-        repairable = [
-            h for h in history
-            if float(h.get("kl", 99.0)) <= repair_cap
-            and _ref_attr(h) + needed_gain < _ref_attr(best_under)
-            and float(h.get("capability_drift", 0.0)) <= max(0.05, float(best_under.get("capability_drift", 0.0)) + 0.05)
-        ]
-        if repairable:
-            return min(repairable, key=lambda h: (
-                _ref_attr(h), max(0.0, float(h.get("kl", 99.0)) - cfg.max_kl),
-                float(h.get("capability_drift", 0.0)), float(h.get("kl", 99.0)), h["value"]
-            ))
-        return best_under
     repairable = [h for h in history if float(h.get("kl", 99.0)) <= cfg.max_kl * 3.0]
     if repairable:
         return min(repairable, key=lambda h: (
@@ -270,18 +256,131 @@ def _anchor_profiles(bundle: ModelBundle, space: dict) -> list:
                     "ple_model_projection_ablate": False,
                     "ple_model_projection_alpha": 0.0,
                 })
+    if "kv_ablate" in space:
+        max_idx = int(space.get("kv_source_idx", ("int", 0, 0))[2])
+        for idx in range(max_idx + 1):
+            for strength, part, scope, head_alpha in (
+                (0.25, "value", "one", 0.0),
+                (0.40, "value", "all", 0.0),
+                (0.35, "key_value", "one", 0.0),
+                (0.25, "value", "one", 2.0),
+                (0.35, "value", "one", 2.5),
+                (0.40, "key_value", "one", 2.5),
+                (0.35, "value", "all", 3.0),
+                (0.45, "value", "one", 3.5),
+                (0.55, "key_value", "all", 3.5),
+            ):
+                rows.append({
+                    "direction_source": "activations",
+                    "direction_layer_frac": 0.58,
+                    "refusal_rank": 1,
+                    "strength": 0.0,
+                    "band_center": 0.58,
+                    "band_width": 0.12,
+                    "causal_mix": 0.0,
+                    "causal_power": 1.0,
+                    "ablate_embed": False,
+                    "embed_scale": 0.0,
+                    "head_token_alpha": head_alpha,
+                    "direction_sign": 1.0,
+                    "ablate_head": False,
+                    "head_scale": 0.0,
+                    "kv_ablate": True,
+                    "kv_source_idx": idx,
+                    "kv_scope": scope,
+                    "kv_rank": 1,
+                    "kv_strength": strength,
+                    "kv_part": part,
+                    "kv_sign": 1.0,
+                    "global_scale": 1.0,
+                })
     if bundle.has_ple():
         def priority(row):
+            if row.get("kv_ablate"):
+                return (0, float(row.get("kv_strength", 99.0)))
             if float(row.get("head_token_alpha", 0.0)) > 0.0:
-                return (0, -float(row.get("head_token_alpha", 0.0)))
+                return (1, -float(row.get("head_token_alpha", 0.0)))
             if row.get("direction_source") == "head_tokens":
-                return (1, abs(float(row.get("head_alpha", 0.0)) - 4.65))
+                return (2, abs(float(row.get("head_alpha", 0.0)) - 4.65))
             if row.get("ablate_embed"):
-                return (2, float(row.get("strength", 99.0)))
-            return (3, float(row.get("strength", 99.0)))
+                return (3, float(row.get("strength", 99.0)))
+            return (4, float(row.get("strength", 99.0)))
 
-        rows = sorted(rows, key=priority)[:8]
+        sorted_rows = sorted(rows, key=priority)
+        if "kv_ablate" in space:
+            kv_rows = [r for r in sorted_rows if r.get("kv_ablate")][:10]
+            other_rows = [r for r in sorted_rows if not r.get("kv_ablate")][:10]
+            rows = kv_rows + other_rows
+        else:
+            rows = sorted_rows[:12]
     return rows
+
+
+def _kv_layer_candidates(bundle: ModelBundle, kv_ah: Optional[dict], kv_al: Optional[dict]) -> List[int]:
+    if not kv_ah or not kv_al:
+        return []
+    layers = set()
+    for part in ("k", "v"):
+        layers.update(set(kv_ah.get(part, {})) & set(kv_al.get(part, {})))
+    ordered = [L for L in bundle.kv_source_layers() if L in layers]
+    return ordered or sorted(layers)
+
+
+def _kv_parts(name: str) -> List[str]:
+    if name == "key":
+        return ["k"]
+    if name == "key_value":
+        return ["k", "v"]
+    return ["v"]
+
+
+def _kv_refusal_subspace(bundle: ModelBundle, kv_ah: dict, kv_al: dict, part: str, layer_idx: int, rank: int, cfg):
+    cache = getattr(bundle, "_kv_refusal_subspace_cache", None)
+    if cache is None:
+        cache = {}
+        setattr(bundle, "_kv_refusal_subspace_cache", cache)
+    key = (part, layer_idx, rank, id(kv_ah[part][layer_idx]), id(kv_al[part][layer_idx]))
+    if key not in cache:
+        cache[key] = refusal_subspace(
+            kv_ah[part][layer_idx], kv_al[part][layer_idx],
+            rank=rank, max_rank=max(1, min(rank, cfg.max_rank)), seed=cfg.seed + layer_idx,
+        )[0]
+    return cache[key]
+
+
+def _apply_kv_profile(
+    bundle: ModelBundle,
+    controller: ProjectionController,
+    kv_ah: Optional[dict],
+    kv_al: Optional[dict],
+    params: Dict,
+    cfg,
+    kv_preserve_lookup: Optional[Callable[[str, int], Optional[torch.Tensor]]] = None,
+):
+    if hasattr(controller, "clear_kv"):
+        controller.clear_kv()
+    if not params.get("kv_ablate", False):
+        return
+    layers = _kv_layer_candidates(bundle, kv_ah, kv_al)
+    if not layers:
+        return
+    idx = max(0, min(len(layers) - 1, int(params.get("kv_source_idx", 0))))
+    chosen = layers if params.get("kv_scope", "one") == "all" else [layers[idx]]
+    rank = int(params.get("kv_rank", 1))
+    strength = float(params.get("kv_strength", 0.0)) * float(params.get("kv_sign", 1.0))
+    for layer_idx in chosen:
+        for part in _kv_parts(str(params.get("kv_part", "value"))):
+            if part not in kv_ah or part not in kv_al:
+                continue
+            if layer_idx not in kv_ah[part] or layer_idx not in kv_al[part]:
+                continue
+            R = _kv_refusal_subspace(bundle, kv_ah, kv_al, part, layer_idx, rank, cfg)
+            basis = kv_preserve_lookup(part, layer_idx) if kv_preserve_lookup is not None else None
+            R = gram_schmidt_remove(R, basis)
+            name = f"kv_{part}_{layer_idx}"
+            kind = "kv_key" if part == "k" else "kv_value"
+            controller.set_edit_kv_subspace(name, R, kind)
+            controller.set_edit_kv_layer_alpha(name, layer_idx, strength)
 
 
 def _capability_samples(cfg) -> List[Tuple[str, str]]:
@@ -390,6 +489,9 @@ def _apply_profile(
     plee_ah: Optional[torch.Tensor] = None,
     plee_al: Optional[torch.Tensor] = None,
     plee_preserve_basis: Optional[torch.Tensor] = None,
+    kv_ah: Optional[dict] = None,
+    kv_al: Optional[dict] = None,
+    kv_preserve_lookup: Optional[Callable[[str, int], Optional[torch.Tensor]]] = None,
 ) -> int:
     n = bundle.num_layers
     L_dir = max(0, min(n - 1, int(n * params["direction_layer_frac"])))
@@ -478,6 +580,10 @@ def _apply_profile(
         controller.set_ple_model_projection_alpha(
             params.get("ple_model_projection_alpha", 0.0) * params.get("direction_sign", 1.0)
         )
+    _apply_kv_profile(bundle, controller, kv_ah, kv_al, params, cfg, kv_preserve_lookup)
+    global_scale = float(params.get("global_scale", 1.0))
+    if abs(global_scale - 1.0) > 1e-6 and hasattr(controller, "alpha_state"):
+        controller.scale_alpha_state(controller.alpha_state(), global_scale)
     return L_dir
 
 
@@ -498,6 +604,9 @@ def optimize_profile(
     plee_ah: Optional[torch.Tensor] = None,
     plee_al: Optional[torch.Tensor] = None,
     plee_preserve_basis: Optional[torch.Tensor] = None,
+    kv_ah: Optional[dict] = None,
+    kv_al: Optional[dict] = None,
+    kv_preserve_lookup: Optional[Callable[[str, int], Optional[torch.Tensor]]] = None,
 ) -> Tuple[dict, dict, list]:
     cap_samples = _capability_samples(cfg)
     base_cap = None
@@ -556,6 +665,16 @@ def optimize_profile(
         space["ple_embed_alpha"] = ("float", 0.0, 0.18)
         space["ple_model_projection_ablate"] = ("cat", [False, True])
         space["ple_model_projection_alpha"] = ("float", 0.0, 0.16)
+    kv_layers = _kv_layer_candidates(bundle, kv_ah, kv_al)
+    if kv_layers:
+        space["kv_ablate"] = ("cat", [False, True])
+        space["kv_source_idx"] = ("int", 0, len(kv_layers) - 1)
+        space["kv_scope"] = ("cat", ["one", "all"] if len(kv_layers) > 1 else ["one"])
+        space["kv_rank"] = ("int", 1, max(1, min(2, cfg.max_rank)))
+        space["kv_strength"] = ("float", 0.0, 1.25)
+        space["kv_part"] = ("cat", ["value", "key_value", "key"])
+        space["kv_sign"] = ("cat", [1.0, -1.0])
+        space["global_scale"] = ("float", 0.55, 1.0)
 
     best_seen = [float("inf")]
 
@@ -564,6 +683,7 @@ def optimize_profile(
             bundle, controller, ah, al, params, causal_shape, cfg, preserve_basis, preserve_lookup,
             ple_ah=ple_ah, ple_al=ple_al, ple_preserve_lookup=ple_preserve_lookup,
             plee_ah=plee_ah, plee_al=plee_al, plee_preserve_basis=plee_preserve_basis,
+            kv_ah=kv_ah, kv_al=kv_al, kv_preserve_lookup=kv_preserve_lookup,
         )
         kl = kl_harmless(bundle, controller, eval_harmless, cfg.batch_size, positions=cfg.kl_positions)
         kl_part = _kl_loss(kl, cfg)
@@ -628,6 +748,7 @@ def optimize_profile(
                 bundle, controller, ah, al, h["params"], causal_shape, cfg, preserve_basis, preserve_lookup,
                 ple_ah=ple_ah, ple_al=ple_al, ple_preserve_lookup=ple_preserve_lookup,
                 plee_ah=plee_ah, plee_al=plee_al, plee_preserve_basis=plee_preserve_basis,
+                kv_ah=kv_ah, kv_al=kv_al, kv_preserve_lookup=kv_preserve_lookup,
             )
             with controller.active():
                 ref = refusal_rate(bundle, eval_harmful, cfg.opt_gen_tokens, cfg.batch_size)
@@ -649,6 +770,51 @@ def optimize_profile(
                     "capability_drift": round(cap_drift, 4),
                 })
             exact.append(item)
+            if kl > cfg.max_kl and hasattr(controller, "alpha_state") and hasattr(controller, "scale_alpha_state"):
+                base_alpha = controller.alpha_state()
+                lo, hi = 0.0, 1.0
+                scaled_ref = ref
+                scaled_kl = kl
+                for _ in range(max(3, min(6, cfg.refine_kl_steps))):
+                    mid = 0.5 * (lo + hi)
+                    controller.scale_alpha_state(base_alpha, mid)
+                    mid_kl = kl_harmless(bundle, controller, eval_harmless, cfg.batch_size, positions=cfg.kl_positions)
+                    if mid_kl > cfg.max_kl:
+                        hi = mid
+                    else:
+                        lo = mid
+                        scaled_kl = mid_kl
+                controller.scale_alpha_state(base_alpha, lo)
+                with controller.active():
+                    scaled_ref = refusal_rate(bundle, eval_harmful, cfg.opt_gen_tokens, cfg.batch_size)
+                    scaled_cap_lp = _target_logprob(bundle, cap_samples, cfg.batch_size) if base_cap is not None else None
+                scaled_cap_drift = max(0.0, base_cap - scaled_cap_lp) if base_cap is not None else 0.0
+                scaled_v = (
+                    _refusal_loss(scaled_ref, cfg)
+                    + _kl_loss(scaled_kl, cfg)
+                    + cfg.opt_capability_weight * scaled_cap_drift
+                )
+                scaled_params = dict(h["params"])
+                scaled_params["global_scale"] = round(float(lo), 4)
+                print(
+                    f"[apostate] exact scaled {idx}/{len(pool)}: "
+                    f"scale={lo:.3f} refusal={scaled_ref:.3f} kl={scaled_kl:.3f}",
+                    flush=True,
+                )
+                scaled_item = {
+                    "params": scaled_params,
+                    "value": scaled_v,
+                    "refusal": round(scaled_ref, 4),
+                    "refusal_complete": True,
+                    "kl": round(scaled_kl, 4),
+                }
+                if base_cap is not None:
+                    scaled_item.update({
+                        "capability_logprob": round(scaled_cap_lp, 4),
+                        "capability_drift": round(scaled_cap_drift, 4),
+                    })
+                exact.append(scaled_item)
+                controller.set_alpha_state(base_alpha)
         low_kl = _low_kl_pick(exact or history, cfg)
         best_params = low_kl["params"]
         best_attrs = {
@@ -661,5 +827,6 @@ def optimize_profile(
         bundle, controller, ah, al, best_params, causal_shape, cfg, preserve_basis, preserve_lookup,
         ple_ah=ple_ah, ple_al=ple_al, ple_preserve_lookup=ple_preserve_lookup,
         plee_ah=plee_ah, plee_al=plee_al, plee_preserve_basis=plee_preserve_basis,
+        kv_ah=kv_ah, kv_al=kv_al, kv_preserve_lookup=kv_preserve_lookup,
     )
     return best_params, best_attrs, history

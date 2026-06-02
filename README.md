@@ -18,6 +18,8 @@ classifier refusal `25.0%`, strict refusal or weak noncompliance `50.0%`,
 weak nonanswer `25.0%`, and helpful-style starts `100.0%` on four manual prompts.
 The prompt-mean PLE probe found a nonzero packed PLE direction (`6.6467`) but did
 not move refusal at alphas `0.05` through `1.6`; KL rose from `0.0039` to `0.3142`.
+The 2026-06-02 shared-KV plus PLE smoke run also failed release criteria:
+TEST refusal `58.3%`, harmless KL `0.109`, no bake, no upload.
 
 ## Current Numbers
 

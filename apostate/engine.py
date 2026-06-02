@@ -12,8 +12,14 @@ import torch
 
 from .config import ApostateConfig
 from .model import load_model
-from .data import format_chat_pairs, resolve_prompts
-from .activations import collect_activations, collect_ple_gate_activations, collect_ple_embed_activations
+from .data import resolve_prompts
+from .activations import (
+    collect_activations,
+    collect_kv_activations,
+    collect_response_activations,
+    collect_ple_gate_activations,
+    collect_ple_embed_activations,
+)
 from .directions import refusal_subspace, preservation_subspace, gram_schmidt_remove, separation
 from .projectors import ProjectionController
 from .causal import causal_layer_scores
@@ -117,6 +123,76 @@ def _cached_collect_ple(bundle, instructions, batch_size: int, cfg: ApostateConf
     return acts
 
 
+def _cached_collect_response(bundle, instructions, responses, batch_size: int, cfg: ApostateConfig, name: str):
+    if not cfg.cache_activations:
+        return collect_response_activations(bundle, instructions, responses, batch_size)
+    cache_dir = _activation_cache_dir(cfg)
+    os.makedirs(cache_dir, exist_ok=True)
+    meta = {
+        "name": name,
+        "kind": "response_mean",
+        "model": cfg.model,
+        "num_layers": bundle.num_layers,
+        "prompt_hash": _prompt_hash(instructions),
+        "response_hash": _prompt_hash(responses),
+        "count": len(instructions),
+    }
+    key = hashlib.sha256(json.dumps(meta, sort_keys=True).encode("utf-8")).hexdigest()[:20]
+    path = os.path.join(cache_dir, f"{name}-{key}.pt")
+    if cfg.resume and os.path.isfile(path):
+        try:
+            obj = torch.load(path, map_location="cpu")
+            if obj.get("meta") == meta:
+                acts = obj.get("activations")
+                if acts is not None and acts.shape[:1] == (bundle.num_layers,):
+                    _log(f"response cache hit: {name}")
+                    return acts
+        except Exception as e:
+            _log(f"response cache ignored for {name}: {e}")
+    acts = collect_response_activations(bundle, instructions, responses, batch_size)
+    try:
+        torch.save({"meta": meta, "activations": acts}, path)
+        _log(f"response cache saved: {name}")
+    except Exception as e:
+        _log(f"response cache save failed for {name}: {e}")
+    return acts
+
+
+def _cached_collect_kv(bundle, instructions, batch_size: int, cfg: ApostateConfig, name: str, preformatted: bool = False):
+    layers = bundle.kv_source_layers()
+    if not cfg.cache_activations:
+        return collect_kv_activations(bundle, instructions, batch_size, layers=layers, preformatted=preformatted)
+    cache_dir = _activation_cache_dir(cfg)
+    os.makedirs(cache_dir, exist_ok=True)
+    meta = {
+        "name": name,
+        "kind": "kv_mean",
+        "model": cfg.model,
+        "layers": layers,
+        "prompt_hash": _prompt_hash(instructions),
+        "count": len(instructions),
+    }
+    key = hashlib.sha256(json.dumps(meta, sort_keys=True).encode("utf-8")).hexdigest()[:20]
+    path = os.path.join(cache_dir, f"{name}-{key}.pt")
+    if cfg.resume and os.path.isfile(path):
+        try:
+            obj = torch.load(path, map_location="cpu")
+            if obj.get("meta") == meta:
+                acts = obj.get("activations")
+                if isinstance(acts, dict):
+                    _log(f"kv cache hit: {name}")
+                    return acts
+        except Exception as e:
+            _log(f"kv cache ignored for {name}: {e}")
+    acts = collect_kv_activations(bundle, instructions, batch_size, layers=layers, preformatted=preformatted)
+    try:
+        torch.save({"meta": meta, "activations": acts}, path)
+        _log(f"kv cache saved: {name}")
+    except Exception as e:
+        _log(f"kv cache save failed for {name}: {e}")
+    return acts
+
+
 def _cached_collect_ple_embed(bundle, instructions, batch_size: int, cfg: ApostateConfig, name: str, preformatted: bool = False):
     if not cfg.cache_activations:
         return collect_ple_embed_activations(bundle, instructions, batch_size, preformatted=preformatted)
@@ -192,10 +268,8 @@ def _response_fit_activations(bundle, fit_harmful, harmless, cfg):
     _log(f"collecting response activations ({n}) ...")
     hresp = _cached_generate(bundle, hprompts, cfg.batch_size, cfg, "fit_harmful_responses")
     lresp = _cached_generate(bundle, lprompts, cfg.batch_size, cfg, "fit_harmless_responses")
-    hpairs = format_chat_pairs(bundle.tokenizer, hprompts, hresp)
-    lpairs = format_chat_pairs(bundle.tokenizer, lprompts, lresp)
-    ah = _cached_collect(bundle, hpairs, cfg.batch_size, cfg, "fit_harmful_response_acts", preformatted=True)
-    al = _cached_collect(bundle, lpairs, cfg.batch_size, cfg, "fit_harmless_response_acts", preformatted=True)
+    ah = _cached_collect_response(bundle, hprompts, hresp, cfg.batch_size, cfg, "fit_harmful_response_mean")
+    al = _cached_collect_response(bundle, lprompts, lresp, cfg.batch_size, cfg, "fit_harmless_response_mean")
     return ah, al
 
 
@@ -267,8 +341,49 @@ def _preservation_lookup(acts: Optional[torch.Tensor], rank: int):
     return lookup
 
 
+def _kv_preservation_lookup(acts: Optional[dict], rank: int):
+    cache: dict = {}
+
+    def lookup(part: str, layer_idx: int):
+        if not acts or rank <= 0:
+            return None
+        layer_idx = int(layer_idx)
+        if part not in acts or layer_idx not in acts[part]:
+            return None
+        key = (part, layer_idx)
+        if key not in cache:
+            cache[key] = preservation_subspace(acts[part][layer_idx], rank=rank)
+        return cache[key]
+
+    return lookup
+
+
+def _alpha_state(controller):
+    if hasattr(controller, "alpha_state"):
+        return controller.alpha_state()
+    return {"primary": dict(controller.alpha)}
+
+
+def _set_alpha_state(controller, state):
+    if hasattr(controller, "set_alpha_state"):
+        controller.set_alpha_state(state)
+    else:
+        controller.alpha = dict(state["primary"])
+
+
+def _scale_alpha_state(controller, state, scale: float, cap: Optional[float] = None):
+    if hasattr(controller, "scale_alpha_state"):
+        controller.scale_alpha_state(state, scale, cap)
+        return
+    out = {}
+    for mid, alpha in state["primary"].items():
+        value = alpha * scale
+        out[mid] = min(cap, value) if cap is not None else value
+    controller.alpha = out
+
+
 def _refine_refusal(bundle, controller, cfg, eval_harmful, eval_harmless):
-    base = dict(controller.alpha)
+    base = _alpha_state(controller)
     es = eval_harmful[: max(48, cfg.opt_eval_n)]
     el = eval_harmless[: cfg.opt_eval_n]
     with controller.active():
@@ -277,56 +392,53 @@ def _refine_refusal(bundle, controller, cfg, eval_harmful, eval_harmless):
     if ref <= cfg.target_refusal:
         if not cfg.refine_deescalate:
             return ref, kl
-        best = (ref, kl, dict(base))
+        best = (ref, kl, _alpha_state(controller))
         for s in (0.9, 0.8, 0.7):
-            for mid, a in base.items():
-                controller.alpha[mid] = a * s
+            _scale_alpha_state(controller, base, s)
             with controller.active():
                 new_ref = refusal_rate(bundle, es, cfg.max_new_tokens, cfg.batch_size)
             if new_ref > cfg.target_refusal:
                 break
             new_kl = kl_harmless(bundle, controller, el, cfg.batch_size, positions=cfg.kl_positions)
-            best = (new_ref, new_kl, dict(controller.alpha))
+            best = (new_ref, new_kl, _alpha_state(controller))
             _log(f"  refine(down): scale={s:.2f} refusal={new_ref:.3f} kl={new_kl:.3f} (kept)")
-        controller.alpha = best[2]
+        _set_alpha_state(controller, best[2])
         return best[0], best[1]
-    best = (ref, kl, dict(base))
+    best = (ref, kl, _alpha_state(controller))
     step = (cfg.refine_max_scale - 1.0) / max(1, cfg.refine_steps)
     candidates = []
     for i in range(cfg.refine_steps, 0, -1):
         s = 1.0 + step * i
-        for mid, a in base.items():
-            controller.alpha[mid] = min(cfg.refine_max_scale, a * s)
+        _scale_alpha_state(controller, base, s, cap=cfg.refine_max_scale)
         new_kl = kl_harmless(bundle, controller, el, cfg.batch_size, positions=cfg.kl_positions)
         if new_kl <= cfg.max_kl:
-            candidates.append((s, new_kl, dict(controller.alpha)))
+            candidates.append((s, new_kl, _alpha_state(controller)))
 
     for s, new_kl, alpha in candidates[: max(1, cfg.refine_scale_rerank_k)]:
-        controller.alpha = dict(alpha)
+        _set_alpha_state(controller, alpha)
         with controller.active():
             new_ref = refusal_rate(bundle, es, cfg.max_new_tokens, cfg.batch_size)
         if new_ref < best[0] - 1e-6:
-            best = (new_ref, new_kl, dict(controller.alpha))
+            best = (new_ref, new_kl, _alpha_state(controller))
             _log(f"  refine: scale={s:.2f} refusal={new_ref:.3f} kl={new_kl:.3f} (kept)")
             if new_ref <= cfg.target_refusal:
                 break
         else:
             break
-    controller.alpha = best[2]
+    _set_alpha_state(controller, best[2])
     return best[0], best[1]
 
 
 def _minimize_kl_scale(bundle, controller, cfg, eval_harmful, eval_harmless):
-    base_alpha = dict(controller.alpha)
-    best_alpha = dict(base_alpha)
+    base_alpha = _alpha_state(controller)
+    best_alpha = base_alpha
     best_ref = None
     best_kl = None
     lo, hi = 0.0, 1.0
     target = cfg.target_refusal + cfg.refine_refusal_slack
 
     def _apply(s: float):
-        for mid, a in base_alpha.items():
-            controller.alpha[mid] = a * s
+        _scale_alpha_state(controller, base_alpha, s)
 
     for _ in range(cfg.refine_kl_steps):
         mid = 0.5 * (lo + hi)
@@ -336,12 +448,12 @@ def _minimize_kl_scale(bundle, controller, cfg, eval_harmful, eval_harmless):
         kl = kl_harmless(bundle, controller, eval_harmless, cfg.batch_size, positions=cfg.kl_positions)
         if ref <= target:
             hi = mid
-            best_alpha = dict(controller.alpha)
+            best_alpha = _alpha_state(controller)
             best_ref, best_kl = ref, kl
         else:
             lo = mid
 
-    controller.alpha = best_alpha
+    _set_alpha_state(controller, best_alpha)
     if best_ref is None:
         _apply(1.0)
         with controller.active():
@@ -351,6 +463,8 @@ def _minimize_kl_scale(bundle, controller, cfg, eval_harmful, eval_harmless):
 
 
 def _alpha_get(controller, item: int) -> float:
+    if item == -3:
+        return controller.get_head_token_alpha()
     if item == -2:
         return controller.get_head_alpha()
     if item == -1:
@@ -359,7 +473,9 @@ def _alpha_get(controller, item: int) -> float:
 
 
 def _alpha_set(controller, item: int, value: float):
-    if item == -2:
+    if item == -3:
+        controller.set_head_token_alpha(value)
+    elif item == -2:
         controller.set_head_alpha(value)
     elif item == -1:
         controller.set_embed_alpha(value)
@@ -368,6 +484,8 @@ def _alpha_set(controller, item: int, value: float):
 
 
 def _alpha_label(item: int) -> str:
+    if item == -3:
+        return "head_token"
     if item == -2:
         return "head"
     return "embed" if item == -1 else f"L{item}"
@@ -377,18 +495,18 @@ def _minimize_kl_layers(bundle, controller, cfg, eval_harmful, eval_harmless):
     target = cfg.target_refusal + cfg.refine_refusal_slack
     hset = eval_harmful[: max(24, cfg.opt_eval_n)]
     lset = eval_harmless[: max(48, cfg.opt_eval_n)]
-    best_alpha = dict(controller.alpha)
+    best_alpha = _alpha_state(controller)
     with controller.active():
         best_ref = refusal_rate(bundle, hset, cfg.max_new_tokens, cfg.batch_size)
     best_kl = kl_harmless(bundle, controller, lset, cfg.batch_size, positions=cfg.kl_positions)
     if best_ref > target or best_kl <= cfg.kl_target:
         return best_ref, best_kl, 0
 
-    items = [-2, -1] + list(range(controller.num_layers))
+    items = [-3, -2, -1] + list(range(controller.num_layers))
     kept = 0
     scales = (0.75, 0.50, 0.25, 0.0)
     for step in range(cfg.refine_kl_layer_steps):
-        controller.alpha = dict(best_alpha)
+        _set_alpha_state(controller, best_alpha)
         scored = []
         for item in items:
             a = _alpha_get(controller, item)
@@ -406,10 +524,10 @@ def _minimize_kl_layers(bundle, controller, cfg, eval_harmful, eval_harmless):
 
         accepted = None
         for _, item in scored[: cfg.refine_kl_layer_candidates]:
-            controller.alpha = dict(best_alpha)
+            _set_alpha_state(controller, best_alpha)
             start = _alpha_get(controller, item)
             for scale in scales:
-                controller.alpha = dict(best_alpha)
+                _set_alpha_state(controller, best_alpha)
                 _alpha_set(controller, item, start * scale)
                 trial_kl = kl_harmless(bundle, controller, lset, cfg.batch_size, positions=cfg.kl_positions)
                 if trial_kl >= best_kl - 1e-4:
@@ -417,7 +535,7 @@ def _minimize_kl_layers(bundle, controller, cfg, eval_harmful, eval_harmless):
                 with controller.active():
                     trial_ref = refusal_rate(bundle, hset, cfg.max_new_tokens, cfg.batch_size)
                 if trial_ref <= target and (accepted is None or trial_kl < accepted[0]):
-                    accepted = (trial_kl, trial_ref, item, scale, dict(controller.alpha))
+                    accepted = (trial_kl, trial_ref, item, scale, _alpha_state(controller))
             if accepted is not None and accepted[0] <= cfg.kl_target:
                 break
 
@@ -429,7 +547,7 @@ def _minimize_kl_layers(bundle, controller, cfg, eval_harmful, eval_harmless):
         if best_kl <= cfg.kl_target:
             break
 
-    controller.alpha = best_alpha
+    _set_alpha_state(controller, best_alpha)
     return best_ref, best_kl, kept
 
 
@@ -635,7 +753,7 @@ def _repair_alphas(bundle, controller, cfg, eval_harmful, eval_harmless, start_r
         best_kl = kl_harmless(bundle, controller, lset, cfg.batch_size, positions=cfg.kl_positions)
     else:
         best_kl = start_kl
-    best_alpha = dict(controller.alpha)
+    best_alpha = _alpha_state(controller)
     best_score = _repair_loss(best_ref, best_kl, cfg)
     steps = 0
     min_alpha = getattr(cfg, "repair_min_alpha", 1e-3)
@@ -644,10 +762,10 @@ def _repair_alphas(bundle, controller, cfg, eval_harmful, eval_harmless, start_r
     min_score_gain = getattr(cfg, "repair_min_score_gain", 0.01)
 
     for step in range(cfg.repair_steps):
-        controller.alpha = dict(best_alpha)
+        _set_alpha_state(controller, best_alpha)
         levels = [
             (item, abs(_alpha_get(controller, item)))
-            for item in ([-2, -1] + list(range(controller.num_layers)))
+            for item in ([-3, -2, -1] + list(range(controller.num_layers)))
         ]
         max_level = max((v for _item, v in levels), default=0.0)
         floor = max(min_alpha, max_level * 0.01)
@@ -680,19 +798,19 @@ def _repair_alphas(bundle, controller, cfg, eval_harmful, eval_harmless, start_r
 
         cheap = []
         for _priority, item, scale, value in candidates:
-            controller.alpha = dict(best_alpha)
+            _set_alpha_state(controller, best_alpha)
             _alpha_set(controller, item, value)
             trial_kl = kl_harmless(bundle, controller, lprobe, cfg.batch_size, positions=probe_positions)
             with controller.active():
                 proxy_ref = _margin_refusal(bundle, hprobe, cfg.batch_size)
             proxy_score = _repair_loss(proxy_ref, trial_kl, cfg)
-            cheap.append((proxy_score, trial_kl, item, scale, dict(controller.alpha)))
+            cheap.append((proxy_score, trial_kl, item, scale, _alpha_state(controller)))
 
         accepted = None
         skipped = 0
         cheap.sort(key=lambda x: (x[0], x[1]))
         for _proxy_score, _probe_kl, item, scale, alpha in cheap[: cfg.repair_rerank_k]:
-            controller.alpha = dict(alpha)
+            _set_alpha_state(controller, alpha)
             trial_kl = kl_harmless(bundle, controller, lset, cfg.batch_size, positions=cfg.kl_positions)
             if _repair_loss(0.0, trial_kl, cfg) >= best_score - 1e-4:
                 skipped += 1
@@ -717,7 +835,7 @@ def _repair_alphas(bundle, controller, cfg, eval_harmful, eval_harmless, start_r
                 continue
             if trial_score < best_score - 1e-4:
                 if accepted is None or trial_score < accepted[0]:
-                    accepted = (trial_score, trial_ref, trial_kl, item, scale, dict(controller.alpha))
+                    accepted = (trial_score, trial_ref, trial_kl, item, scale, _alpha_state(controller))
 
         if accepted is None:
             suffix = f" ({skipped} skipped)" if skipped else ""
@@ -734,16 +852,15 @@ def _repair_alphas(bundle, controller, cfg, eval_harmful, eval_harmless, start_r
         if best_ref <= cfg.target_refusal and best_kl <= cfg.kl_target:
             break
 
-    controller.alpha = best_alpha
+    _set_alpha_state(controller, best_alpha)
     return best_ref, best_kl, steps
 
 
 def _backoff_to_kl(bundle, controller, cfg, eval_harmful, eval_harmless):
-    base_alpha = dict(controller.alpha)
+    base_alpha = _alpha_state(controller)
 
     def apply_scale(s: float):
-        for mid, a in base_alpha.items():
-            controller.alpha[mid] = a * s
+        _scale_alpha_state(controller, base_alpha, s)
 
     lo, hi = 0.0, 1.0
     steps = 0
@@ -829,9 +946,11 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
     ah = al = None
     ple_ah = ple_al = None
     plee_ah = plee_al = None
+    kv_ah = kv_al = None
     preserve_source = "none"
     preserve_lookup = _preservation_lookup(None, 0)
     ple_preserve_lookup = _preservation_lookup(None, 0)
+    kv_preserve_lookup = _kv_preservation_lookup(None, 0)
     plee_preserve_basis = None
     preserve_basis = None
     if head_sweep_profile:
@@ -851,6 +970,11 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
             _log("collecting ple embed activations ...")
             plee_ah = _cached_collect_ple_embed(bundle, fit_harmful, cfg.batch_size, cfg, "fit_harmful_ple_embed")
             plee_al = _cached_collect_ple_embed(bundle, harmless, cfg.batch_size, cfg, "fit_harmless_ple_embed")
+        if cfg.optimize and bundle.has_shared_kv():
+            src = bundle.kv_source_layers()
+            _log(f"collecting kv activations layers={src} ...")
+            kv_ah = _cached_collect_kv(bundle, fit_harmful, cfg.batch_size, cfg, "fit_harmful_kv")
+            kv_al = _cached_collect_kv(bundle, harmless, cfg.batch_size, cfg, "fit_harmless_kv")
 
         preserve_acts = None
         if cfg.preserve_rank > 0 and cfg.preserve_path:
@@ -864,6 +988,8 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
         preserve_basis = preserve_lookup(L_dir)
         if ple_al is not None:
             ple_preserve_lookup = _preservation_lookup(ple_al, min(4, max(1, cfg.preserve_rank)))
+        if kv_al is not None:
+            kv_preserve_lookup = _kv_preservation_lookup(kv_al, min(4, max(1, cfg.preserve_rank)))
         if plee_al is not None and cfg.preserve_rank > 0:
             plee_preserve_basis = preservation_subspace(plee_al, rank=min(4, max(1, cfg.preserve_rank)))
         if preserve_basis is not None:
@@ -910,6 +1036,7 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
             causal_shape, cfg, preserve_basis, preserve_lookup,
             ple_ah=ple_ah, ple_al=ple_al, ple_preserve_lookup=ple_preserve_lookup,
             plee_ah=plee_ah, plee_al=plee_al, plee_preserve_basis=plee_preserve_basis,
+            kv_ah=kv_ah, kv_al=kv_al, kv_preserve_lookup=kv_preserve_lookup,
         )
         shown = {k: (round(v, 3) if isinstance(v, float) else v) for k, v in best_params.items()}
         _log(f"best trial: refusal_proxy={best_attrs.get('refusal_proxy', best_attrs.get('refusal'))} "

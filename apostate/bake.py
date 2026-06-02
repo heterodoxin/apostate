@@ -25,6 +25,17 @@ def _edit_embed(W: torch.Tensor, R: torch.Tensor, coeff: float) -> torch.Tensor:
     return (Wf + coeff * ((Wf @ R) @ R.t())).to(W.dtype)
 
 
+def _edit_writer(mod, R: torch.Tensor, coeff: float):
+    down = getattr(mod, "down_proj", None)
+    if isinstance(down, torch.nn.Parameter) and down.dim() == 3:
+        edited = [_edit_linear(down.data[i], R, coeff) for i in range(down.shape[0])]
+        down.data = torch.stack(edited, dim=0)
+        return
+    mod.weight.data = _edit_linear(mod.weight.data, R, coeff)
+    if getattr(mod, "bias", None) is not None:
+        mod.bias.data = _edit_vec(mod.bias.data, R, coeff)
+
+
 @torch.no_grad()
 def bake(cfg: ApostateConfig, export: dict, tokenizer=None, drop_layers=None) -> str:
     edits = export.get("edits", [])
@@ -74,6 +85,21 @@ def bake(cfg: ApostateConfig, export: dict, tokenizer=None, drop_layers=None) ->
             if mod is not None and a != 0:
                 mod.weight.data = _edit_linear(mod.weight.data, R, sign * a)
             continue
+        if str(e.get("kind", "")).startswith("kv"):
+            kind = e.get("kind")
+            for L, layer in enumerate(layers):
+                a = float(e["layer_alphas"][L])
+                if a == 0:
+                    continue
+                for part, mod in bundle.kv_writers(layer):
+                    if kind == "kv_key" and part != "k":
+                        continue
+                    if kind == "kv_value" and part != "v":
+                        continue
+                    mod.weight.data = _edit_linear(mod.weight.data, R, sign * a)
+                    if getattr(mod, "bias", None) is not None:
+                        mod.bias.data = _edit_vec(mod.bias.data, R, sign * a)
+            continue
         a_emb = float(e["embed_alpha"])
         if a_emb != 0:
             emb.weight.data = _edit_embed(emb.weight.data, R, sign * a_emb)
@@ -85,9 +111,7 @@ def bake(cfg: ApostateConfig, export: dict, tokenizer=None, drop_layers=None) ->
             if a == 0:
                 continue
             for mod in bundle.layer_writers(layer):
-                mod.weight.data = _edit_linear(mod.weight.data, R, sign * a)
-                if getattr(mod, "bias", None) is not None:
-                    mod.bias.data = _edit_vec(mod.bias.data, R, sign * a)
+                _edit_writer(mod, R, sign * a)
 
     if drop_layers:
         drop = set(drop_layers)

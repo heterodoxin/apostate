@@ -152,6 +152,44 @@ class ModelBundle:
                         return getattr(attn, proj)
         raise AttributeError("Could not locate attention output projection.")
 
+    def attn_module(self, layer: torch.nn.Module):
+        for attn_name in ("self_attn", "attention", "attn"):
+            if hasattr(layer, attn_name):
+                return getattr(layer, attn_name)
+        return None
+
+    def kv_writers(self, layer: torch.nn.Module) -> List[tuple[str, torch.nn.Module]]:
+        attn = self.attn_module(layer)
+        if attn is None:
+            return []
+        out = []
+        for name, part in (("k_proj", "k"), ("v_proj", "v")):
+            mod = getattr(attn, name, None)
+            if mod is not None:
+                out.append((part, mod))
+        return out
+
+    def kv_source_layers(self) -> List[int]:
+        layers = self.layers()
+        shared_sources = []
+        writable = []
+        for i, layer in enumerate(layers):
+            writers = self.kv_writers(layer)
+            if not writers:
+                continue
+            writable.append(i)
+            attn = self.attn_module(layer)
+            if bool(getattr(attn, "store_full_length_kv", False)):
+                shared_sources.append(i)
+        return shared_sources or writable
+
+    def has_shared_kv(self) -> bool:
+        for layer in self.layers():
+            attn = self.attn_module(layer)
+            if bool(getattr(attn, "is_kv_shared_layer", False)):
+                return True
+        return False
+
     def _mlp(self, layer: torch.nn.Module):
         for name in ("mlp", "feed_forward", "ffn", "block_sparse_moe"):
             if hasattr(layer, name):
@@ -161,25 +199,51 @@ class ModelBundle:
     def _down_proj(self, mod) -> torch.nn.Module:
         for proj in ("down_proj", "c_proj", "fc_out", "dense_4h_to_h", "wo", "w2"):
             if hasattr(mod, proj):
-                return getattr(mod, proj)
+                out = getattr(mod, proj)
+                if isinstance(out, torch.nn.Module):
+                    return out
+        return None
+
+    def _packed_expert_writer(self, mod):
+        down = getattr(mod, "down_proj", None)
+        if isinstance(down, torch.nn.Parameter) and down.dim() == 3:
+            return mod
         return None
 
     def mlp_writers(self, layer: torch.nn.Module) -> List[torch.nn.Module]:
         mlp = self._mlp(layer)
+        out = []
         if mlp is None:
-            return []
-        experts = getattr(mlp, "experts", None)
-        if experts is not None and len(experts) > 0:
-            out = [self._down_proj(e) for e in experts]
-            for sname in ("shared_expert", "shared_experts"):
-                se = getattr(mlp, sname, None)
-                if se is not None:
-                    out.append(self._down_proj(se))
-            out = [w for w in out if w is not None]
-            if out:
-                return out
-        w = self._down_proj(mlp)
-        return [w] if w is not None else []
+            pass
+        else:
+            packed = self._packed_expert_writer(mlp)
+            if packed is not None:
+                out.append(packed)
+            experts = getattr(mlp, "experts", None)
+            if experts is not None and len(experts) > 0:
+                out.extend(self._down_proj(e) for e in experts)
+                for sname in ("shared_expert", "shared_experts"):
+                    se = getattr(mlp, sname, None)
+                    if se is not None:
+                        out.append(self._down_proj(se))
+            else:
+                out.append(self._down_proj(mlp))
+        packed = self._packed_expert_writer(getattr(layer, "experts", None))
+        if packed is not None:
+            out.append(packed)
+        for sname in ("shared_expert", "shared_experts"):
+            se = getattr(layer, sname, None)
+            if se is not None:
+                packed = self._packed_expert_writer(se)
+                out.append(packed if packed is not None else self._down_proj(se))
+        out = [w for w in out if w is not None]
+        seen, uniq = set(), []
+        for w in out:
+            if id(w) in seen:
+                continue
+            seen.add(id(w))
+            uniq.append(w)
+        return uniq
 
     def mlp_writer(self, layer: torch.nn.Module) -> torch.nn.Module:
         ws = self.mlp_writers(layer)
