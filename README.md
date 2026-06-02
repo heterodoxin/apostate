@@ -13,8 +13,6 @@ The edit touches modules that write back into the residual stream: token embeddi
 - [Gemma 4 E4B IT Apostate](https://huggingface.co/heterodoxin/gemma-4-e4b-it-apostate)
 - [Qwen2.5 7B Instruct Apostate](https://huggingface.co/heterodoxin/qwen2.5-7b-instruct-apostate)
 
-Qwen is the stronger export right now. The Gemma 4 E4B export is head-token edited and still produces indirect topic overviews on some prompts. Current Gemma local metrics are 12.4% edited refusal, 0.133 harmless KL, and 522.6 seconds wall time on the last recorded run.
-
 ## Current Numbers
 
 Qwen2.5-7B-Instruct was run on an RTX 4070 Ti SUPER with 4-bit NF4 load, seed `0`, 16 optimization trials, HumanEval `n=80`, MBPP `n=80`, GSM8K `n=24`, JBB refusal `n=48`, and KL over 48 harmless prompts.
@@ -35,7 +33,7 @@ Layer strength is measured instead of guessed. The runner temporarily ablates on
 
 Balanced mode targets low refusal first, then pulls KL back down with global alpha scaling and layer trimming. Repair passes add corrective directions only when they improve the refusal/KL tradeoff. Capability drift is penalized with canonical-answer logprob probes on small math and code items, then checked again with public benchmarks.
 
-The main optimization target combines classifier-judged refusal rate, a hard refusal guard, harmless-token KL, penalty above `kl_target`, penalty above `max_kl`, and cheap capability drift. Public benchmark refusal scoring uses `protectai/distilroberta-base-rejection-v1` by default. Keyword refusal scoring remains available with `--judge keyword`.
+The main optimization target combines classifier-judged refusal rate, a weak-response guard, harmless-token KL, penalty above `kl_target`, penalty above `max_kl`, and cheap capability drift. The weak-response guard is used during optimization so short answers, deflections, safety lectures, and generic overviews do not count as solved harmful prompts. Public benchmark refusal scoring uses `protectai/distilroberta-base-rejection-v1` by default and reports weak/noncompliance rates separately. Keyword refusal scoring remains available with `--judge keyword`.
 
 ## Install
 

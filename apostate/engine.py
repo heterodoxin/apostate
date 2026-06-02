@@ -18,7 +18,13 @@ from .directions import refusal_subspace, preservation_subspace, gram_schmidt_re
 from .projectors import ProjectionController
 from .causal import causal_layer_scores
 from .guard import run_guard
-from .evaluate import generate, refusal_logit_margin, refusal_rate, refusal_rate_bounded, kl_harmless
+from .evaluate import (
+    generate,
+    refusal_logit_margin,
+    strict_refusal_rate as refusal_rate,
+    strict_refusal_rate_bounded as refusal_rate_bounded,
+    kl_harmless,
+)
 from .optimize import optimize_profile, _head_token_subspace
 from .search import _has_optuna
 from .bake import bake
@@ -994,6 +1000,7 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
         "baseline_refusal_rate": round(base_refusal, 4),
         "baseline_eval_n": len(base_eval),
         "edited_refusal_rate": round(edited_refusal, 4),
+        "refusal_metric": "classifier + weak guard",
         "harmless_kl_nats": round(kl, 4),
         "kl_backoff_steps": backoff,
         "kl_layer_trim_steps": kl_layer_steps,

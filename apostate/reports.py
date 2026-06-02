@@ -54,6 +54,8 @@ def _benchmark_rows(benchmark: Optional[dict]) -> list[list[str]]:
             rows.append([f"{suite} pass@1", _pct(bv), _pct(cv), d])
     for key, label, fmt in (
         ("refusal_rate", "Refusal", _pct),
+        ("weak_rate", "Weak", _pct),
+        ("noncompliance_rate", "Noncompliance", _pct),
         ("complied_rate", "Complied", _pct),
         ("pass@1", "Code pass@1", _pct),
         ("gsm8k", "GSM8K", _pct),
@@ -95,6 +97,7 @@ def write_run_report(cfg: Any, report: dict, benchmark: Optional[dict] = None, c
                 ["Direction layer", report.get("direction_layer", "n/a")],
                 [base_label, _pct(report.get("baseline_refusal_rate"))],
                 ["Edited refusal", _pct(report.get("edited_refusal_rate"))],
+                ["Refusal metric", report.get("refusal_metric", "classifier + weak guard")],
                 ["Harmless KL", _num(report.get("harmless_kl_nats"))],
                 ["Target refusal", _pct(_cfg_get(cfg, "target_refusal", report.get("target_refusal")))],
                 ["KL target", _num(report.get("kl_target", _cfg_get(cfg, "kl_target")))],
@@ -159,7 +162,7 @@ def write_run_report(cfg: Any, report: dict, benchmark: Optional[dict] = None, c
         _table(
             ["field", "value"],
             [
-                ["refusal judge", "classifier + hard refusal guard"],
+                ["refusal judge", "classifier + weak guard"],
                 ["preservation metric", "harmless kl"],
                 ["capability suites", "gsm8k, humaneval, mbpp"],
             ],
@@ -198,6 +201,7 @@ def write_model_card(cfg: Any, report: dict, benchmark: Optional[dict] = None, c
             [
                 ["Baseline refusal", _pct(report.get("baseline_refusal_rate"))],
                 ["Edited refusal", _pct(report.get("edited_refusal_rate"))],
+                ["Refusal metric", report.get("refusal_metric", "classifier + weak guard")],
                 ["Harmless KL", _num(report.get("harmless_kl_nats"))],
                 ["KL target", _num(report.get("kl_target"))],
                 ["Preserve rank", report.get("preserve_rank", "n/a")],
@@ -222,7 +226,7 @@ def write_model_card(cfg: Any, report: dict, benchmark: Optional[dict] = None, c
             ["field", "value"],
             [
                 ["edit type", "weight projection"],
-                ["refusal judge", "classifier + hard refusal guard"],
+                ["refusal judge", "classifier + weak guard"],
                 ["preservation metric", "harmless kl"],
             ],
         ),

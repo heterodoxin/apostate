@@ -11,8 +11,8 @@ from .evaluate import (
     _COMPLY_STARTS,
     _REFUSAL_STARTS,
     _first_token_ids,
-    refusal_rate,
-    refusal_rate_bounded,
+    strict_refusal_rate as refusal_rate,
+    strict_refusal_rate_bounded as refusal_rate_bounded,
     refusal_logit_margin,
     kl_harmless,
 )

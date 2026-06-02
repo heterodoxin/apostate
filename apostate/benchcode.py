@@ -101,6 +101,8 @@ def benchmark_vs_base(
         if run_refusal:
             ref = refusal_eval(m, tok, refusal_n, 48, batch, judge=judge)
             res.update({"refusal_rate": ref["refusal_rate"], "complied_rate": ref["complied_rate"],
+                        "weak_rate": ref.get("weak_rate", 0.0),
+                        "noncompliance_rate": ref.get("noncompliance_rate", ref["refusal_rate"]),
                         "category_refusal": ref["category_refusal"]})
         code = {}
         for s, (problems, _) in problems_by_suite.items():
@@ -151,7 +153,12 @@ def benchmark_vs_base(
     def pct(x): return f"{x*100:.1f}"
     cols = [("model", None)]
     if "refusal_rate" in base_res or "refusal_rate" in cand_res:
-        cols.extend([("refusal%", "refusal_rate"), ("complied%", "complied_rate")])
+        cols.extend([
+            ("refusal%", "refusal_rate"),
+            ("weak%", "weak_rate"),
+            ("noncomp%", "noncompliance_rate"),
+            ("complied%", "complied_rate"),
+        ])
     for s in code_suites:
         label = "pass@1%" if len(code_suites) == 1 else f"{s} pass@1%"
         key = "pass@1" if len(code_suites) == 1 else f"{s}:pass@1"

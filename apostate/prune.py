@@ -5,7 +5,7 @@ import torch
 
 from .model import ModelBundle
 from .data import format_chat
-from .evaluate import refusal_rate, kl_harmless
+from .evaluate import strict_refusal_rate as refusal_rate, kl_harmless
 
 
 @torch.no_grad()

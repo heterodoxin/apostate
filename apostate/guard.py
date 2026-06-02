@@ -7,7 +7,7 @@ from .model import ModelBundle
 from .projectors import ProjectionController
 from .activations import collect_layer_activations
 from .directions import refusal_subspace, gram_schmidt_remove, augment_subspace, separation
-from .evaluate import refusal_rate, kl_harmless
+from .evaluate import strict_refusal_rate as refusal_rate, kl_harmless
 
 
 def run_guard(
