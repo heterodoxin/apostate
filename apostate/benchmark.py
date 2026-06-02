@@ -1,5 +1,3 @@
-"""bench harness"""
-
 from __future__ import annotations
 
 from typing import Dict, List, Optional, Tuple
@@ -13,7 +11,6 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from .data import resolve_prompts, format_chat
 from .evaluate import is_refusal, judge_refusal
 
-# fact probe
 PROBE: List[Tuple[str, List[str]]] = [
     ("What is the capital of France?", ["paris"]),
     ("What is 7 multiplied by 8?", ["56"]),
@@ -130,7 +127,6 @@ def _perplexity(model, tok, text):
 
 @torch.no_grad()
 def _logprobs_lastK(model, tok, instructions, K, batch_size):
-    """last k logprobs"""
     device = next(model.parameters()).device
     prompts = format_chat(tok, instructions)
     chunks = []
@@ -139,7 +135,7 @@ def _logprobs_lastK(model, tok, instructions, K, batch_size):
         k = min(K, enc["input_ids"].shape[1])
         logits = model(**enc, use_cache=False).logits[:, -k:, :].float()
         lp = torch.log_softmax(logits, dim=-1)
-        if k < K:  # pad time
+        if k < K:
             lp = torch.nn.functional.pad(lp, (0, 0, K - k, 0))
         chunks.append(lp.half().cpu())
     return torch.cat(chunks, dim=0)
@@ -148,7 +144,7 @@ def _logprobs_lastK(model, tok, instructions, K, batch_size):
 def _kl(ref_lp: torch.Tensor, cand_lp: torch.Tensor) -> float:
     rp = ref_lp.float()
     cp = cand_lp.float()
-    kl = (rp.exp() * (rp - cp)).sum(-1)   # shape
+    kl = (rp.exp() * (rp - cp)).sum(-1)
     return float(kl.mean().item())
 
 
@@ -199,7 +195,6 @@ def run_compare(
         res, _ = benchmark_model(path, harmful_test, base_lp, harmless_test, judge=judge)
         report["models"][label] = {"path": path, **res}
 
-    # table
     rows = [("model", "refusal%", "KL_vs_base", "capability%", "perplexity")]
     rows.append(("BASE (original)", f"{base_res['refusal_rate']*100:.1f}", "0.0000",
                  f"{base_res['capability']*100:.1f}", f"{base_res['perplexity']:.2f}"))

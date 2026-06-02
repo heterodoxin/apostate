@@ -1,5 +1,3 @@
-"""causal scores"""
-
 from __future__ import annotations
 
 from typing import List
@@ -18,8 +16,6 @@ def causal_layer_scores(
     floor: float = 0.25,
     temperature: float = 1.0,
 ) -> List[float]:
-    """layer alpha"""
-    # baseline
     controller.set_uniform_alpha(0.0)
     with controller.active():
         base = refusal_logit_margin(bundle, eval_instructions, batch_size)
@@ -29,15 +25,14 @@ def causal_layer_scores(
         controller.isolate_layer(L)
         with controller.active():
             m = refusal_logit_margin(bundle, eval_instructions, batch_size)
-        drops.append(max(0.0, base - m))   # drop score
+        drops.append(max(0.0, base - m))
 
     t = torch.tensor(drops)
     if float(t.max()) <= 1e-6:
-        # no signal
         return [1.0] * bundle.num_layers
 
-    t = t / t.max()                         # normalize
+    t = t / t.max()
     if temperature != 1.0:
         t = t ** (1.0 / max(1e-3, temperature))
-    alphas = floor + (1.0 - floor) * t      # map alpha
+    alphas = floor + (1.0 - floor) * t
     return [float(x) for x in alphas]

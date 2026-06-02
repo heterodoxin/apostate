@@ -1,5 +1,3 @@
-"""quant config"""
-
 from __future__ import annotations
 
 import glob
@@ -30,21 +28,19 @@ def _model_size_gb(path: str) -> float:
 
 
 def auto_quant(model_path: str) -> str:
-    """auto quant"""
     try:
         if not torch.cuda.is_available():
-            return "bf16"                  # cpu path
+            return "bf16"
         free = torch.cuda.mem_get_info()[0] / 1e9
     except Exception:
         return "nf4"
-    size = _model_size_gb(model_path)          # disk size
-    if size and free > size * 1.25 + 1.5:      # fit margin
+    size = _model_size_gb(model_path)
+    if size and free > size * 1.25 + 1.5:
         return "bf16"
     return "nf4"
 
 
 def quant_kwargs(mode: str, tokenizer=None, calib=None) -> dict:
-    """quant kwargs"""
     mode = (mode or "nf4").lower()
 
     if mode in ("bf16", "none"):
@@ -68,10 +64,10 @@ def quant_kwargs(mode: str, tokenizer=None, calib=None) -> dict:
         ds = calib or ["The quick brown fox jumps over the lazy dog."] * 32
         kw = dict(bits=4, dataset=ds, tokenizer=tokenizer, group_size=128)
         if mode == "marlin":
-            kw["format"] = "marlin"   # int4 kernel
+            kw["format"] = "marlin"
         return {"quantization_config": GPTQConfig(**kw)}
 
     if mode == "awq":
-        return {}   # awq config
+        return {}
 
     raise ValueError(f"unknown quant {mode!r} (choose: {', '.join(MODES)})")

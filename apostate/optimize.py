@@ -1,5 +1,3 @@
-"""profile search"""
-
 from __future__ import annotations
 
 from typing import Callable, Dict, List, Optional, Tuple
@@ -280,7 +278,6 @@ def _apply_profile(
     preserve_basis: Optional[torch.Tensor],
     preserve_lookup: Optional[Callable[[int], Optional[torch.Tensor]]] = None,
 ) -> int:
-    """apply trial"""
     n = bundle.num_layers
     L_dir = max(0, min(n - 1, int(n * params["direction_layer_frac"])))
     if params.get("direction_source") == "head_tokens":
@@ -429,7 +426,6 @@ def optimize_profile(
     )
     history = anchor_history + history
 
-    # exact rerank
     if history:
         exact = []
         pool = _candidate_pool(history, cfg)

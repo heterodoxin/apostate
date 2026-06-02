@@ -54,7 +54,6 @@ function findHFModels() {
   return out.sort((a, b) => a.localeCompare(b));
 }
 
-// run module
 async function run(args, commandLabel) {
   return new Promise((resolve) => {
     const env = {
@@ -85,7 +84,6 @@ async function run(args, commandLabel) {
     return;
   }
 
-  // read flag
   const getFlag = (a, name, def) => {
     const i = a.indexOf(name);
     return (i >= 0 && i + 1 < a.length) ? a[i + 1] : def;

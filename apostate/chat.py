@@ -1,5 +1,3 @@
-"""chat repl"""
-
 from __future__ import annotations
 
 import argparse
@@ -44,7 +42,6 @@ def _device_map(device: str | None) -> dict:
 
 
 def _is_prequantized(model_id: str) -> bool:
-    """saved quant"""
     import json
     cfg = os.path.join(model_id, "config.json")
     if os.path.isfile(cfg):
@@ -65,7 +62,6 @@ def _plain_chat(messages):
 
 
 def _format_chat(tok, messages, think: bool) -> str:
-    """chat text"""
     try:
         return tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=think)
     except TypeError:
@@ -78,7 +74,7 @@ def _format_chat(tok, messages, think: bool) -> str:
 
 
 def _load_model(model_id: str, quant: str, tok, device: str | None):
-    if _is_prequantized(model_id):   # saved quant
+    if _is_prequantized(model_id):
         return AutoModelForCausalLM.from_pretrained(
             model_id, device_map=_device_map(device), low_cpu_mem_usage=True,
             trust_remote_code=True)
@@ -105,7 +101,6 @@ def main(argv=None):
     ap.add_argument("--think", action="store_true", help="start with thinking enabled (Qwen3)")
     a = ap.parse_args(argv)
 
-    # clear screen
     print("\033[2J\033[3J\033[H", end="", flush=True)
 
     if a.backend == "vllm":
@@ -148,7 +143,7 @@ def main(argv=None):
     print(f"loaded on {next(model.parameters()).device} ({load_quant})", flush=True)
 
     think = a.think
-    mnt = a.max_new_tokens or 8192   # token cap
+    mnt = a.max_new_tokens or 8192
     messages = []
     print("\nchat ready.  /reset  /think  /exit\n", flush=True)
     while True:

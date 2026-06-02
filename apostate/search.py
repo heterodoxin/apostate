@@ -1,5 +1,3 @@
-"""param search"""
-
 from __future__ import annotations
 
 from typing import Callable, Dict, List, Tuple, Any
@@ -11,7 +9,7 @@ Objective = Callable[[Dict[str, Any]], Tuple[float, Dict[str, Any]]]
 
 def _has_optuna() -> bool:
     try:
-        import optuna  # noqa
+        import optuna
         return True
     except Exception:
         return False
@@ -20,10 +18,9 @@ def _has_optuna() -> bool:
 def run_search(objective: Objective, space: Space, n_trials: int, seed: int = 0,
                early_stop: bool = False, early_stop_margin: float = 0.01,
                adaptive: bool = False):
-    """run search"""
     actual_trials = n_trials
     if adaptive:
-        actual_trials = min(6, n_trials)  # start small
+        actual_trials = min(6, n_trials)
     history: List[dict] = []
 
     if _has_optuna():

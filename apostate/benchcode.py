@@ -1,5 +1,3 @@
-"""bench compare"""
-
 from __future__ import annotations
 
 from typing import List, Optional
@@ -85,8 +83,8 @@ def benchmark_vs_base(
     run_gsm = any(s in suites for s in ("humaneval", "mbpp", "gsm8k"))
     run_refusal = bool(suites)
     problems_by_suite = {s: _coding_problems(s, n) for s in code_suites}
-    refusal_n = max(20, min(48, n // 2 + 16))   # speed cap
-    gsm_n = max(20, min(24, n // 2))             # speed cap
+    refusal_n = max(20, min(48, n // 2 + 16))
+    gsm_n = max(20, min(24, n // 2))
     parts = []
     for s, (problems, suite_name) in problems_by_suite.items():
         parts.append(f"coding={suite_name}({len(problems)})")
@@ -101,7 +99,7 @@ def benchmark_vs_base(
         m, tok = _load(path)
         res = {}
         if run_refusal:
-            ref = refusal_eval(m, tok, refusal_n, 48, batch, judge=judge)  # jbb eval
+            ref = refusal_eval(m, tok, refusal_n, 48, batch, judge=judge)
             res.update({"refusal_rate": ref["refusal_rate"], "complied_rate": ref["complied_rate"],
                         "category_refusal": ref["category_refusal"]})
         code = {}
@@ -114,7 +112,7 @@ def benchmark_vs_base(
                 vals = next(iter(code.values()))
                 res.update(vals)
         if run_gsm:
-            gsm = gsm8k_eval(m, tok, gsm_n, 320, batch)                   # capability retention
+            gsm = gsm8k_eval(m, tok, gsm_n, 320, batch)
             res["gsm8k"] = gsm["accuracy"]
         lp = _logprobs_lastK(m, tok, resolve_prompts("mlabonne/harmless_alpaca:test:text", 48, 0), 8, batch)
         kl = 0.0 if ref_lp is None else _kl(ref_lp, lp)
@@ -203,7 +201,7 @@ def benchmark_vs_base(
 
 
 def pass_at_1_wrap(model, tok, problems, gen_tokens, batch, timeout):
-    class _B:  # adapter
+    class _B:
         pass
     b = _B(); b.tokenizer = tok; b.model = model
     return pass_at_1(b, problems, gen_tokens, batch, True, timeout)

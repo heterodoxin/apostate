@@ -1,5 +1,3 @@
-"""activations"""
-
 from __future__ import annotations
 
 from typing import List
@@ -60,7 +58,6 @@ def collect_activations(
     batch_size: int = 16,
     preformatted: bool = False,
 ) -> torch.Tensor:
-    """collect activations"""
     tok = bundle.tokenizer
     model = bundle.model
     device = next(model.parameters()).device
@@ -99,7 +96,6 @@ def collect_layer_activations(
     batch_size: int = 16,
     preformatted: bool = False,
 ) -> torch.Tensor:
-    """collect layer"""
     tok = bundle.tokenizer
     model = bundle.model
     device = next(model.parameters()).device

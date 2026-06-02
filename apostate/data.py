@@ -1,5 +1,3 @@
-"""prompt loading"""
-
 from __future__ import annotations
 
 from typing import List, Optional
@@ -25,7 +23,6 @@ def load_prompts(path: str, n: int, seed: int = 0) -> List[str]:
 
 
 def maybe_load_hf(spec: str, n: int, seed: int = 0) -> List[str]:
-    """hf spec"""
     from datasets import load_dataset
     repo, _, rest = spec.partition(":")
     config = None
@@ -62,7 +59,6 @@ def _resolve_one(spec: str, n: int, seed: int) -> List[str]:
 
 
 def resolve_prompts(path_or_spec: str, n: int, seed: int = 0) -> List[str]:
-    """resolve sources"""
     sources = [s.strip() for s in path_or_spec.split("|") if s.strip()]
     seen, pool = set(), []
     for src in sources:
@@ -70,7 +66,7 @@ def resolve_prompts(path_or_spec: str, n: int, seed: int = 0) -> List[str]:
             if p not in seen:
                 seen.add(p)
                 pool.append(p)
-    random.Random(seed).shuffle(pool)   # mix sources
+    random.Random(seed).shuffle(pool)
     return pool[:n]
 
 
@@ -89,7 +85,6 @@ def _content_text(content) -> str:
 
 
 def fallback_chat_text(tokenizer, messages, add_generation_prompt: bool = True) -> Optional[str]:
-    """chat fallback"""
     special = getattr(tokenizer, "special_tokens_map", {}) or {}
     sot = special.get("sot_token") or getattr(tokenizer, "sot_token", None)
     eot = special.get("eot_token") or getattr(tokenizer, "eot_token", None)
@@ -109,7 +104,6 @@ def fallback_chat_text(tokenizer, messages, add_generation_prompt: bool = True) 
 
 
 def format_messages(tokenizer, messages, add_generation_prompt: bool = True) -> str:
-    """chat format"""
     try:
         return tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=add_generation_prompt, enable_thinking=False
@@ -125,7 +119,6 @@ def format_messages(tokenizer, messages, add_generation_prompt: bool = True) -> 
 
 
 def format_chat(tokenizer, instructions: List[str]) -> List[str]:
-    """chat format"""
     out = []
     for ins in instructions:
         msg = [{"role": "user", "content": ins}]
@@ -134,7 +127,6 @@ def format_chat(tokenizer, instructions: List[str]) -> List[str]:
 
 
 def format_chat_pairs(tokenizer, instructions: List[str], responses: List[str]) -> List[str]:
-    """pair format"""
     out = []
     for ins, response in zip(instructions, responses):
         msg = [

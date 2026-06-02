@@ -1,5 +1,3 @@
-"""bake edits"""
-
 from __future__ import annotations
 
 import os
@@ -64,12 +62,11 @@ def bake(cfg: ApostateConfig, export: dict, tokenizer=None, drop_layers=None) ->
             a = float(e["layer_alphas"][L])
             if a == 0:
                 continue
-            for mod in bundle.layer_writers(layer):   # writers
+            for mod in bundle.layer_writers(layer):
                 mod.weight.data = _edit_linear(mod.weight.data, R, sign * a)
                 if getattr(mod, "bias", None) is not None:
                     mod.bias.data = _edit_vec(mod.bias.data, R, sign * a)
 
-    # drop layers
     if drop_layers:
         drop = set(drop_layers)
         keep = [layers[i] for i in range(len(layers)) if i not in drop]
@@ -89,7 +86,7 @@ def bake(cfg: ApostateConfig, export: dict, tokenizer=None, drop_layers=None) ->
                 section["layer_types"] = new_types
             else:
                 section.layer_types = new_types
-        for new_i, layer in enumerate(keep):       # cache index
+        for new_i, layer in enumerate(keep):
             for an in ("self_attn", "attention", "attn"):
                 attn = getattr(layer, an, None)
                 if attn is not None and hasattr(attn, "layer_idx"):

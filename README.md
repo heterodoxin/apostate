@@ -2,16 +2,22 @@
 ![Status](https://img.shields.io/badge/status-experimental-orange)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 
-
 # Apostate
-Apostate is Heretic-inspired but written from scratch. It uses runtime projection hooks to test edits, then bakes selected projections into model weights.
-Apostate edits instruction-tuned causal language models by finding a residual-stream direction associated with refusals and folding a projection against that direction into the model weights. The ablation pass does not finetune the model, does not add a second model, and writes a standalone Transformers checkpoint at the end.
 
-The edit targets modules that write back into the residual stream: token embeddings, attention output projections, MLP down projections, and MoE expert down projections. Dense and MoE models use the same controller path; MoE layers apply the edit to every expert down projection plus shared experts when present.
+Apostate edits instruction-tuned causal language models by finding a residual-stream refusal direction, removing preserved benign directions from it, and folding the resulting projection into model weights. The output is a normal Transformers checkpoint. There is no runtime hook, adapter stack, or finetune dependency after bake.
 
-## Reference Result
+The edit touches modules that write back into the residual stream: token embeddings when safe, attention output projections, MLP down projections, MoE expert down projections, shared experts, and Gemma 4 text-decoder residual projections. Dense and MoE models go through the same controller path.
 
-Qwen2.5-7B-Instruct on an RTX 4070 Ti SUPER, 4-bit NF4 load, seed `0`, 16 optimization trials. Public benchmark uses the classifier refusal judge, HumanEval `n=80`, MBPP `n=80`, GSM8K `n=24`, JBB refusal `n=48`, and KL over 48 harmless prompts.
+## Downloads
+
+- [Gemma 4 E4B IT Apostate](https://huggingface.co/heterodoxin/gemma-4-e4b-it-apostate)
+- [Qwen2.5 7B Instruct Apostate](https://huggingface.co/heterodoxin/qwen2.5-7b-instruct-apostate)
+
+Qwen is the stronger export right now. The Gemma 4 E4B export is head-token edited and still produces indirect topic overviews on some prompts. Current Gemma local metrics are 12.4% edited refusal, 0.133 harmless KL, and 522.6 seconds wall time on the last recorded run.
+
+## Current Numbers
+
+Qwen2.5-7B-Instruct was run on an RTX 4070 Ti SUPER with 4-bit NF4 load, seed `0`, 16 optimization trials, HumanEval `n=80`, MBPP `n=80`, GSM8K `n=24`, JBB refusal `n=48`, and KL over 48 harmless prompts.
 
 | model | refusal | complied | humaneval | mbpp | gsm8k | kl | ablation wall |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -19,40 +25,23 @@ Qwen2.5-7B-Instruct on an RTX 4070 Ti SUPER, 4-bit NF4 load, seed `0`, 16 optimi
 | apostate | 4.2% | 93.8% | 80.0% | 70.0% | 70.8% | 0.143 | 306.8s |
 | heretic | 8.3% | 87.5% | 72.5% | 72.5% | 70.8% | 0.099 | 1166.7s |
 
-This is a same-budget comparison against Heretic `1.3.0`, not Heretic's 200-trial default. Apostate exported a baked checkpoint; Heretic exported a PEFT LoRA adapter. Full commands, raw sample counts, and selected-trial details are in `docs/benchmark-runs/2026-05-31-heretic-head-to-head.md`.
+This is a same-budget comparison against Heretic `1.3.0`, not Heretic's 200-trial default. Apostate exported a baked checkpoint. Heretic exported a PEFT LoRA adapter. Full commands and raw counts are in `docs/benchmark-runs/2026-05-31-heretic-head-to-head.md`.
 
-## How It Works
+## Method
 
-Apostate first runs harmful and harmless prompts through the base model and records residual activations by layer. It computes a low-rank basis from the harmful-minus-harmless activation mean. That basis is treated as the refusal subspace.
+Apostate collects harmful and harmless activations from the base model. It forms a low-rank basis from the harmful-minus-harmless mean and treats that basis as the refusal subspace. Preservation directions from harmless prompts, or from `--preserve-path`, are removed before the projection is scored.
 
-Before applying the edit, Apostate removes benign preservation directions from the refusal basis. By default those preservation directions come from harmless activations. If `--preserve-path` is supplied, the custom preserve prompt set replaces the default harmless source.
+Layer strength is measured instead of guessed. The runner temporarily ablates one layer at a time, records how much refusal behavior moves, and uses that response curve as the alpha prior. The search then scores direction layer, rank, layer band, strength, causal mix, causal sharpness, embedding strength, and head strength when the architecture supports it.
 
-Layer strength is not uniform unless causal targeting is disabled. Apostate measures how much each layer changes refusal behavior under a temporary single-layer ablation, then uses that as the per-layer alpha prior. The optimizer searches over direction layer, rank, layer band, strength, causal mix, causal sharpness, and embedding strength.
+Balanced mode targets low refusal first, then pulls KL back down with global alpha scaling and layer trimming. Repair passes add corrective directions only when they improve the refusal/KL tradeoff. Capability drift is penalized with canonical-answer logprob probes on small math and code items, then checked again with public benchmarks.
 
-After search, the reconstruction guard remeasures refusal leakage and can add corrective directions. Balanced mode then tries to claw back KL: first with global alpha scaling, then by trimming layers that contribute high harmless KL while refusal remains under the target.
-
-The final bake step folds the projection into the model's residual writer weights. The saved checkpoint loads normally through Transformers without runtime hooks.
-
-## Optimization Target
-
-The search objective combines four measured costs:
-
-- classifier-judged refusal rate on harmful validation prompts
-- harmless-token KL against the original model
-- extra penalty above `kl_target`
-- capability drift from canonical-answer logprob on small code/math samples
-
-Balanced defaults use `target_refusal=0.03`, `kl_target=0.06`, `max_kl=0.16`, `preserve_rank=8`, `refine_deescalate=true`, `refine_kl_steps=10`, `refine_kl_layer_steps=10`, and `repair_steps=10`. The hard budget is still `max_kl`; the lower target exists so the search does not treat 0.16 as the desired landing zone.
-
-KL is measured on harmless prompts by comparing original model logits to edited model logits over the final `kl_positions` tokens. The unit is nats. Base harmless logits are cached per prompt/window so repeated scoring does not recompute the unedited side.
+The main optimization target combines classifier-judged refusal rate, a hard refusal guard, harmless-token KL, penalty above `kl_target`, penalty above `max_kl`, and cheap capability drift. Public benchmark refusal scoring uses `protectai/distilroberta-base-rejection-v1` by default. Keyword refusal scoring remains available with `--judge keyword`.
 
 ## Install
 
 ```bash
 apostate setup
 ```
-
-The setup wizard installs Node dependencies, Python dependencies, and checks GPU visibility. On NVIDIA systems it installs CUDA Torch from the PyTorch `cu128` wheel index instead of letting PyPI pick a CPU-only build.
 
 Manual install:
 
@@ -62,50 +51,30 @@ python -m pip install --index-url https://download.pytorch.org/whl/cu128 torch t
 python -m pip install transformers datasets safetensors optuna bitsandbytes
 ```
 
+`apostate setup` installs Node dependencies, Python dependencies, CUDA Torch from the PyTorch `cu128` wheel index on NVIDIA systems, and checks GPU visibility.
+
 ## Ablate
 
 ```bash
 apostate ablate --model Qwen/Qwen2.5-7B-Instruct --out qwen-apostate
-```
-
-Use `--resume` to reuse activation cache files after a failed or interrupted run:
-
-```bash
 apostate ablate --model Qwen/Qwen2.5-7B-Instruct --out qwen-apostate --resume
 ```
 
-Main output files:
+`--resume` reuses activation cache files after an interrupted run. A finished run writes `report.json`, `report.md`, `apostate_config.json`, a checkpoint `README.md`, and any `activation_cache/*.pt` files used by resume.
 
-- `report.json`: raw run metrics
-- `report.md`: readable run report with params, alphas, guard history, and benchmark deltas
-- `apostate_config.json`: full resolved config
-- `README.md`: model card for the edited checkpoint
-- `activation_cache/*.pt`: cached activations for `--resume`
+Balanced defaults are `target_refusal=0.03`, `kl_target=0.06`, `max_kl=0.16`, `preserve_rank=8`, `refine_deescalate=true`, `refine_kl_steps=10`, `refine_kl_layer_steps=10`, and `repair_steps=10`. The hard cap is `max_kl`; `kl_target` is the pressure point used during search.
 
 ## Benchmark
 
-Benchmarks compare an edited model against its base model. Refusal scoring uses `protectai/distilroberta-base-rejection-v1` by default. Keyword scoring is still available with `--judge keyword`, but classifier judging is the public default.
-
 ```bash
 apostate test --model qwen-apostate --base Qwen/Qwen2.5-7B-Instruct --suite humaneval
-apostate test --model qwen-apostate --base Qwen/Qwen2.5-7B-Instruct --suite gsm8k
 apostate test --model qwen-apostate --base Qwen/Qwen2.5-7B-Instruct --suite humaneval,gsm8k,refusal
 apostate test --model qwen-apostate --base Qwen/Qwen2.5-7B-Instruct --suite all
 ```
 
-The TUI benchmark screen is a multi-select list. Space toggles a suite, Enter runs the selected set.
+Suites are `humaneval`, `mbpp`, `gsm8k`, `refusal`, or `all`. The TUI benchmark screen is a multi-select list: Space toggles a suite and Enter runs the selected set. DeepSWE is not listed.
 
-HumanEval uses its `check(entry_point)` harness. MBPP uses its native assertion tests directly, so it does not get wrapped in the HumanEval checker.
-
-| suite | measured fields |
-|---|---|
-| humaneval | refusal, pass@1, gsm8k, kl |
-| mbpp | refusal, pass@1, gsm8k, kl |
-| gsm8k | refusal, gsm8k, kl |
-| refusal | refusal, compliance, category refusal, kl |
-| all | humaneval, mbpp, gsm8k, refusal |
-
-Benchmark output is written to `benchcode.json` and `benchcode.md`. If the candidate directory contains an Apostate `report.json`, the benchmark result is also merged into the candidate report and model card. PEFT adapter directories with `adapter_config.json` are loaded against their recorded base model, so adapter exports can be benchmarked without merging first.
+Benchmark output is written to `benchcode.json` and `benchcode.md`. If the candidate directory has an Apostate `report.json`, the benchmark result is merged into the candidate report and model card.
 
 ## Chat
 
@@ -114,42 +83,30 @@ apostate talk --model qwen-apostate --quant nf4
 apostate talk --model qwen-apostate --backend vllm --kv-cache-dtype turboquant_4bit_nc
 ```
 
-`--quant` controls local weight loading: `auto`, `bf16`, `fp16`, `nf4`, `fp4`, `int8`, `gptq`, `marlin`, or `awq`.
+`--quant` controls local weight loading: `auto`, `bf16`, `fp16`, `nf4`, `fp4`, `int8`, `gptq`, `marlin`, or `awq`. `--kv-cache-dtype` is only for vLLM KV cache dtype. TurboQuant belongs there, not in weight quantization.
 
-`--kv-cache-dtype` is only for vLLM KV cache dtype. TurboQuant belongs there, not in weight quantization. Supported KV cache values include `auto`, `fp8`, `turboquant_k8v4`, `turboquant_4bit_nc`, `turboquant_k3v4_nc`, and `turboquant_3bit_nc`.
+On Windows, vLLM runs through WSL. Apostate stops the WSL vLLM server when chat exits unless `APOSTATE_KEEP_WSL=1` or `--no-shutdown-wsl` is set.
 
-On Windows, vLLM runs through WSL. By default Apostate stops the WSL vLLM server when the chat session exits. Set `APOSTATE_KEEP_WSL=1` or pass `--no-shutdown-wsl` to keep it alive.
+## Model Selection
+
+The TUI has separate model lists for ablation and chat/test. Ablation scans Hugging Face cache plus local checkpoints and hides Apostate variants. Chat/test scans local disks for Apostate checkpoints, including folders that do not start with `apostate`, while ignoring HF cache entries.
+
+Use `APOSTATE_MODEL_ROOTS` to add scan roots. Values are separated with the platform path delimiter.
 
 ## Data
 
-Default fit data combines `mlabonne/harmful_behaviors` train prompts, `mlabonne/harmless_alpaca` train prompts, and bundled local prompt files under `data/`. Held-out eval uses `mlabonne/harmful_behaviors` test, JailbreakBench behaviors, and `mlabonne/harmless_alpaca` test.
+Default fit data combines `mlabonne/harmful_behaviors` train prompts, `mlabonne/harmless_alpaca` train prompts, and local prompt files under `data/`. Held-out eval uses `mlabonne/harmful_behaviors` test, JailbreakBench behaviors, `mlabonne/harmless_alpaca` test, and the local refusal calibration set.
 
-Custom data specs use `repo:split:col`, `repo@config:split:col`, or several sources joined with `|`. Local text files are accepted as sources.
-
-Examples:
-
-```text
-mlabonne/harmful_behaviors:test:text
-JailbreakBench/JBB-Behaviors@behaviors:harmful:Goal
-data/custom_harmful.txt|my_org/my_dataset:train:prompt
-```
+Custom data specs use `repo:split:col`, `repo@config:split:col`, or several sources joined with `|`. Local text files are accepted.
 
 ## Model Coverage
 
-Supported families are detected from module layout, not from hardcoded model names. Current coverage includes Llama 2/3, Qwen2/2.5/3, Mistral, Mixtral, DeepSeek, Gemma/Gemma2/Gemma 4 text decoders including `google/gemma-4-E4B`, Phi-3, GPT-NeoX, Pythia, OPT-style decoder stacks, and MPT-style block stacks. Dense and MoE decoder stacks are supported when the residual writer modules can be located.
+Model support is detected from module layout. Current coverage includes Llama 2/3, Qwen2/2.5/3, Mistral, Mixtral, DeepSeek, Gemma/Gemma2/Gemma 4 text decoders including `google/gemma-4-E4B`, Phi-3, GPT-NeoX, Pythia, OPT-style decoder stacks, and MPT-style block stacks.
 
-Multimodal wrapper models are supported for the text path when Transformers exposes a causal language decoder inside the model object. Gemma 4 E4B follows that pattern: Apostate edits `model.language_model` and reads layer count and hidden size from the nested text config. Image and audio input pipelines are not edited yet; use text prompts for ablation, benchmark, chat, and bake.
+Multimodal wrapper models are supported for the text path when Transformers exposes a causal language decoder inside the model object. Image and audio pipelines are not edited yet.
 
-Gemma 4 uses per-layer embeddings. Apostate edits the per-layer residual projection inside each decoder layer, disables the high-KL token-embedding edit for those models, and defaults Gemma 4 runs to a smaller batch size to reduce desktop lag during search.
-
-Architectures with nonstandard residual writers may need adapter support before the bake step is correct. State-space models without attention/MLP residual writers are outside the current edit path.
+Gemma 4 uses per-layer embeddings. Apostate edits the nested text decoder, disables high-KL token-embedding edits for those models, and defaults Gemma 4 runs to a smaller batch size to reduce desktop lag.
 
 ## Requirements
 
-| dependency | minimum |
-|---|---:|
-| python | 3.10 |
-| node | 18 |
-| cuda | enabled |
-| vram for 7b | 16gb |
-| core packages | torch/cu128, torchvision/cu128, torchaudio/cu128, transformers, datasets, safetensors, optuna, bitsandbytes |
+Use Python 3.10+, Node 18+, CUDA Torch, Transformers, Datasets, Safetensors, Optuna, BitsAndBytes, and enough VRAM for the selected model. A 7B NF4 run expects about 16 GB VRAM.

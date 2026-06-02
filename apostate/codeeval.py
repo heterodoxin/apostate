@@ -1,5 +1,3 @@
-"""code eval"""
-
 from __future__ import annotations
 
 from typing import List, Tuple
@@ -22,7 +20,6 @@ _PLACEHOLDERS = [
 
 
 def load_code_problems(spec: str, n: int) -> List[dict]:
-    """load problems"""
     from datasets import load_dataset
     parts = spec.split(":")
     repo = parts[0]
@@ -58,7 +55,6 @@ def entry_from_tests(tests: str) -> str:
 
 
 def coding_instructions(spec: str, n: int) -> List[str]:
-    """coding prompts"""
     from datasets import load_dataset
     parts = spec.split(":")
     repo = parts[0]
@@ -73,10 +69,8 @@ def coding_instructions(spec: str, n: int) -> List[str]:
     return out
 
 
-# code metrics
 @torch.no_grad()
 def solution_logprob(bundle: ModelBundle, problems: List[dict]) -> float:
-    """solution logprob"""
     tok, model = bundle.tokenizer, bundle.model
     device = next(model.parameters()).device
     vals = []
@@ -91,7 +85,7 @@ def solution_logprob(bundle: ModelBundle, problems: List[dict]) -> float:
         logits = model(ids_full, use_cache=False).logits.float()
         logp = torch.log_softmax(logits[:, :-1, :], dim=-1)
         targets = ids_full[:, 1:]
-        tok_logp = logp.gather(-1, targets.unsqueeze(-1)).squeeze(-1)  # shape
+        tok_logp = logp.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
         sol_logp = tok_logp[:, plen - 1:]
         if sol_logp.numel():
             vals.append(sol_logp.mean().item())
@@ -183,12 +177,10 @@ def pass_at_1(
     bundle: ModelBundle, problems: List[dict], max_new_tokens: int,
     batch_size: int, execute: bool, timeout: int = 10,
 ) -> Tuple[float, float]:
-    """pass rate"""
     gens = _solve(bundle, problems, max_new_tokens, batch_size)
     passed = 0
     complete = 0
 
-    # build tests
     programs = []
     for p, g in zip(problems, gens):
         code = extract_code(g)
@@ -197,10 +189,9 @@ def pass_at_1(
         if execute:
             programs.append(program_for_problem(p, code))
 
-    # run tests
     if execute and programs:
         from concurrent.futures import ProcessPoolExecutor, as_completed
-        with ProcessPoolExecutor(max_workers=None) as ex:  # all cores
+        with ProcessPoolExecutor(max_workers=None) as ex:
             futures = [ex.submit(_run_program, prog, timeout) for prog in programs]
             for f in as_completed(futures):
                 if f.result():

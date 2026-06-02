@@ -1,5 +1,3 @@
-"""model loading"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -60,7 +58,6 @@ def _config_sections(config):
 
 
 def config_section(config, name: str):
-    """config part"""
     for section in _config_sections(config):
         if isinstance(section, dict):
             if name in section:
@@ -71,7 +68,6 @@ def config_section(config, name: str):
 
 
 def config_value(config, name: str, default=None):
-    """config value"""
     section = config_section(config, name)
     if isinstance(section, dict):
         return section.get(name, default)
@@ -79,7 +75,6 @@ def config_value(config, name: str, default=None):
 
 
 def set_config_value(config, name: str, value):
-    """config set"""
     section = config_section(config, name)
     if isinstance(section, dict):
         section[name] = value
@@ -89,7 +84,6 @@ def set_config_value(config, name: str, value):
 
 
 def model_metadata(model: torch.nn.Module) -> tuple[int, int]:
-    """model dims"""
     bundle = ModelBundle(model=model, tokenizer=None, num_layers=0, hidden_size=0)
     n_layers = config_value(model.config, "num_hidden_layers")
     if n_layers is None:
@@ -112,7 +106,6 @@ class ModelBundle:
     num_layers: int
     hidden_size: int
 
-    # model access
     def _decoder(self):
         m = self.model
         seen = set()
@@ -151,7 +144,6 @@ class ModelBundle:
         return None
 
     def attn_writer(self, layer: torch.nn.Module) -> torch.nn.Module:
-        """attn writer"""
         for attn_name in ("self_attn", "attention", "attn"):
             if hasattr(layer, attn_name):
                 attn = getattr(layer, attn_name)
@@ -167,19 +159,17 @@ class ModelBundle:
         return None
 
     def _down_proj(self, mod) -> torch.nn.Module:
-        # mixtral w2
         for proj in ("down_proj", "c_proj", "fc_out", "dense_4h_to_h", "wo", "w2"):
             if hasattr(mod, proj):
                 return getattr(mod, proj)
         return None
 
     def mlp_writers(self, layer: torch.nn.Module) -> List[torch.nn.Module]:
-        """mlp writers"""
         mlp = self._mlp(layer)
         if mlp is None:
             return []
         experts = getattr(mlp, "experts", None)
-        if experts is not None and len(experts) > 0:          # moe
+        if experts is not None and len(experts) > 0:
             out = [self._down_proj(e) for e in experts]
             for sname in ("shared_expert", "shared_experts"):
                 se = getattr(mlp, sname, None)
@@ -188,18 +178,16 @@ class ModelBundle:
             out = [w for w in out if w is not None]
             if out:
                 return out
-        w = self._down_proj(mlp)                              # dense
+        w = self._down_proj(mlp)
         return [w] if w is not None else []
 
     def mlp_writer(self, layer: torch.nn.Module) -> torch.nn.Module:
-        """first writer"""
         ws = self.mlp_writers(layer)
         if not ws:
             raise AttributeError("Could not locate MLP output projection.")
         return ws[0]
 
     def layer_writers(self, layer: torch.nn.Module) -> List[torch.nn.Module]:
-        """layer writers"""
         out = []
         try:
             out.append(self.attn_writer(layer))
@@ -216,14 +204,12 @@ class ModelBundle:
         return bool(layers) and len(self.mlp_writers(layers[len(layers) // 2])) > 1
 
     def writer_modules(self) -> List[torch.nn.Module]:
-        """writer list"""
         mods = [self.embed()]
         for layer in self.layers():
             mods.extend(self.layer_writers(layer))
         return mods
 
     def can_edit_embed(self) -> bool:
-        """embed ok"""
         dec = self._decoder()
         return not (
             hasattr(dec, "embed_tokens_per_layer")
@@ -242,13 +228,12 @@ def load_model(cfg: ApostateConfig) -> ModelBundle:
             "python -m pip install --force-reinstall --index-url "
             "https://download.pytorch.org/whl/cu128 torch torchvision torchaudio"
         )
-    # tf32 ops
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
     tok = AutoTokenizer.from_pretrained(cfg.model, trust_remote_code=True)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
-    tok.padding_side = "left"   # left pad
+    tok.padding_side = "left"
 
     compute_dtype = _DTYPES[cfg.compute_dtype]
     kwargs = dict(trust_remote_code=True, low_cpu_mem_usage=True)
@@ -268,7 +253,6 @@ def load_model(cfg: ApostateConfig) -> ModelBundle:
     model.eval()
     model.requires_grad_(False)
 
-    # greedy decode
     gen_cfg = getattr(model, "generation_config", None)
     if gen_cfg is not None:
         gen_cfg.do_sample = False

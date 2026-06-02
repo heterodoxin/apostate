@@ -1,5 +1,3 @@
-"""layer pruning"""
-
 from __future__ import annotations
 
 from typing import List
@@ -12,7 +10,6 @@ from .evaluate import refusal_rate, kl_harmless
 
 @torch.no_grad()
 def block_influence(bundle: ModelBundle, instructions: List[str], batch_size: int) -> List[float]:
-    """block influence"""
     tok = bundle.tokenizer
     model = bundle.model
     device = next(model.parameters()).device
@@ -24,7 +21,7 @@ def block_influence(bundle: ModelBundle, instructions: List[str], batch_size: in
         enc = tok(prompts[i : i + batch_size], return_tensors="pt", padding=True, add_special_tokens=False)
         enc = {k: v.to(device) for k, v in enc.items()}
         out = model(**enc, output_hidden_states=True, use_cache=False)
-        hs = out.hidden_states            # hidden states
+        hs = out.hidden_states
         mask = enc["attention_mask"].bool()
         m = mask.sum().item()
         den += m
@@ -38,8 +35,6 @@ def block_influence(bundle: ModelBundle, instructions: List[str], batch_size: in
 
 
 class LayerSkip:
-    """skip layers"""
-
     def __init__(self, bundle: ModelBundle):
         self.layers = bundle.layers()
         self.skip = set()
@@ -65,10 +60,9 @@ class LayerSkip:
 
 
 def select_prune(bundle, controller, eval_harmful, eval_harmless, cfg) -> List[int]:
-    """select layers"""
     n = bundle.num_layers
     bi = block_influence(bundle, eval_harmless + eval_harmful, cfg.batch_size)
-    order = sorted(range(n), key=lambda i: bi[i])     # most redundant first
+    order = sorted(range(n), key=lambda i: bi[i])
     cap = int(cfg.prune_max_frac * n)
 
     skip = LayerSkip(bundle)

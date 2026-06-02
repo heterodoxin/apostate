@@ -1,5 +1,3 @@
-"""guard"""
-
 from __future__ import annotations
 
 from typing import List, Optional
@@ -42,11 +40,9 @@ def run_guard(
             "rank": rank, "refusal": round(ref, 4), "kl": round(kl, 4),
         })
 
-        # stop point
         if ratio <= cfg.guard_leakage_eps or ref <= cfg.target_refusal:
             break
 
-        # rollback state
         prev_R = controller.R.detach().cpu().clone()
         prev_alpha = dict(controller.alpha)
 
@@ -66,7 +62,6 @@ def run_guard(
 
         new_kl = kl_harmless(bundle, controller, eval_harmless, cfg.batch_size, positions=cfg.kl_positions)
         if new_kl > cfg.max_kl:
-            # revert stop
             controller.set_subspace(prev_R)
             controller.alpha = prev_alpha
             history[-1]["reverted"] = True

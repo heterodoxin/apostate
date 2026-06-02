@@ -1,5 +1,3 @@
-"""cli"""
-
 from __future__ import annotations
 
 import argparse
@@ -37,7 +35,6 @@ def main(argv=None):
 
     if args.config:
         cfg = ApostateConfig.from_json(args.config)
-        # cli overrides
         for f in dataclasses.fields(ApostateConfig):
             val = getattr(args, f.name, None)
             if val is not None and val != f.default:

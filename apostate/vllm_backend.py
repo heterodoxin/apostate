@@ -1,5 +1,3 @@
-"""vllm backend"""
-
 from __future__ import annotations
 
 import importlib.util
@@ -18,7 +16,6 @@ def _have_vllm() -> bool:
 
 
 def _wsl_check():
-    """wsl check"""
     try:
         r = subprocess.run(["wsl", "-e", "echo", "ok"], capture_output=True, timeout=30)
     except FileNotFoundError:
@@ -33,7 +30,6 @@ def _wsl_check():
 
 
 def _to_wsl_path(win_path: str) -> str:
-    """wsl path"""
     p = win_path.replace("\\", "/")
     if len(p) > 1 and p[1] == ":":
         p = "/mnt/" + p[0].lower() + p[2:]
@@ -79,7 +75,7 @@ def _repl(v1: str, served: str, temperature: float, max_tokens: int):
         print("\033[35mmodel>\033[0m ", end="", flush=True)
         acc = ""
         payload = {"model": served, "messages": messages, "temperature": temperature, "stream": True}
-        if max_tokens and max_tokens > 0:   # token cap
+        if max_tokens and max_tokens > 0:
             payload["max_tokens"] = max_tokens
         try:
             with requests.post(v1 + "/chat/completions", json=payload, stream=True, timeout=600) as r:
@@ -114,7 +110,6 @@ SERVER_LOG = os.path.join(tempfile.gettempdir(), "apostate_vllm.log")
 
 
 def _launch(args: list):
-    # detach stdin
     kw = dict(stdin=subprocess.DEVNULL, stdout=open(SERVER_LOG, "wb"), stderr=subprocess.STDOUT)
     if sys.platform.startswith("win"):
         kw["creationflags"] = subprocess.CREATE_NO_WINDOW
@@ -179,7 +174,7 @@ def _serve_native(
         if not _have_vllm():
             print("vllm install failed.", flush=True)
             return False
-    os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")   # avoid jit
+    os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
     args = [sys.executable, "-m", "vllm.entrypoints.openai.api_server",
             "--model", model, "--served-model-name", SERVED, "--port", str(port),
             "--enforce-eager", *_kv_args(kv_cache_dtype)]
@@ -209,7 +204,6 @@ def serve_and_chat(
     model: str, temperature: float, max_tokens: int, port: int = 8000,
     kv_cache_dtype: str | None = "auto", shutdown_wsl: bool = True,
 ) -> bool:
-    """serve chat"""
     if sys.platform.startswith("win"):
         return _serve_via_wsl(model, temperature, max_tokens, port, kv_cache_dtype, shutdown_wsl)
     return _serve_native(model, temperature, max_tokens, port, kv_cache_dtype)

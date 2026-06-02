@@ -169,7 +169,6 @@ forceWindowsTerminalResize();
     style: { fg: C.bdr },
   });
 
-  // fill rules
   function fillRules() {
     const w = screen.width;
     rule1.setContent('─'.repeat(w));
@@ -484,7 +483,6 @@ forceWindowsTerminalResize();
     selectScreen.render();
   }
 
-  // inference quant
   function selectQuant(callback) {
     const quants = [
       { name: 'auto', desc: 'auto weight quant: bf16 if it fits, else nf4' },
@@ -564,7 +562,6 @@ forceWindowsTerminalResize();
     selectScreen.render();
   }
 
-  // model choices
   function modelChoicesForAction(action, customName) {
     if (action === 'ablate') return baseModelChoices(customName);
     if (action === 'talk' || action === 'test') return apostateModelChoices(customName);
@@ -588,7 +585,6 @@ forceWindowsTerminalResize();
     ]);
   }
 
-  // dedupe models
   function uniqueModels(items) {
     const out = [];
     const seen = new Set();
@@ -605,7 +601,6 @@ forceWindowsTerminalResize();
     return String(name || '').toLowerCase().includes('apostate');
   }
 
-  // hf cache roots
   function hfCacheRoots() {
     const roots = [];
     const add = (p) => {
@@ -619,7 +614,6 @@ forceWindowsTerminalResize();
     return roots;
   }
 
-  // hf snapshots
   function hasModelSnapshot(dir) {
     if (fs.existsSync(path.join(dir, 'config.json'))) return true;
     const snapRoot = path.join(dir, 'snapshots');
@@ -634,7 +628,6 @@ forceWindowsTerminalResize();
     });
   }
 
-  // scan hf cache
   function findHFModels(opts = {}) {
     const out = [];
     const seen = new Set();
@@ -655,7 +648,6 @@ forceWindowsTerminalResize();
     return out.sort((a, b) => a.name.localeCompare(b.name));
   }
 
-  // scan checkpoints
   function findCheckpoints(opts = {}) {
     const out = [];
     const seen = new Set();
@@ -785,13 +777,11 @@ forceWindowsTerminalResize();
     return out.sort((a, b) => a.name.localeCompare(b.name));
   }
 
-  // relaunch menu
   function backToMenu() {
     const proc = spawn(process.execPath, [__filename], { stdio: 'inherit' });
     proc.on('close', (c) => process.exit(c || 0));
   }
 
-  // kill tree
   function killTree(proc) {
     if (!proc || proc.killed) return;
     if (process.platform === 'win32') {
@@ -801,7 +791,6 @@ forceWindowsTerminalResize();
     }
   }
 
-  // live log
   function runCommandWithProgress(args, message) {
     const mainPath = path.join(__dirname, 'main.js');
     const sz = getWinConsoleSize();
@@ -872,7 +861,6 @@ forceWindowsTerminalResize();
     });
   }
 
-  // interactive chat
   function runInteractive(args) {
     const mainPath = path.join(__dirname, 'main.js');
     const proc = spawn(process.execPath, [mainPath, ...args], { stdio: 'inherit' });

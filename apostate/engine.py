@@ -1,5 +1,3 @@
-"""ablation pipeline"""
-
 from __future__ import annotations
 
 import gc
@@ -193,7 +191,6 @@ def _preservation_lookup(acts: Optional[torch.Tensor], rank: int):
 
 
 def _refine_refusal(bundle, controller, cfg, eval_harmful, eval_harmless):
-    """refine refusal"""
     base = dict(controller.alpha)
     es = eval_harmful[: max(48, cfg.opt_eval_n)]
     el = eval_harmless[: cfg.opt_eval_n]
@@ -203,7 +200,6 @@ def _refine_refusal(bundle, controller, cfg, eval_harmful, eval_harmless):
     if ref <= cfg.target_refusal:
         if not cfg.refine_deescalate:
             return ref, kl
-        # shrink alpha
         best = (ref, kl, dict(base))
         for s in (0.9, 0.8, 0.7):
             for mid, a in base.items():
@@ -232,7 +228,7 @@ def _refine_refusal(bundle, controller, cfg, eval_harmful, eval_harmless):
         controller.alpha = dict(alpha)
         with controller.active():
             new_ref = refusal_rate(bundle, es, cfg.max_new_tokens, cfg.batch_size)
-        if new_ref < best[0] - 1e-6:                  # keep
+        if new_ref < best[0] - 1e-6:
             best = (new_ref, new_kl, dict(controller.alpha))
             _log(f"  refine: scale={s:.2f} refusal={new_ref:.3f} kl={new_kl:.3f} (kept)")
             if new_ref <= cfg.target_refusal:
@@ -727,7 +723,6 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
     else:
         tail = harmless[cfg.n_harmless - cfg.n_eval : cfg.n_harmless]
         eval_harmless = tail if len(tail) >= cfg.n_eval else harmless[: cfg.n_eval]
-    # split eval
     hh = max(1, len(eval_harmful) // 2)
     hl = max(1, len(eval_harmless) // 2)
     test_harmful, eval_harmful = eval_harmful[:hh], eval_harmful[hh:]
@@ -871,7 +866,7 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
         skip_guard = ref_quick <= cfg.target_refusal
     if guard_skip_reason is None and ((not cfg.optimize) or cfg.opt_guard) and not skip_guard:
         _log("running reconstruction guard ...")
-        gcap = max(256, cfg.opt_eval_n)   # guard subset
+        gcap = max(256, cfg.opt_eval_n)
         guard_hist = run_guard(
             bundle, controller, fit_harmful[:gcap], harmless[:gcap], cfg, L_dir, initial_sep,
             preserve_basis,
@@ -961,7 +956,6 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
                 backoff += extra_backoff
     mark("repair")
 
-    # prune layers
     drop_layers: list = []
     skipper = None
     if cfg.prune:
@@ -976,12 +970,11 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
             _log(f"pruning {len(drop_layers)} / {bundle.num_layers} layers "
                  f"(~{speedup:.0f}% faster): {drop_layers}")
             skipper = LayerSkip(bundle)
-            skipper.set(drop_layers)   # eval prune
+            skipper.set(drop_layers)
         else:
             _log("pruning: no layer is free within kl budget")
     mark("prune")
 
-    # test report
     with controller.active():
         edited_refusal = refusal_rate(bundle, test_harmful, cfg.max_new_tokens, cfg.batch_size)
     if skipper is not None:

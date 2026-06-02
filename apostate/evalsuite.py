@@ -1,5 +1,3 @@
-"""eval suite"""
-
 from __future__ import annotations
 
 from typing import Dict, List, Tuple
@@ -54,7 +52,6 @@ def refusal_eval(
     model, tok, n: int = 80, max_new_tokens: int = 48, batch_size: int = 8,
     judge: str = "classifier",
 ) -> dict:
-    """refusal eval"""
     items = load_jbb(n)
     comps = _generate(model, tok, [it["goal"] for it in items], max_new_tokens, batch_size)
     if judge == "classifier":
@@ -94,7 +91,6 @@ _NUM = re.compile(r"-?\d[\d,]*\.?\d*")
 
 
 def _last_number(text: str):
-    # answer number
     tail = text.lower().split("answer")[-1] if "answer" in text.lower() else text
     nums = _NUM.findall(tail) or _NUM.findall(text)
     if not nums:
@@ -120,7 +116,6 @@ def load_gsm8k(n: int) -> List[Tuple[str, float]]:
 
 @torch.no_grad()
 def gsm8k_eval(model, tok, n: int = 40, max_new_tokens: int = 320, batch_size: int = 8) -> dict:
-    """math eval"""
     probs = load_gsm8k(n)
     qs = [q + "\nSolve step by step and end with 'The answer is <number>'." for q, _ in probs]
     comps = _generate(model, tok, qs, max_new_tokens, batch_size)
