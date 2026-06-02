@@ -1,0 +1,13 @@
+numpy==2.2.6
+fsspec==2026.2.0
+transformers
+datasets
+safetensors
+optuna
+bitsandbytes
+peft
+accelerate
+requests
+sentencepiece
+protobuf
+scipy
