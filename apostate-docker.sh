@@ -104,7 +104,7 @@ cmd_run() {
     local img
     img="$(docker_image)"
 
-    if echo "$*" | grep -q '\-\-backend vllm'; then
+    if echo "$*" | grep -q -- '--backend vllm'; then
         if [ "$img" != "$IMAGE_FULL" ]; then
             echo "WARNING: --backend vllm requested but image '$IMAGE_FULL' not found."
             echo "  Run: apostate-docker.sh build --vllm"
@@ -116,23 +116,22 @@ cmd_run() {
 }
 
 if [ $# -eq 0 ]; then
-    usage
+    cmd_run
+else
+    cmd="$1"
+    shift
+    case "$cmd" in
+        build)
+            cmd_build "$@"
+            ;;
+        shell)
+            cmd_shell
+            ;;
+        -h|--help|help)
+            usage
+            ;;
+        *)
+            cmd_run "$cmd" "$@"
+            ;;
+    esac
 fi
-
-cmd="$1"
-shift
-
-case "$cmd" in
-    build)
-        cmd_build "$@"
-        ;;
-    shell)
-        cmd_shell
-        ;;
-    -h|--help|help)
-        usage
-        ;;
-    *)
-        cmd_run "$cmd" "$@"
-        ;;
-esac
