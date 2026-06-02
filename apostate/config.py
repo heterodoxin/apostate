@@ -104,6 +104,8 @@ class ApostateConfig:
     opt_guard: bool = True
     opt_early_stop: bool = True
     opt_early_stop_margin: float = 0.02
+    gemma_ple: bool = False
+    ple_max_rank: int = 2
 
     prune: bool = False
     prune_max_frac: float = 0.25

@@ -199,6 +199,21 @@ class ModelBundle:
             out.append(ple)
         return out
 
+    def ple_writers(self, layer: torch.nn.Module) -> List[torch.nn.Module]:
+        gate = getattr(layer, "per_layer_input_gate", None)
+        return [gate] if gate is not None else []
+
+    def has_ple(self) -> bool:
+        return any(self.ple_writers(layer) for layer in self.layers())
+
+    def ple_embed(self):
+        dec = self._decoder()
+        return getattr(dec, "embed_tokens_per_layer", None)
+
+    def ple_model_projection(self):
+        dec = self._decoder()
+        return getattr(dec, "per_layer_model_projection", None)
+
     def is_moe(self) -> bool:
         layers = self.layers()
         return bool(layers) and len(self.mlp_writers(layers[len(layers) // 2])) > 1

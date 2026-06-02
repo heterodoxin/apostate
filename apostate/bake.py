@@ -52,6 +52,28 @@ def bake(cfg: ApostateConfig, export: dict, tokenizer=None, drop_layers=None) ->
     for e in edits:
         R = e["R"].float()
         sign = float(e["sign"])
+        if e.get("kind") == "ple_gate":
+            for L, layer in enumerate(layers):
+                a = float(e["layer_alphas"][L])
+                if a == 0:
+                    continue
+                for mod in bundle.ple_writers(layer):
+                    mod.weight.data = _edit_linear(mod.weight.data, R, sign * a)
+                    if getattr(mod, "bias", None) is not None:
+                        mod.bias.data = _edit_vec(mod.bias.data, R, sign * a)
+            continue
+        if e.get("kind") == "ple_embed":
+            mod = bundle.ple_embed()
+            a = float(e["embed_alpha"])
+            if mod is not None and a != 0:
+                mod.weight.data = _edit_embed(mod.weight.data, R, sign * a)
+            continue
+        if e.get("kind") == "ple_model_projection":
+            mod = bundle.ple_model_projection()
+            a = float(e["embed_alpha"])
+            if mod is not None and a != 0:
+                mod.weight.data = _edit_linear(mod.weight.data, R, sign * a)
+            continue
         a_emb = float(e["embed_alpha"])
         if a_emb != 0:
             emb.weight.data = _edit_embed(emb.weight.data, R, sign * a_emb)

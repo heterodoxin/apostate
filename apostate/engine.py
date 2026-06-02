@@ -13,7 +13,7 @@ import torch
 from .config import ApostateConfig
 from .model import load_model
 from .data import format_chat_pairs, resolve_prompts
-from .activations import collect_activations
+from .activations import collect_activations, collect_ple_gate_activations, collect_ple_embed_activations
 from .directions import refusal_subspace, preservation_subspace, gram_schmidt_remove, separation
 from .projectors import ProjectionController
 from .causal import causal_layer_scores
@@ -78,6 +78,77 @@ def _cached_collect(bundle, instructions, batch_size: int, cfg: ApostateConfig, 
         _log(f"activation cache saved: {name}")
     except Exception as e:
         _log(f"activation cache save failed for {name}: {e}")
+    return acts
+
+
+def _cached_collect_ple(bundle, instructions, batch_size: int, cfg: ApostateConfig, name: str, preformatted: bool = False):
+    if not cfg.cache_activations:
+        return collect_ple_gate_activations(bundle, instructions, batch_size, preformatted=preformatted)
+    cache_dir = _activation_cache_dir(cfg)
+    os.makedirs(cache_dir, exist_ok=True)
+    meta = {
+        "name": name,
+        "kind": "ple_gate",
+        "model": cfg.model,
+        "num_layers": bundle.num_layers,
+        "prompt_hash": _prompt_hash(instructions),
+        "count": len(instructions),
+    }
+    key = hashlib.sha256(json.dumps(meta, sort_keys=True).encode("utf-8")).hexdigest()[:20]
+    path = os.path.join(cache_dir, f"{name}-{key}.pt")
+    if cfg.resume and os.path.isfile(path):
+        try:
+            obj = torch.load(path, map_location="cpu")
+            if obj.get("meta") == meta:
+                acts = obj.get("activations")
+                if acts is not None and acts.shape[:1] == (bundle.num_layers,):
+                    _log(f"ple cache hit: {name}")
+                    return acts
+        except Exception as e:
+            _log(f"ple cache ignored for {name}: {e}")
+    acts = collect_ple_gate_activations(bundle, instructions, batch_size, preformatted=preformatted)
+    if acts is None:
+        return None
+    try:
+        torch.save({"meta": meta, "activations": acts}, path)
+        _log(f"ple cache saved: {name}")
+    except Exception as e:
+        _log(f"ple cache save failed for {name}: {e}")
+    return acts
+
+
+def _cached_collect_ple_embed(bundle, instructions, batch_size: int, cfg: ApostateConfig, name: str, preformatted: bool = False):
+    if not cfg.cache_activations:
+        return collect_ple_embed_activations(bundle, instructions, batch_size, preformatted=preformatted)
+    cache_dir = _activation_cache_dir(cfg)
+    os.makedirs(cache_dir, exist_ok=True)
+    meta = {
+        "name": name,
+        "kind": "ple_embed",
+        "model": cfg.model,
+        "prompt_hash": _prompt_hash(instructions),
+        "count": len(instructions),
+    }
+    key = hashlib.sha256(json.dumps(meta, sort_keys=True).encode("utf-8")).hexdigest()[:20]
+    path = os.path.join(cache_dir, f"{name}-{key}.pt")
+    if cfg.resume and os.path.isfile(path):
+        try:
+            obj = torch.load(path, map_location="cpu")
+            if obj.get("meta") == meta:
+                acts = obj.get("activations")
+                if acts is not None:
+                    _log(f"ple embed cache hit: {name}")
+                    return acts
+        except Exception as e:
+            _log(f"ple embed cache ignored for {name}: {e}")
+    acts = collect_ple_embed_activations(bundle, instructions, batch_size, preformatted=preformatted)
+    if acts is None:
+        return None
+    try:
+        torch.save({"meta": meta, "activations": acts}, path)
+        _log(f"ple embed cache saved: {name}")
+    except Exception as e:
+        _log(f"ple embed cache save failed for {name}: {e}")
     return acts
 
 
@@ -386,6 +457,7 @@ def _head_sweep_enabled(bundle, cfg) -> bool:
     return bool(
         cfg.optimize and cfg.head_sweep
         and not bundle.can_edit_embed()
+        and not bundle.has_ple()
         and bundle.final_norm() is not None
         and bundle.lm_head() is not None
     )
@@ -751,11 +823,16 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
     report_extra: dict = {"optimized": cfg.optimize}
 
     head_only_profile = False
+    head_ref_est = None
     head_sweep_profile = _head_sweep_enabled(bundle, cfg)
     head_sweep_attrs = None
     ah = al = None
+    ple_ah = ple_al = None
+    plee_ah = plee_al = None
     preserve_source = "none"
     preserve_lookup = _preservation_lookup(None, 0)
+    ple_preserve_lookup = _preservation_lookup(None, 0)
+    plee_preserve_basis = None
     preserve_basis = None
     if head_sweep_profile:
         _log("activation fit skipped: head sweep")
@@ -767,6 +844,13 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
         else:
             ah = _cached_collect(bundle, fit_harmful, cfg.batch_size, cfg, "fit_harmful")
             al = _cached_collect(bundle, harmless, cfg.batch_size, cfg, "fit_harmless")
+        if getattr(cfg, "gemma_ple", True) and bundle.has_ple():
+            _log("collecting ple gate activations ...")
+            ple_ah = _cached_collect_ple(bundle, fit_harmful, cfg.batch_size, cfg, "fit_harmful_ple")
+            ple_al = _cached_collect_ple(bundle, harmless, cfg.batch_size, cfg, "fit_harmless_ple")
+            _log("collecting ple embed activations ...")
+            plee_ah = _cached_collect_ple_embed(bundle, fit_harmful, cfg.batch_size, cfg, "fit_harmful_ple_embed")
+            plee_al = _cached_collect_ple_embed(bundle, harmless, cfg.batch_size, cfg, "fit_harmless_ple_embed")
 
         preserve_acts = None
         if cfg.preserve_rank > 0 and cfg.preserve_path:
@@ -778,6 +862,10 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
             preserve_source = "harmless"
         preserve_lookup = _preservation_lookup(preserve_acts, cfg.preserve_rank)
         preserve_basis = preserve_lookup(L_dir)
+        if ple_al is not None:
+            ple_preserve_lookup = _preservation_lookup(ple_al, min(4, max(1, cfg.preserve_rank)))
+        if plee_al is not None and cfg.preserve_rank > 0:
+            plee_preserve_basis = preservation_subspace(plee_al, rank=min(4, max(1, cfg.preserve_rank)))
         if preserve_basis is not None:
             _log(f"preservation subspace rank={preserve_basis.shape[1]} source={preserve_source}")
         mark("activation_fit")
@@ -793,6 +881,7 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
              f"kl={best_attrs.get('kl')} | {shown}")
         L_dir = max(0, min(bundle.num_layers - 1, int(bundle.num_layers * best_params["direction_layer_frac"])))
         head_only_profile = True
+        head_ref_est = best_attrs.get("refusal", best_attrs.get("refusal_proxy"))
         head_sweep_attrs = best_attrs
         report_extra.update({
             "best_params": best_params,
@@ -819,6 +908,8 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
             bundle, controller, ah, al,
             eval_harmful[: cfg.opt_eval_n], eval_harmless[: cfg.opt_eval_n],
             causal_shape, cfg, preserve_basis, preserve_lookup,
+            ple_ah=ple_ah, ple_al=ple_al, ple_preserve_lookup=ple_preserve_lookup,
+            plee_ah=plee_ah, plee_al=plee_al, plee_preserve_basis=plee_preserve_basis,
         )
         shown = {k: (round(v, 3) if isinstance(v, float) else v) for k, v in best_params.items()}
         _log(f"best trial: refusal_proxy={best_attrs.get('refusal_proxy', best_attrs.get('refusal'))} "
@@ -830,6 +921,7 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
             and bool(best_params.get("ablate_head", False))
             and abs(float(best_params.get("strength", 0.0))) <= 0.01
         )
+        head_ref_est = best_attrs.get("refusal", best_attrs.get("refusal_proxy"))
         report_extra.update({"best_params": best_params, "best_trial": best_attrs, "n_trials": cfg.n_trials})
         mark("optimize_profile")
     else:
@@ -887,8 +979,12 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
         _log(f"guard: skipped (refusal {ref_quick:.3f} <= target {cfg.target_refusal:.3f})")
     mark("guard")
 
-    should_refine = cfg.refine_refusal and (
+    head_needs_refine = (
         head_only_profile
+        and (head_ref_est is None or head_ref_est > cfg.target_refusal + cfg.refine_refusal_slack)
+    )
+    should_refine = cfg.refine_refusal and (
+        head_needs_refine
         or skip_guard
         or (len(guard_hist) > 0 and guard_hist[-1].get("refusal", 1.0) > cfg.target_refusal)
     )
@@ -1007,8 +1103,13 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
         "repair_steps": repair_steps,
         "guard_history": guard_hist,
         "layer_alphas": [round(controller.get_layer_alpha(L), 3) for L in range(bundle.num_layers)],
+        "ple_layer_alphas": [round(controller.get_ple_layer_alpha(L), 3) for L in range(bundle.num_layers)]
+        if controller.has_ple() else [],
+        "ple_embed_alpha": round(controller.get_ple_embed_alpha(), 3),
+        "ple_model_projection_alpha": round(controller.get_ple_model_projection_alpha(), 3),
         "embed_alpha": round(controller.get_embed_alpha(), 3),
         "head_alpha": round(controller.get_head_alpha(), 3),
+        "head_token_alpha": round(controller.get_head_token_alpha(), 3),
         "preserve_rank": cfg.preserve_rank,
         "preserve_source": preserve_source,
         "pruned_layers": drop_layers,

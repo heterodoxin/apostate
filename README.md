@@ -10,8 +10,14 @@ The edit touches modules that write back into the residual stream: token embeddi
 
 ## Downloads
 
-- [Gemma 4 E4B IT Apostate](https://huggingface.co/heterodoxin/gemma-4-e4b-it-apostate)
 - [Qwen2.5 7B Instruct Apostate](https://huggingface.co/heterodoxin/qwen2.5-7b-instruct-apostate)
+
+Gemma 4 E4B is not listed as a passing release. The stale HF repo at
+`heterodoxin/gemma-4-e4b-it-apostate` failed the 2026-06-02 staging smoke test:
+classifier refusal `25.0%`, strict refusal or weak noncompliance `50.0%`,
+weak nonanswer `25.0%`, and helpful-style starts `100.0%` on four manual prompts.
+The prompt-mean PLE probe found a nonzero packed PLE direction (`6.6467`) but did
+not move refusal at alphas `0.05` through `1.6`; KL rose from `0.0039` to `0.3142`.
 
 ## Current Numbers
 
@@ -103,7 +109,7 @@ Model support is detected from module layout. Current coverage includes Llama 2/
 
 Multimodal wrapper models are supported for the text path when Transformers exposes a causal language decoder inside the model object. Image and audio pipelines are not edited yet.
 
-Gemma 4 uses per-layer embeddings. Apostate edits the nested text decoder, disables high-KL token-embedding edits for those models, and defaults Gemma 4 runs to a smaller batch size to reduce desktop lag.
+Gemma 4 uses per-layer embeddings and shared KV layers. Apostate can inspect and edit the nested text decoder, but Gemma 4 E4B is still under architecture work. Current passing download coverage is Qwen2.5.
 
 ## Requirements
 

@@ -135,8 +135,10 @@ def _anchor_profiles(bundle: ModelBundle, space: dict) -> list:
     rank_hi = int(space["refusal_rank"][2])
     strength_hi = float(space["strength"][2])
     head_ok = "ablate_head" in space
+    direction_opts = space.get("direction_source", ("cat", []))[1]
+    head_tokens_ok = "head_tokens" in direction_opts
     rows = []
-    if "head_alpha" in space:
+    if "head_alpha" in space and head_tokens_ok:
         for alpha in (3.5, 4.0, 4.5, 4.65, 5.0):
             rows.append({
                 "direction_source": "head_tokens",
@@ -174,6 +176,111 @@ def _anchor_profiles(bundle: ModelBundle, space: dict) -> list:
                 "ablate_head": head if head_ok else False,
                 "head_scale": head_scale if head_ok else 0.0,
             })
+    if "embed_scale" in space and not bundle.can_edit_embed():
+        for direction_sign in (1.0, -1.0):
+            for strength, embed_scale, head_scale in (
+                (0.85, 0.06, 0.20),
+                (1.15, 0.08, 0.15),
+                (1.35, 0.10, 0.00),
+            ):
+                rows.append({
+                    "direction_source": "activations",
+                    "direction_layer_frac": 0.58,
+                    "refusal_rank": 1,
+                    "strength": strength,
+                    "band_center": 0.58,
+                    "band_width": 0.78,
+                    "causal_mix": 0.25,
+                    "causal_power": 1.5,
+                    "ablate_embed": True,
+                    "embed_scale": embed_scale,
+                    "head_token_alpha": 2.5 if head_scale > 0.0 else 0.0,
+                    "direction_sign": direction_sign,
+                    "ablate_head": head_ok and head_scale > 0.0,
+                    "head_scale": head_scale if head_ok else 0.0,
+                })
+    if "head_token_alpha" in space and not bundle.can_edit_embed():
+        for strength, head_alpha in (
+            (0.50, 2.5),
+            (0.65, 3.5),
+            (0.80, 3.5),
+        ):
+            rows.append({
+                "direction_source": "activations",
+                "direction_layer_frac": 0.58,
+                "refusal_rank": min(2, rank_hi),
+                "strength": min(strength, strength_hi),
+                "band_center": 0.58,
+                "band_width": 0.12,
+                "causal_mix": 0.0,
+                "causal_power": 1.0,
+                "ablate_embed": False,
+                "embed_scale": 0.0,
+                "head_token_alpha": head_alpha,
+                "direction_sign": 1.0,
+                "ablate_head": False,
+                "head_scale": 0.0,
+            })
+    if "ple_ablate" in space:
+        for direction_sign in (1.0, -1.0):
+            for ple_layer_frac, ple_strength, ple_band_center, ple_band_width, head, head_scale in (
+                (0.18, 0.65, 0.18, 0.45, False, 0.0),
+                (0.58, 0.75, 0.58, 0.55, False, 0.0),
+                (0.82, 0.90, 0.78, 0.42, False, 0.0),
+                (0.58, 0.55, 0.58, 0.55, True, 0.15),
+            ):
+                rows.append({
+                    "direction_source": "activations",
+                    "direction_layer_frac": ple_layer_frac,
+                    "refusal_rank": 1,
+                    "strength": 0.0,
+                    "band_center": ple_band_center,
+                    "band_width": ple_band_width,
+                    "causal_mix": 0.25,
+                    "causal_power": 1.5,
+                    "ablate_embed": False,
+                    "direction_sign": direction_sign,
+                    "ablate_head": head if head_ok else False,
+                    "head_scale": head_scale if head_ok else 0.0,
+                    "ple_ablate": True,
+                    "ple_layer_frac": ple_layer_frac,
+                    "ple_rank": 1,
+                    "ple_strength": ple_strength,
+                    "ple_band_center": ple_band_center,
+                    "ple_band_width": ple_band_width,
+                })
+    if "ple_embed_ablate" in space:
+        for direction_sign in (1.0, -1.0):
+            for alpha in (0.04, 0.08, 0.12):
+                rows.append({
+                    "direction_source": "activations",
+                    "direction_layer_frac": 0.58,
+                    "refusal_rank": 1,
+                    "strength": 0.0,
+                    "band_center": 0.58,
+                    "band_width": 0.55,
+                    "causal_mix": 0.25,
+                    "causal_power": 1.5,
+                    "ablate_embed": False,
+                    "direction_sign": direction_sign,
+                    "ablate_head": False,
+                    "head_scale": 0.0,
+                    "ple_embed_ablate": True,
+                    "ple_embed_alpha": alpha,
+                    "ple_model_projection_ablate": False,
+                    "ple_model_projection_alpha": 0.0,
+                })
+    if bundle.has_ple():
+        def priority(row):
+            if float(row.get("head_token_alpha", 0.0)) > 0.0:
+                return (0, -float(row.get("head_token_alpha", 0.0)))
+            if row.get("direction_source") == "head_tokens":
+                return (1, abs(float(row.get("head_alpha", 0.0)) - 4.65))
+            if row.get("ablate_embed"):
+                return (2, float(row.get("strength", 99.0)))
+            return (3, float(row.get("strength", 99.0)))
+
+        rows = sorted(rows, key=priority)[:8]
     return rows
 
 
@@ -277,6 +384,12 @@ def _apply_profile(
     cfg,
     preserve_basis: Optional[torch.Tensor],
     preserve_lookup: Optional[Callable[[int], Optional[torch.Tensor]]] = None,
+    ple_ah: Optional[torch.Tensor] = None,
+    ple_al: Optional[torch.Tensor] = None,
+    ple_preserve_lookup: Optional[Callable[[int], Optional[torch.Tensor]]] = None,
+    plee_ah: Optional[torch.Tensor] = None,
+    plee_al: Optional[torch.Tensor] = None,
+    plee_preserve_basis: Optional[torch.Tensor] = None,
 ) -> int:
     n = bundle.num_layers
     L_dir = max(0, min(n - 1, int(n * params["direction_layer_frac"])))
@@ -317,6 +430,54 @@ def _apply_profile(
             controller.set_head_alpha(strength * head_scale)
     else:
         controller.set_head_alpha(0.0)
+    if hasattr(controller, "set_head_token_alpha"):
+        controller.set_head_token_alpha(0.0)
+        if float(params.get("head_token_alpha", 0.0)) != 0.0:
+            controller.set_head_token_subspace(_head_token_subspace(bundle))
+            controller.set_head_token_alpha(float(params.get("head_token_alpha", 0.0)))
+
+    controller.clear_ple()
+    if params.get("ple_ablate", False) and ple_ah is not None and ple_al is not None and controller.has_ple():
+        L_ple = max(0, min(n - 1, int(n * params.get("ple_layer_frac", params["direction_layer_frac"]))))
+        ple_rank = int(params.get("ple_rank", 1))
+        Rple, _ = refusal_subspace(
+            ple_ah[L_ple], ple_al[L_ple],
+            rank=ple_rank, max_rank=max(1, min(int(getattr(cfg, "ple_max_rank", 2)), ple_rank)),
+            seed=cfg.seed,
+        )
+        basis = ple_preserve_lookup(L_ple) if ple_preserve_lookup is not None else None
+        Rple = gram_schmidt_remove(Rple, basis)
+        controller.set_ple_subspace(Rple)
+        width = params.get("ple_band_width", params.get("band_width", 0.5))
+        center = params.get("ple_band_center", params.get("band_center", 0.5))
+        lo = max(0.0, center - width * 0.5)
+        hi = min(1.0, center + width * 0.5)
+        strength = params.get("ple_strength", 0.0) * params.get("direction_sign", 1.0)
+        cmix = params.get("causal_mix", 0.0)
+        power = params.get("causal_power", 1.0)
+        for L in range(n):
+            frac = L / max(1, n - 1)
+            if lo <= frac <= hi:
+                shape = (1.0 - cmix) + cmix * (max(0.0, causal_shape[L]) ** power)
+                controller.set_ple_layer_alpha(L, strength * shape)
+    if params.get("ple_embed_ablate", False) and plee_ah is not None and plee_al is not None:
+        Rplee, _ = refusal_subspace(
+            plee_ah, plee_al,
+            rank=1, max_rank=1, seed=cfg.seed,
+        )
+        Rplee = gram_schmidt_remove(Rplee, plee_preserve_basis)
+        controller.set_ple_embed_subspace(Rplee)
+        controller.set_ple_embed_alpha(params.get("ple_embed_alpha", 0.0) * params.get("direction_sign", 1.0))
+    if params.get("ple_model_projection_ablate", False) and plee_ah is not None and plee_al is not None:
+        Rplep, _ = refusal_subspace(
+            plee_ah, plee_al,
+            rank=1, max_rank=1, seed=cfg.seed,
+        )
+        Rplep = gram_schmidt_remove(Rplep, plee_preserve_basis)
+        controller.set_ple_model_projection_subspace(Rplep)
+        controller.set_ple_model_projection_alpha(
+            params.get("ple_model_projection_alpha", 0.0) * params.get("direction_sign", 1.0)
+        )
     return L_dir
 
 
@@ -331,6 +492,12 @@ def optimize_profile(
     cfg,
     preserve_basis: Optional[torch.Tensor] = None,
     preserve_lookup: Optional[Callable[[int], Optional[torch.Tensor]]] = None,
+    ple_ah: Optional[torch.Tensor] = None,
+    ple_al: Optional[torch.Tensor] = None,
+    ple_preserve_lookup: Optional[Callable[[int], Optional[torch.Tensor]]] = None,
+    plee_ah: Optional[torch.Tensor] = None,
+    plee_al: Optional[torch.Tensor] = None,
+    plee_preserve_basis: Optional[torch.Tensor] = None,
 ) -> Tuple[dict, dict, list]:
     cap_samples = _capability_samples(cfg)
     base_cap = None
@@ -352,9 +519,10 @@ def optimize_profile(
         "causal_power": ("float", 1.0, 3.0),
         "direction_sign": ("cat", [1.0, -1.0]),
     }
-    if bundle.can_edit_embed():
+    embed_ok = bundle.can_edit_embed() or bundle.has_ple()
+    if embed_ok:
         space["ablate_embed"] = ("cat", [False, True])
-        space["embed_scale"] = ("float", 0.0, 0.35)
+        space["embed_scale"] = ("float", 0.0, 0.35 if bundle.can_edit_embed() else 0.14)
     else:
         space["ablate_embed"] = ("cat", [False])
         print("[apostate] embed edit disabled: per-layer embeddings", flush=True)
@@ -362,15 +530,41 @@ def optimize_profile(
         space["ablate_head"] = ("cat", [False, True])
         space["head_scale"] = ("float", 0.0, 0.75 if not bundle.can_edit_embed() else 0.35)
         space["head_alpha"] = ("float", 0.0, 6.0 if not bundle.can_edit_embed() else 2.0)
-        if not bundle.can_edit_embed():
+        if not bundle.can_edit_embed() and getattr(cfg, "head_sweep", True):
             space["direction_source"] = ("cat", ["activations", "head_tokens"])
+            space["head_token_alpha"] = ("float", 0.0, 4.5)
     else:
         space["ablate_head"] = ("cat", [False])
+    if (
+        getattr(cfg, "gemma_ple", True)
+        and ple_ah is not None
+        and ple_al is not None
+        and controller.has_ple()
+    ):
+        space["ple_ablate"] = ("cat", [False, True])
+        space["ple_layer_frac"] = ("float", 0.0, 0.95)
+        space["ple_rank"] = ("int", 1, max(1, min(2, int(getattr(cfg, "ple_max_rank", 2)))))
+        space["ple_strength"] = ("float", 0.0, 1.25)
+        space["ple_band_center"] = ("float", 0.0, 0.95)
+        space["ple_band_width"] = ("float", 0.08, 0.90)
+    if (
+        getattr(cfg, "gemma_ple", True)
+        and plee_ah is not None
+        and plee_al is not None
+    ):
+        space["ple_embed_ablate"] = ("cat", [False, True])
+        space["ple_embed_alpha"] = ("float", 0.0, 0.18)
+        space["ple_model_projection_ablate"] = ("cat", [False, True])
+        space["ple_model_projection_alpha"] = ("float", 0.0, 0.16)
 
     best_seen = [float("inf")]
 
     def objective(params):
-        _apply_profile(bundle, controller, ah, al, params, causal_shape, cfg, preserve_basis, preserve_lookup)
+        _apply_profile(
+            bundle, controller, ah, al, params, causal_shape, cfg, preserve_basis, preserve_lookup,
+            ple_ah=ple_ah, ple_al=ple_al, ple_preserve_lookup=ple_preserve_lookup,
+            plee_ah=plee_ah, plee_al=plee_al, plee_preserve_basis=plee_preserve_basis,
+        )
         kl = kl_harmless(bundle, controller, eval_harmless, cfg.batch_size, positions=cfg.kl_positions)
         kl_part = _kl_loss(kl, cfg)
         if kl_part >= best_seen[0] - 1e-4:
@@ -430,7 +624,11 @@ def optimize_profile(
         exact = []
         pool = _candidate_pool(history, cfg)
         for idx, h in enumerate(pool, 1):
-            _apply_profile(bundle, controller, ah, al, h["params"], causal_shape, cfg, preserve_basis, preserve_lookup)
+            _apply_profile(
+                bundle, controller, ah, al, h["params"], causal_shape, cfg, preserve_basis, preserve_lookup,
+                ple_ah=ple_ah, ple_al=ple_al, ple_preserve_lookup=ple_preserve_lookup,
+                plee_ah=plee_ah, plee_al=plee_al, plee_preserve_basis=plee_preserve_basis,
+            )
             with controller.active():
                 ref = refusal_rate(bundle, eval_harmful, cfg.opt_gen_tokens, cfg.batch_size)
                 cap_lp = _target_logprob(bundle, cap_samples, cfg.batch_size) if base_cap is not None else None
@@ -459,5 +657,9 @@ def optimize_profile(
             if k in low_kl
         }
 
-    _apply_profile(bundle, controller, ah, al, best_params, causal_shape, cfg, preserve_basis, preserve_lookup)
+    _apply_profile(
+        bundle, controller, ah, al, best_params, causal_shape, cfg, preserve_basis, preserve_lookup,
+        ple_ah=ple_ah, ple_al=ple_al, ple_preserve_lookup=ple_preserve_lookup,
+        plee_ah=plee_ah, plee_al=plee_al, plee_preserve_basis=plee_preserve_basis,
+    )
     return best_params, best_attrs, history
