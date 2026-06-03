@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "apostate"
+version = "1.0.0"
+description = "Decensor LLMs via rank-1 subspace ablation"
+requires-python = ">=3.10"
+dependencies = ["textual>=0.80"]
+
+# heavy ml deps are installed by `apostate setup` or requirements.txt:
+# torch transformers datasets safetensors optuna bitsandbytes
+
+[project.scripts]
+apostate = "apostate.__main__:main"
+
+[tool.setuptools]
+packages = ["apostate"]
+
+[tool.setuptools.package-data]
+apostate = ["*.sh"]

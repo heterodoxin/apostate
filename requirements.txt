@@ -11,3 +11,4 @@ requests
 sentencepiece
 protobuf
 scipy
+textual

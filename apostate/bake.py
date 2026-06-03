@@ -73,6 +73,14 @@ def bake(cfg: ApostateConfig, export: dict, tokenizer=None, drop_layers=None) ->
                     if getattr(mod, "bias", None) is not None:
                         mod.bias.data = _edit_vec(mod.bias.data, R, sign * a)
             continue
+        if e.get("kind") == "ple_residual":
+            for L, layer in enumerate(layers):
+                a = float(e["layer_alphas"][L])
+                if a == 0:
+                    continue
+                for mod in bundle.ple_projection_writers(layer):
+                    _edit_writer(mod, R, sign * a)
+            continue
         if e.get("kind") == "ple_embed":
             mod = bundle.ple_embed()
             a = float(e["embed_alpha"])
@@ -96,6 +104,16 @@ def bake(cfg: ApostateConfig, export: dict, tokenizer=None, drop_layers=None) ->
                         continue
                     if kind == "kv_value" and part != "v":
                         continue
+                    mod.weight.data = _edit_linear(mod.weight.data, R, sign * a)
+                    if getattr(mod, "bias", None) is not None:
+                        mod.bias.data = _edit_vec(mod.bias.data, R, sign * a)
+            continue
+        if e.get("kind") == "query":
+            for L, layer in enumerate(layers):
+                a = float(e["layer_alphas"][L])
+                if a == 0:
+                    continue
+                for mod in bundle.query_writers(layer):
                     mod.weight.data = _edit_linear(mod.weight.data, R, sign * a)
                     if getattr(mod, "bias", None) is not None:
                         mod.bias.data = _edit_vec(mod.bias.data, R, sign * a)

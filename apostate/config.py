@@ -105,6 +105,7 @@ class ApostateConfig:
     opt_early_stop: bool = True
     opt_early_stop_margin: float = 0.02
     gemma_ple: bool = False
+    gemma_query: bool = False
     ple_max_rank: int = 2
 
     prune: bool = False

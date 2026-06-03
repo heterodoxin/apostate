@@ -271,6 +271,146 @@ def collect_kv_activations(
 
 
 @torch.inference_mode()
+def collect_query_activations(
+    bundle: ModelBundle,
+    instructions: List[str],
+    batch_size: int = 16,
+    layers: List[int] | None = None,
+    preformatted: bool = False,
+) -> Dict[int, torch.Tensor]:
+    tok = bundle.tokenizer
+    model = bundle.model
+    device = next(model.parameters()).device
+    prompts = instructions if preformatted else format_chat(tok, instructions)
+    batches = _prompt_batches(bundle, tok, prompts, batch_size, device)
+    selected = set(bundle.query_layer_candidates() if layers is None else layers)
+    per_layer: Dict[int, List[torch.Tensor]] = {}
+    handles = []
+    current_mask = [None]
+
+    def make_hook(layer_idx: int):
+        def hook(_mod, _inp, out):
+            t = _out_tensor(out)
+            per_layer.setdefault(layer_idx, []).append(
+                _masked_mean(t, current_mask[0]).detach().float().cpu()
+            )
+        return hook
+
+    for layer_idx, layer in enumerate(bundle.layers()):
+        if layer_idx not in selected:
+            continue
+        for mod in bundle.query_writers(layer):
+            handles.append(mod.register_forward_hook(make_hook(layer_idx)))
+
+    try:
+        for enc in batches:
+            current_mask[0] = enc.get("attention_mask")
+            model(**enc, use_cache=False)
+    finally:
+        for h in handles:
+            h.remove()
+
+    return {
+        layer_idx: torch.cat(chunks, dim=0)
+        for layer_idx, chunks in per_layer.items()
+        if chunks
+    }
+
+
+@torch.inference_mode()
+def collect_response_kv_activations(
+    bundle: ModelBundle,
+    instructions: List[str],
+    responses: List[str],
+    batch_size: int = 16,
+    layers: List[int] | None = None,
+) -> Dict[str, Dict[int, torch.Tensor]]:
+    model = bundle.model
+    device = next(model.parameters()).device
+    batches = _response_batches(bundle, instructions, responses, batch_size, device)
+    selected = set(bundle.kv_source_layers() if layers is None else layers)
+    per_part: Dict[str, Dict[int, List[torch.Tensor]]] = {"k": {}, "v": {}}
+    handles = []
+    current_mask = [None]
+
+    def make_hook(part: str, layer_idx: int):
+        def hook(_mod, _inp, out):
+            t = _out_tensor(out)
+            per_part[part].setdefault(layer_idx, []).append(
+                _masked_mean(t, current_mask[0]).detach().float().cpu()
+            )
+        return hook
+
+    for layer_idx, layer in enumerate(bundle.layers()):
+        if layer_idx not in selected:
+            continue
+        for part, mod in bundle.kv_writers(layer):
+            handles.append(mod.register_forward_hook(make_hook(part, layer_idx)))
+
+    try:
+        for batch in batches:
+            current_mask[0] = batch["response_mask"]
+            enc = {k: v for k, v in batch.items() if k != "response_mask"}
+            model(**enc, use_cache=False)
+    finally:
+        for h in handles:
+            h.remove()
+
+    out: Dict[str, Dict[int, torch.Tensor]] = {"k": {}, "v": {}}
+    for part, by_layer in per_part.items():
+        for layer_idx, chunks in by_layer.items():
+            if chunks:
+                out[part][layer_idx] = torch.cat(chunks, dim=0)
+    return out
+
+
+@torch.inference_mode()
+def collect_response_query_activations(
+    bundle: ModelBundle,
+    instructions: List[str],
+    responses: List[str],
+    batch_size: int = 16,
+    layers: List[int] | None = None,
+) -> Dict[int, torch.Tensor]:
+    model = bundle.model
+    device = next(model.parameters()).device
+    batches = _response_batches(bundle, instructions, responses, batch_size, device)
+    selected = set(bundle.query_layer_candidates() if layers is None else layers)
+    per_layer: Dict[int, List[torch.Tensor]] = {}
+    handles = []
+    current_mask = [None]
+
+    def make_hook(layer_idx: int):
+        def hook(_mod, _inp, out):
+            t = _out_tensor(out)
+            per_layer.setdefault(layer_idx, []).append(
+                _masked_mean(t, current_mask[0]).detach().float().cpu()
+            )
+        return hook
+
+    for layer_idx, layer in enumerate(bundle.layers()):
+        if layer_idx not in selected:
+            continue
+        for mod in bundle.query_writers(layer):
+            handles.append(mod.register_forward_hook(make_hook(layer_idx)))
+
+    try:
+        for batch in batches:
+            current_mask[0] = batch["response_mask"]
+            enc = {k: v for k, v in batch.items() if k != "response_mask"}
+            model(**enc, use_cache=False)
+    finally:
+        for h in handles:
+            h.remove()
+
+    return {
+        layer_idx: torch.cat(chunks, dim=0)
+        for layer_idx, chunks in per_layer.items()
+        if chunks
+    }
+
+
+@torch.inference_mode()
 def collect_ple_gate_activations(
     bundle: ModelBundle,
     instructions: List[str],
@@ -283,6 +423,48 @@ def collect_ple_gate_activations(
     prompts = instructions if preformatted else format_chat(tok, instructions)
     batches = _prompt_batches(bundle, tok, prompts, batch_size, device)
     modules = [bundle.ple_writers(layer) for layer in bundle.layers()]
+    if not any(modules):
+        return None
+    per_layer: List[List[torch.Tensor]] = [[] for _ in range(bundle.num_layers)]
+    handles = []
+    current_mask = [None]
+
+    def make_hook(layer: int):
+        def hook(_mod, _inp, out):
+            t = _out_tensor(out)
+            per_layer[layer].append(_masked_mean(t, current_mask[0]).detach().float().cpu())
+        return hook
+
+    for layer, mods in enumerate(modules):
+        for mod in mods:
+            handles.append(mod.register_forward_hook(make_hook(layer)))
+
+    try:
+        for enc in batches:
+            current_mask[0] = enc.get("attention_mask")
+            model(**enc, use_cache=False)
+    finally:
+        for h in handles:
+            h.remove()
+
+    if any(not chunks for chunks in per_layer):
+        return None
+    return torch.stack([torch.cat(chunks, dim=0) for chunks in per_layer], dim=0)
+
+
+@torch.inference_mode()
+def collect_ple_projection_activations(
+    bundle: ModelBundle,
+    instructions: List[str],
+    batch_size: int = 16,
+    preformatted: bool = False,
+) -> torch.Tensor | None:
+    tok = bundle.tokenizer
+    model = bundle.model
+    device = next(model.parameters()).device
+    prompts = instructions if preformatted else format_chat(tok, instructions)
+    batches = _prompt_batches(bundle, tok, prompts, batch_size, device)
+    modules = [bundle.ple_projection_writers(layer) for layer in bundle.layers()]
     if not any(modules):
         return None
     per_layer: List[List[torch.Tensor]] = [[] for _ in range(bundle.num_layers)]

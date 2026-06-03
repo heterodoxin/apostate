@@ -18,7 +18,9 @@ class ProjectionController:
         self._residual_layers: List[torch.nn.Module] = []
         self._layer_writers: List[Tuple[torch.nn.Module, torch.nn.Module]] = []
         self._kv_writers: List[Tuple[Tuple[str, torch.nn.Module], ...]] = []
+        self._query_writers: List[Tuple[torch.nn.Module, ...]] = []
         self._ple_writers: List[Tuple[torch.nn.Module, ...]] = []
+        self._ple_projection_writers: List[Tuple[torch.nn.Module, ...]] = []
         self._embed: Optional[torch.nn.Module] = None
         self._ple_embed: Optional[torch.nn.Module] = None
         self._ple_model_projection: Optional[torch.nn.Module] = None
@@ -45,11 +47,15 @@ class ProjectionController:
         for layer in b.layers():
             writers = b.layer_writers(layer)
             ple = tuple(b.ple_writers(layer))
+            ple_proj = tuple(b.ple_projection_writers(layer))
             kv = tuple(b.kv_writers(layer))
+            query = tuple(b.query_writers(layer))
             self._residual_layers.append(layer)
             self._layer_writers.append(writers)
             self._kv_writers.append(kv)
+            self._query_writers.append(query)
             self._ple_writers.append(ple)
+            self._ple_projection_writers.append(ple_proj)
             self._modules.extend(writers)
         if self._final is not None:
             self._modules.append(self._final)
@@ -72,6 +78,8 @@ class ProjectionController:
     def _modules_for_kind(self, kind: str) -> List[torch.nn.Module]:
         if kind == "ple_gate":
             return [m for mods in self._ple_writers for m in mods]
+        if kind == "ple_residual":
+            return [m for mods in self._ple_projection_writers for m in mods]
         if kind == "ple_embed":
             return [self._ple_embed] if self._ple_embed is not None else []
         if kind == "ple_model_projection":
@@ -84,6 +92,8 @@ class ProjectionController:
             return [m for mods in self._kv_writers for part, m in mods if part == "k"]
         if kind == "kv_value":
             return [m for mods in self._kv_writers for part, m in mods if part == "v"]
+        if kind == "query":
+            return [m for mods in self._query_writers for m in mods]
         return self._modules
 
     def _cast(self, edit: dict, dtype, device):
@@ -160,6 +170,11 @@ class ProjectionController:
         for m in self._ple_writers[layer_idx]:
             e["alpha"][id(m)] = value
 
+    def set_edit_ple_residual_layer_alpha(self, name: str, layer_idx: int, value: float):
+        e = self._edit(name)
+        for m in self._ple_projection_writers[layer_idx]:
+            e["alpha"][id(m)] = value
+
     def set_edit_residual_layer_alpha(self, name: str, layer_idx: int, value: float):
         self._edit(name)["alpha"][id(self._residual_layers[layer_idx])] = value
 
@@ -171,6 +186,11 @@ class ProjectionController:
                 continue
             if kind == "kv_value" and part != "v":
                 continue
+            e["alpha"][id(mod)] = value
+
+    def set_edit_query_layer_alpha(self, name: str, layer_idx: int, value: float):
+        e = self._edit(name)
+        for mod in self._query_writers[layer_idx]:
             e["alpha"][id(mod)] = value
 
     def set_edit_uniform_alpha(self, name: str, value: float):
@@ -242,9 +262,25 @@ class ProjectionController:
             self._ensure_hook(mod)
         self.set_edit_subspace(name, R)
 
+    def set_edit_query_subspace(self, name: str, R: torch.Tensor):
+        if not any(e["name"] == name for e in self.edits):
+            self.add_edit(name, sign=-1.0, default_alpha=0.0, kind="query")
+        for mod in self._modules_for_kind("query"):
+            self._ensure_hook(mod)
+        self.set_edit_subspace(name, R)
+
     def clear_kv(self):
         for e in self.edits:
             if not str(e.get("kind", "")).startswith("kv"):
+                continue
+            e["R"] = None
+            e["_cast"] = None
+            for k in e["alpha"]:
+                e["alpha"][k] = 0.0
+
+    def clear_query(self):
+        for e in self.edits:
+            if e.get("kind") != "query":
                 continue
             e["R"] = None
             e["_cast"] = None
@@ -283,6 +319,13 @@ class ProjectionController:
             e["R"] = None
             e["_cast"] = None
             e["alpha"][id(mod)] = 0.0
+        for e in self.edits:
+            if e.get("kind") != "ple_residual":
+                continue
+            e["R"] = None
+            e["_cast"] = None
+            for k in e["alpha"]:
+                e["alpha"][k] = 0.0
 
     def set_ple_subspace(self, R: torch.Tensor):
         e = self._edit("ple")
@@ -299,6 +342,14 @@ class ProjectionController:
         if not self.has_ple() or not self._ple_writers[layer_idx]:
             return 0.0
         return self._edit("ple")["alpha"].get(id(self._ple_writers[layer_idx][0]), 0.0)
+
+    def set_edit_ple_residual_subspace(self, name: str, R: torch.Tensor):
+        if not any(e["name"] == name for e in self.edits):
+            self.add_edit(name, sign=-1.0, default_alpha=0.0, kind="ple_residual")
+        for mods in self._ple_projection_writers:
+            for mod in mods:
+                self._ensure_hook(mod)
+        self.set_edit_subspace(name, R)
 
     def set_ple_embed_subspace(self, R: torch.Tensor):
         e = self._edit("ple_embed")
@@ -413,6 +464,14 @@ class ProjectionController:
                 ]
                 embed_alpha = 0.0
                 head_alpha = 0.0
+            elif e.get("kind") == "ple_residual":
+                layer_alphas = [
+                    e["alpha"].get(id(self._ple_projection_writers[i][0]), 0.0)
+                    if self._ple_projection_writers[i] else 0.0
+                    for i in range(len(self._ple_projection_writers))
+                ]
+                embed_alpha = 0.0
+                head_alpha = 0.0
             elif e.get("kind") == "ple_embed":
                 layer_alphas = [0.0 for _ in range(len(self._layer_writers))]
                 embed_alpha = e["alpha"].get(id(self._ple_embed), 0.0) if self._ple_embed is not None else 0.0
@@ -432,6 +491,13 @@ class ProjectionController:
                 layer_alphas = []
                 for i, mods in enumerate(self._kv_writers):
                     vals = [e["alpha"].get(id(m), 0.0) for _part, m in mods]
+                    layer_alphas.append(max(vals, key=abs) if vals else 0.0)
+                embed_alpha = 0.0
+                head_alpha = 0.0
+            elif e.get("kind") == "query":
+                layer_alphas = []
+                for mods in self._query_writers:
+                    vals = [e["alpha"].get(id(m), 0.0) for m in mods]
                     layer_alphas.append(max(vals, key=abs) if vals else 0.0)
                 embed_alpha = 0.0
                 head_alpha = 0.0

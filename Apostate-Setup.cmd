@@ -1,7 +1,8 @@
 @echo off
-REM setup
+REM double-click installer
 SET COLORTERM=truecolor
 SET TERM=xterm-256color
-node "%~dp0setup.js"
+set "PYTHONPATH=%~dp0;%PYTHONPATH%"
+python -m apostate setup
 echo.
 pause

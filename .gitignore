@@ -22,8 +22,9 @@ dbg.log
 diag_run.log
 **/report.json
 **/activation_cache/
-_*.py
-_*.sh
+# scratch files (single leading underscore), but keep dunders like __main__.py
+_[!_]*.py
+_[!_]*.sh
 
 # env / editor
 .env

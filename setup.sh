@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
 # setup wizard
 cd "$(dirname "$0")"
-exec node setup.js "$@"
+export PYTHONPATH="$PWD:$PYTHONPATH"
+exec python3 -m apostate setup "$@"

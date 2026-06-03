@@ -16,8 +16,12 @@ from .data import resolve_prompts
 from .activations import (
     collect_activations,
     collect_kv_activations,
+    collect_query_activations,
+    collect_response_kv_activations,
+    collect_response_query_activations,
     collect_response_activations,
     collect_ple_gate_activations,
+    collect_ple_projection_activations,
     collect_ple_embed_activations,
 )
 from .directions import refusal_subspace, preservation_subspace, gram_schmidt_remove, separation
@@ -123,6 +127,43 @@ def _cached_collect_ple(bundle, instructions, batch_size: int, cfg: ApostateConf
     return acts
 
 
+def _cached_collect_ple_projection(bundle, instructions, batch_size: int, cfg: ApostateConfig, name: str, preformatted: bool = False):
+    if not cfg.cache_activations:
+        return collect_ple_projection_activations(bundle, instructions, batch_size, preformatted=preformatted)
+    cache_dir = _activation_cache_dir(cfg)
+    os.makedirs(cache_dir, exist_ok=True)
+    meta = {
+        "name": name,
+        "kind": "ple_projection",
+        "model": cfg.model,
+        "num_layers": bundle.num_layers,
+        "hidden_size": bundle.hidden_size,
+        "prompt_hash": _prompt_hash(instructions),
+        "count": len(instructions),
+    }
+    key = hashlib.sha256(json.dumps(meta, sort_keys=True).encode("utf-8")).hexdigest()[:20]
+    path = os.path.join(cache_dir, f"{name}-{key}.pt")
+    if cfg.resume and os.path.isfile(path):
+        try:
+            obj = torch.load(path, map_location="cpu")
+            if obj.get("meta") == meta:
+                acts = obj.get("activations")
+                if acts is not None and acts.shape[:1] == (bundle.num_layers,):
+                    _log(f"ple residual cache hit: {name}")
+                    return acts
+        except Exception as e:
+            _log(f"ple residual cache ignored for {name}: {e}")
+    acts = collect_ple_projection_activations(bundle, instructions, batch_size, preformatted=preformatted)
+    if acts is None:
+        return None
+    try:
+        torch.save({"meta": meta, "activations": acts}, path)
+        _log(f"ple residual cache saved: {name}")
+    except Exception as e:
+        _log(f"ple residual cache save failed for {name}: {e}")
+    return acts
+
+
 def _cached_collect_response(bundle, instructions, responses, batch_size: int, cfg: ApostateConfig, name: str):
     if not cfg.cache_activations:
         return collect_response_activations(bundle, instructions, responses, batch_size)
@@ -190,6 +231,113 @@ def _cached_collect_kv(bundle, instructions, batch_size: int, cfg: ApostateConfi
         _log(f"kv cache saved: {name}")
     except Exception as e:
         _log(f"kv cache save failed for {name}: {e}")
+    return acts
+
+
+def _cached_collect_response_kv(bundle, instructions, responses, batch_size: int, cfg: ApostateConfig, name: str):
+    layers = bundle.kv_source_layers()
+    if not cfg.cache_activations:
+        return collect_response_kv_activations(bundle, instructions, responses, batch_size, layers=layers)
+    cache_dir = _activation_cache_dir(cfg)
+    os.makedirs(cache_dir, exist_ok=True)
+    meta = {
+        "name": name,
+        "kind": "response_kv_mean",
+        "model": cfg.model,
+        "layers": layers,
+        "prompt_hash": _prompt_hash(instructions),
+        "response_hash": _prompt_hash(responses),
+        "count": len(instructions),
+    }
+    key = hashlib.sha256(json.dumps(meta, sort_keys=True).encode("utf-8")).hexdigest()[:20]
+    path = os.path.join(cache_dir, f"{name}-{key}.pt")
+    if cfg.resume and os.path.isfile(path):
+        try:
+            obj = torch.load(path, map_location="cpu")
+            if obj.get("meta") == meta:
+                acts = obj.get("activations")
+                if isinstance(acts, dict):
+                    _log(f"response kv cache hit: {name}")
+                    return acts
+        except Exception as e:
+            _log(f"response kv cache ignored for {name}: {e}")
+    acts = collect_response_kv_activations(bundle, instructions, responses, batch_size, layers=layers)
+    try:
+        torch.save({"meta": meta, "activations": acts}, path)
+        _log(f"response kv cache saved: {name}")
+    except Exception as e:
+        _log(f"response kv cache save failed for {name}: {e}")
+    return acts
+
+
+def _cached_collect_query(bundle, instructions, batch_size: int, cfg: ApostateConfig, name: str, preformatted: bool = False):
+    layers = bundle.query_layer_candidates()
+    if not cfg.cache_activations:
+        return collect_query_activations(bundle, instructions, batch_size, layers=layers, preformatted=preformatted)
+    cache_dir = _activation_cache_dir(cfg)
+    os.makedirs(cache_dir, exist_ok=True)
+    meta = {
+        "name": name,
+        "kind": "query_mean",
+        "model": cfg.model,
+        "layers": layers,
+        "prompt_hash": _prompt_hash(instructions),
+        "count": len(instructions),
+    }
+    key = hashlib.sha256(json.dumps(meta, sort_keys=True).encode("utf-8")).hexdigest()[:20]
+    path = os.path.join(cache_dir, f"{name}-{key}.pt")
+    if cfg.resume and os.path.isfile(path):
+        try:
+            obj = torch.load(path, map_location="cpu")
+            if obj.get("meta") == meta:
+                acts = obj.get("activations")
+                if isinstance(acts, dict):
+                    _log(f"query cache hit: {name}")
+                    return acts
+        except Exception as e:
+            _log(f"query cache ignored for {name}: {e}")
+    acts = collect_query_activations(bundle, instructions, batch_size, layers=layers, preformatted=preformatted)
+    try:
+        torch.save({"meta": meta, "activations": acts}, path)
+        _log(f"query cache saved: {name}")
+    except Exception as e:
+        _log(f"query cache save failed for {name}: {e}")
+    return acts
+
+
+def _cached_collect_response_query(bundle, instructions, responses, batch_size: int, cfg: ApostateConfig, name: str):
+    layers = bundle.query_layer_candidates()
+    if not cfg.cache_activations:
+        return collect_response_query_activations(bundle, instructions, responses, batch_size, layers=layers)
+    cache_dir = _activation_cache_dir(cfg)
+    os.makedirs(cache_dir, exist_ok=True)
+    meta = {
+        "name": name,
+        "kind": "response_query_mean",
+        "model": cfg.model,
+        "layers": layers,
+        "prompt_hash": _prompt_hash(instructions),
+        "response_hash": _prompt_hash(responses),
+        "count": len(instructions),
+    }
+    key = hashlib.sha256(json.dumps(meta, sort_keys=True).encode("utf-8")).hexdigest()[:20]
+    path = os.path.join(cache_dir, f"{name}-{key}.pt")
+    if cfg.resume and os.path.isfile(path):
+        try:
+            obj = torch.load(path, map_location="cpu")
+            if obj.get("meta") == meta:
+                acts = obj.get("activations")
+                if isinstance(acts, dict):
+                    _log(f"response query cache hit: {name}")
+                    return acts
+        except Exception as e:
+            _log(f"response query cache ignored for {name}: {e}")
+    acts = collect_response_query_activations(bundle, instructions, responses, batch_size, layers=layers)
+    try:
+        torch.save({"meta": meta, "activations": acts}, path)
+        _log(f"response query cache saved: {name}")
+    except Exception as e:
+        _log(f"response query cache save failed for {name}: {e}")
     return acts
 
 
@@ -270,7 +418,7 @@ def _response_fit_activations(bundle, fit_harmful, harmless, cfg):
     lresp = _cached_generate(bundle, lprompts, cfg.batch_size, cfg, "fit_harmless_responses")
     ah = _cached_collect_response(bundle, hprompts, hresp, cfg.batch_size, cfg, "fit_harmful_response_mean")
     al = _cached_collect_response(bundle, lprompts, lresp, cfg.batch_size, cfg, "fit_harmless_response_mean")
-    return ah, al
+    return ah, al, hprompts, hresp, lprompts, lresp
 
 
 def _cached_prompts(cfg: ApostateConfig, name: str, spec: str, n: int, seed: int):
@@ -354,6 +502,22 @@ def _kv_preservation_lookup(acts: Optional[dict], rank: int):
         if key not in cache:
             cache[key] = preservation_subspace(acts[part][layer_idx], rank=rank)
         return cache[key]
+
+    return lookup
+
+
+def _dict_preservation_lookup(acts: Optional[dict], rank: int):
+    cache: dict = {}
+
+    def lookup(layer_idx: int):
+        if not acts or rank <= 0:
+            return None
+        layer_idx = int(layer_idx)
+        if layer_idx not in acts:
+            return None
+        if layer_idx not in cache:
+            cache[layer_idx] = preservation_subspace(acts[layer_idx], rank=rank)
+        return cache[layer_idx]
 
     return lookup
 
@@ -945,12 +1109,18 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
     head_sweep_attrs = None
     ah = al = None
     ple_ah = ple_al = None
+    pler_ah = pler_al = None
     plee_ah = plee_al = None
     kv_ah = kv_al = None
+    q_ah = q_al = None
+    response_h_prompts = response_h_texts = None
+    response_l_prompts = response_l_texts = None
     preserve_source = "none"
     preserve_lookup = _preservation_lookup(None, 0)
     ple_preserve_lookup = _preservation_lookup(None, 0)
+    pler_preserve_lookup = _preservation_lookup(None, 0)
     kv_preserve_lookup = _kv_preservation_lookup(None, 0)
+    q_preserve_lookup = _dict_preservation_lookup(None, 0)
     plee_preserve_basis = None
     preserve_basis = None
     if head_sweep_profile:
@@ -959,7 +1129,9 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
     else:
         _log("collecting activations (original model) ...")
         if cfg.fit_response_activations:
-            ah, al = _response_fit_activations(bundle, fit_harmful, harmless, cfg)
+            ah, al, response_h_prompts, response_h_texts, response_l_prompts, response_l_texts = _response_fit_activations(
+                bundle, fit_harmful, harmless, cfg
+            )
         else:
             ah = _cached_collect(bundle, fit_harmful, cfg.batch_size, cfg, "fit_harmful")
             al = _cached_collect(bundle, harmless, cfg.batch_size, cfg, "fit_harmless")
@@ -967,14 +1139,41 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
             _log("collecting ple gate activations ...")
             ple_ah = _cached_collect_ple(bundle, fit_harmful, cfg.batch_size, cfg, "fit_harmful_ple")
             ple_al = _cached_collect_ple(bundle, harmless, cfg.batch_size, cfg, "fit_harmless_ple")
+            _log("collecting ple residual activations ...")
+            pler_ah = _cached_collect_ple_projection(bundle, fit_harmful, cfg.batch_size, cfg, "fit_harmful_ple_residual")
+            pler_al = _cached_collect_ple_projection(bundle, harmless, cfg.batch_size, cfg, "fit_harmless_ple_residual")
             _log("collecting ple embed activations ...")
             plee_ah = _cached_collect_ple_embed(bundle, fit_harmful, cfg.batch_size, cfg, "fit_harmful_ple_embed")
             plee_al = _cached_collect_ple_embed(bundle, harmless, cfg.batch_size, cfg, "fit_harmless_ple_embed")
         if cfg.optimize and bundle.has_shared_kv():
             src = bundle.kv_source_layers()
-            _log(f"collecting kv activations layers={src} ...")
-            kv_ah = _cached_collect_kv(bundle, fit_harmful, cfg.batch_size, cfg, "fit_harmful_kv")
-            kv_al = _cached_collect_kv(bundle, harmless, cfg.batch_size, cfg, "fit_harmless_kv")
+            if response_h_texts is not None and response_l_texts is not None:
+                _log(f"collecting response kv activations layers={src} ...")
+                kv_ah = _cached_collect_response_kv(
+                    bundle, response_h_prompts, response_h_texts, cfg.batch_size, cfg, "fit_harmful_response_kv"
+                )
+                kv_al = _cached_collect_response_kv(
+                    bundle, response_l_prompts, response_l_texts, cfg.batch_size, cfg, "fit_harmless_response_kv"
+                )
+            else:
+                _log(f"collecting kv activations layers={src} ...")
+                kv_ah = _cached_collect_kv(bundle, fit_harmful, cfg.batch_size, cfg, "fit_harmful_kv")
+                kv_al = _cached_collect_kv(bundle, harmless, cfg.batch_size, cfg, "fit_harmless_kv")
+        if cfg.optimize and getattr(cfg, "gemma_query", False):
+            q_layers = bundle.query_layer_candidates()
+            if q_layers:
+                if response_h_texts is not None and response_l_texts is not None:
+                    _log(f"collecting response query activations layers={q_layers} ...")
+                    q_ah = _cached_collect_response_query(
+                        bundle, response_h_prompts, response_h_texts, cfg.batch_size, cfg, "fit_harmful_response_query"
+                    )
+                    q_al = _cached_collect_response_query(
+                        bundle, response_l_prompts, response_l_texts, cfg.batch_size, cfg, "fit_harmless_response_query"
+                    )
+                else:
+                    _log(f"collecting query activations layers={q_layers} ...")
+                    q_ah = _cached_collect_query(bundle, fit_harmful, cfg.batch_size, cfg, "fit_harmful_query")
+                    q_al = _cached_collect_query(bundle, harmless, cfg.batch_size, cfg, "fit_harmless_query")
 
         preserve_acts = None
         if cfg.preserve_rank > 0 and cfg.preserve_path:
@@ -988,8 +1187,12 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
         preserve_basis = preserve_lookup(L_dir)
         if ple_al is not None:
             ple_preserve_lookup = _preservation_lookup(ple_al, min(4, max(1, cfg.preserve_rank)))
+        if pler_al is not None:
+            pler_preserve_lookup = _preservation_lookup(pler_al, min(4, max(1, cfg.preserve_rank)))
         if kv_al is not None:
             kv_preserve_lookup = _kv_preservation_lookup(kv_al, min(4, max(1, cfg.preserve_rank)))
+        if q_al is not None:
+            q_preserve_lookup = _dict_preservation_lookup(q_al, min(4, max(1, cfg.preserve_rank)))
         if plee_al is not None and cfg.preserve_rank > 0:
             plee_preserve_basis = preservation_subspace(plee_al, rank=min(4, max(1, cfg.preserve_rank)))
         if preserve_basis is not None:
@@ -1035,8 +1238,10 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
             eval_harmful[: cfg.opt_eval_n], eval_harmless[: cfg.opt_eval_n],
             causal_shape, cfg, preserve_basis, preserve_lookup,
             ple_ah=ple_ah, ple_al=ple_al, ple_preserve_lookup=ple_preserve_lookup,
+            pler_ah=pler_ah, pler_al=pler_al, pler_preserve_lookup=pler_preserve_lookup,
             plee_ah=plee_ah, plee_al=plee_al, plee_preserve_basis=plee_preserve_basis,
             kv_ah=kv_ah, kv_al=kv_al, kv_preserve_lookup=kv_preserve_lookup,
+            q_ah=q_ah, q_al=q_al, q_preserve_lookup=q_preserve_lookup,
         )
         shown = {k: (round(v, 3) if isinstance(v, float) else v) for k, v in best_params.items()}
         _log(f"best trial: refusal_proxy={best_attrs.get('refusal_proxy', best_attrs.get('refusal'))} "

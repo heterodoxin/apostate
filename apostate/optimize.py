@@ -235,6 +235,38 @@ def _anchor_profiles(bundle: ModelBundle, space: dict) -> list:
                     "ple_band_center": ple_band_center,
                     "ple_band_width": ple_band_width,
                 })
+    if "ple_residual_ablate" in space:
+        for direction_sign in (1.0, -1.0):
+            for frac, strength, center, width, head_alpha in (
+                (0.18, 0.35, 0.18, 0.35, 0.0),
+                (0.36, 0.45, 0.36, 0.42, 0.0),
+                (0.58, 0.35, 0.58, 0.35, 2.0),
+                (0.58, 0.50, 0.58, 0.45, 2.5),
+                (0.78, 0.45, 0.78, 0.32, 2.5),
+            ):
+                rows.append({
+                    "direction_source": "activations",
+                    "direction_layer_frac": frac,
+                    "refusal_rank": 1,
+                    "strength": 0.0,
+                    "band_center": center,
+                    "band_width": width,
+                    "causal_mix": 0.0,
+                    "causal_power": 1.0,
+                    "ablate_embed": False,
+                    "embed_scale": 0.0,
+                    "head_token_alpha": head_alpha,
+                    "direction_sign": direction_sign,
+                    "ablate_head": False,
+                    "head_scale": 0.0,
+                    "ple_residual_ablate": True,
+                    "ple_residual_layer_frac": frac,
+                    "ple_residual_rank": 1,
+                    "ple_residual_strength": strength,
+                    "ple_residual_band_center": center,
+                    "ple_residual_band_width": width,
+                    "global_scale": 1.0,
+                })
     if "ple_embed_ablate" in space:
         for direction_sign in (1.0, -1.0):
             for alpha in (0.04, 0.08, 0.12):
@@ -294,23 +326,62 @@ def _anchor_profiles(bundle: ModelBundle, space: dict) -> list:
                     "kv_sign": 1.0,
                     "global_scale": 1.0,
                 })
+    if "query_ablate" in space:
+        max_idx = int(space.get("query_layer_idx", ("int", 0, 0))[2])
+        for idx in range(max_idx + 1):
+            for strength, head_alpha in (
+                (0.35, 0.0),
+                (0.50, 2.0),
+                (0.70, 0.0),
+            ):
+                rows.append({
+                    "direction_source": "activations",
+                    "direction_layer_frac": 0.58,
+                    "refusal_rank": 1,
+                    "strength": 0.0,
+                    "band_center": 0.58,
+                    "band_width": 0.12,
+                    "causal_mix": 0.0,
+                    "causal_power": 1.0,
+                    "ablate_embed": False,
+                    "embed_scale": 0.0,
+                    "head_token_alpha": head_alpha,
+                    "direction_sign": 1.0,
+                    "ablate_head": False,
+                    "head_scale": 0.0,
+                    "query_ablate": True,
+                    "query_layer_idx": idx,
+                    "query_rank": 1,
+                    "query_strength": strength,
+                    "query_sign": 1.0,
+                    "global_scale": 1.0,
+                })
     if bundle.has_ple():
         def priority(row):
+            if row.get("query_ablate"):
+                return (0, float(row.get("query_strength", 99.0)))
+            if row.get("ple_residual_ablate"):
+                return (1, float(row.get("ple_residual_strength", 99.0)))
             if row.get("kv_ablate"):
-                return (0, float(row.get("kv_strength", 99.0)))
+                return (2, float(row.get("kv_strength", 99.0)))
             if float(row.get("head_token_alpha", 0.0)) > 0.0:
-                return (1, -float(row.get("head_token_alpha", 0.0)))
+                return (3, -float(row.get("head_token_alpha", 0.0)))
             if row.get("direction_source") == "head_tokens":
-                return (2, abs(float(row.get("head_alpha", 0.0)) - 4.65))
+                return (4, abs(float(row.get("head_alpha", 0.0)) - 4.65))
             if row.get("ablate_embed"):
-                return (3, float(row.get("strength", 99.0)))
-            return (4, float(row.get("strength", 99.0)))
+                return (5, float(row.get("strength", 99.0)))
+            return (6, float(row.get("strength", 99.0)))
 
         sorted_rows = sorted(rows, key=priority)
-        if "kv_ablate" in space:
-            kv_rows = [r for r in sorted_rows if r.get("kv_ablate")][:10]
-            other_rows = [r for r in sorted_rows if not r.get("kv_ablate")][:10]
-            rows = kv_rows + other_rows
+        if "query_ablate" in space or "kv_ablate" in space or "ple_residual_ablate" in space:
+            query_rows = [r for r in sorted_rows if r.get("query_ablate")][:10]
+            pler_rows = [r for r in sorted_rows if r.get("ple_residual_ablate")][:3]
+            kv_rows = [r for r in sorted_rows if r.get("kv_ablate")][:7]
+            other_rows = [
+                r for r in sorted_rows
+                if not r.get("query_ablate") and not r.get("kv_ablate") and not r.get("ple_residual_ablate")
+            ][:8]
+            rows = query_rows + kv_rows + pler_rows + other_rows
         else:
             rows = sorted_rows[:12]
     return rows
@@ -324,6 +395,14 @@ def _kv_layer_candidates(bundle: ModelBundle, kv_ah: Optional[dict], kv_al: Opti
         layers.update(set(kv_ah.get(part, {})) & set(kv_al.get(part, {})))
     ordered = [L for L in bundle.kv_source_layers() if L in layers]
     return ordered or sorted(layers)
+
+
+def _query_layer_candidates(bundle: ModelBundle, q_ah: Optional[dict], q_al: Optional[dict]) -> List[int]:
+    if not q_ah or not q_al:
+        return []
+    layers = sorted(set(q_ah) & set(q_al))
+    ordered = [L for L in bundle.query_layer_candidates() if L in layers]
+    return ordered or layers
 
 
 def _kv_parts(name: str) -> List[str]:
@@ -344,6 +423,20 @@ def _kv_refusal_subspace(bundle: ModelBundle, kv_ah: dict, kv_al: dict, part: st
         cache[key] = refusal_subspace(
             kv_ah[part][layer_idx], kv_al[part][layer_idx],
             rank=rank, max_rank=max(1, min(rank, cfg.max_rank)), seed=cfg.seed + layer_idx,
+        )[0]
+    return cache[key]
+
+
+def _query_refusal_subspace(bundle: ModelBundle, q_ah: dict, q_al: dict, layer_idx: int, rank: int, cfg):
+    cache = getattr(bundle, "_query_refusal_subspace_cache", None)
+    if cache is None:
+        cache = {}
+        setattr(bundle, "_query_refusal_subspace_cache", cache)
+    key = (layer_idx, rank, id(q_ah[layer_idx]), id(q_al[layer_idx]))
+    if key not in cache:
+        cache[key] = refusal_subspace(
+            q_ah[layer_idx], q_al[layer_idx],
+            rank=rank, max_rank=max(1, min(rank, cfg.max_rank)), seed=cfg.seed + 31 + layer_idx,
         )[0]
     return cache[key]
 
@@ -381,6 +474,34 @@ def _apply_kv_profile(
             kind = "kv_key" if part == "k" else "kv_value"
             controller.set_edit_kv_subspace(name, R, kind)
             controller.set_edit_kv_layer_alpha(name, layer_idx, strength)
+
+
+def _apply_query_profile(
+    bundle: ModelBundle,
+    controller: ProjectionController,
+    q_ah: Optional[dict],
+    q_al: Optional[dict],
+    params: Dict,
+    cfg,
+    q_preserve_lookup: Optional[Callable[[int], Optional[torch.Tensor]]] = None,
+):
+    if hasattr(controller, "clear_query"):
+        controller.clear_query()
+    if not params.get("query_ablate", False):
+        return
+    layers = _query_layer_candidates(bundle, q_ah, q_al)
+    if not layers:
+        return
+    idx = max(0, min(len(layers) - 1, int(params.get("query_layer_idx", 0))))
+    layer_idx = layers[idx]
+    rank = int(params.get("query_rank", 1))
+    strength = float(params.get("query_strength", 0.0)) * float(params.get("query_sign", 1.0))
+    R = _query_refusal_subspace(bundle, q_ah, q_al, layer_idx, rank, cfg)
+    basis = q_preserve_lookup(layer_idx) if q_preserve_lookup is not None else None
+    R = gram_schmidt_remove(R, basis)
+    name = f"query_{layer_idx}"
+    controller.set_edit_query_subspace(name, R)
+    controller.set_edit_query_layer_alpha(name, layer_idx, strength)
 
 
 def _capability_samples(cfg) -> List[Tuple[str, str]]:
@@ -486,12 +607,18 @@ def _apply_profile(
     ple_ah: Optional[torch.Tensor] = None,
     ple_al: Optional[torch.Tensor] = None,
     ple_preserve_lookup: Optional[Callable[[int], Optional[torch.Tensor]]] = None,
+    pler_ah: Optional[torch.Tensor] = None,
+    pler_al: Optional[torch.Tensor] = None,
+    pler_preserve_lookup: Optional[Callable[[int], Optional[torch.Tensor]]] = None,
     plee_ah: Optional[torch.Tensor] = None,
     plee_al: Optional[torch.Tensor] = None,
     plee_preserve_basis: Optional[torch.Tensor] = None,
     kv_ah: Optional[dict] = None,
     kv_al: Optional[dict] = None,
     kv_preserve_lookup: Optional[Callable[[str, int], Optional[torch.Tensor]]] = None,
+    q_ah: Optional[dict] = None,
+    q_al: Optional[dict] = None,
+    q_preserve_lookup: Optional[Callable[[int], Optional[torch.Tensor]]] = None,
 ) -> int:
     n = bundle.num_layers
     L_dir = max(0, min(n - 1, int(n * params["direction_layer_frac"])))
@@ -562,6 +689,30 @@ def _apply_profile(
             if lo <= frac <= hi:
                 shape = (1.0 - cmix) + cmix * (max(0.0, causal_shape[L]) ** power)
                 controller.set_ple_layer_alpha(L, strength * shape)
+    if params.get("ple_residual_ablate", False) and pler_ah is not None and pler_al is not None:
+        L_pler = max(0, min(n - 1, int(n * params.get("ple_residual_layer_frac", params["direction_layer_frac"]))))
+        rank = int(params.get("ple_residual_rank", 1))
+        Rpler, _ = refusal_subspace(
+            pler_ah[L_pler], pler_al[L_pler],
+            rank=rank, max_rank=max(1, min(int(getattr(cfg, "ple_max_rank", 2)), rank)),
+            seed=cfg.seed + 17,
+        )
+        basis = pler_preserve_lookup(L_pler) if pler_preserve_lookup is not None else None
+        Rpler = gram_schmidt_remove(Rpler, basis)
+        name = "ple_residual"
+        controller.set_edit_ple_residual_subspace(name, Rpler)
+        center = params.get("ple_residual_band_center", params.get("band_center", 0.5))
+        width = params.get("ple_residual_band_width", params.get("band_width", 0.5))
+        lo = max(0.0, center - width * 0.5)
+        hi = min(1.0, center + width * 0.5)
+        strength = params.get("ple_residual_strength", 0.0) * params.get("direction_sign", 1.0)
+        cmix = params.get("causal_mix", 0.0)
+        power = params.get("causal_power", 1.0)
+        for L in range(n):
+            frac = L / max(1, n - 1)
+            if lo <= frac <= hi:
+                shape = (1.0 - cmix) + cmix * (max(0.0, causal_shape[L]) ** power)
+                controller.set_edit_ple_residual_layer_alpha(name, L, strength * shape)
     if params.get("ple_embed_ablate", False) and plee_ah is not None and plee_al is not None:
         Rplee, _ = refusal_subspace(
             plee_ah, plee_al,
@@ -581,6 +732,7 @@ def _apply_profile(
             params.get("ple_model_projection_alpha", 0.0) * params.get("direction_sign", 1.0)
         )
     _apply_kv_profile(bundle, controller, kv_ah, kv_al, params, cfg, kv_preserve_lookup)
+    _apply_query_profile(bundle, controller, q_ah, q_al, params, cfg, q_preserve_lookup)
     global_scale = float(params.get("global_scale", 1.0))
     if abs(global_scale - 1.0) > 1e-6 and hasattr(controller, "alpha_state"):
         controller.scale_alpha_state(controller.alpha_state(), global_scale)
@@ -601,12 +753,18 @@ def optimize_profile(
     ple_ah: Optional[torch.Tensor] = None,
     ple_al: Optional[torch.Tensor] = None,
     ple_preserve_lookup: Optional[Callable[[int], Optional[torch.Tensor]]] = None,
+    pler_ah: Optional[torch.Tensor] = None,
+    pler_al: Optional[torch.Tensor] = None,
+    pler_preserve_lookup: Optional[Callable[[int], Optional[torch.Tensor]]] = None,
     plee_ah: Optional[torch.Tensor] = None,
     plee_al: Optional[torch.Tensor] = None,
     plee_preserve_basis: Optional[torch.Tensor] = None,
     kv_ah: Optional[dict] = None,
     kv_al: Optional[dict] = None,
     kv_preserve_lookup: Optional[Callable[[str, int], Optional[torch.Tensor]]] = None,
+    q_ah: Optional[dict] = None,
+    q_al: Optional[dict] = None,
+    q_preserve_lookup: Optional[Callable[[int], Optional[torch.Tensor]]] = None,
 ) -> Tuple[dict, dict, list]:
     cap_samples = _capability_samples(cfg)
     base_cap = None
@@ -658,6 +816,17 @@ def optimize_profile(
         space["ple_band_width"] = ("float", 0.08, 0.90)
     if (
         getattr(cfg, "gemma_ple", True)
+        and pler_ah is not None
+        and pler_al is not None
+    ):
+        space["ple_residual_ablate"] = ("cat", [False, True])
+        space["ple_residual_layer_frac"] = ("float", 0.0, 0.95)
+        space["ple_residual_rank"] = ("int", 1, max(1, min(2, int(getattr(cfg, "ple_max_rank", 2)))))
+        space["ple_residual_strength"] = ("float", 0.0, 1.25)
+        space["ple_residual_band_center"] = ("float", 0.0, 0.95)
+        space["ple_residual_band_width"] = ("float", 0.08, 0.90)
+    if (
+        getattr(cfg, "gemma_ple", True)
         and plee_ah is not None
         and plee_al is not None
     ):
@@ -675,6 +844,14 @@ def optimize_profile(
         space["kv_part"] = ("cat", ["value", "key_value", "key"])
         space["kv_sign"] = ("cat", [1.0, -1.0])
         space["global_scale"] = ("float", 0.55, 1.0)
+    query_layers = _query_layer_candidates(bundle, q_ah, q_al)
+    if query_layers:
+        space["query_ablate"] = ("cat", [False, True])
+        space["query_layer_idx"] = ("int", 0, len(query_layers) - 1)
+        space["query_rank"] = ("int", 1, max(1, min(2, cfg.max_rank)))
+        space["query_strength"] = ("float", 0.0, 1.30)
+        space["query_sign"] = ("cat", [1.0, -1.0])
+        space["global_scale"] = ("float", 0.55, 1.0)
 
     best_seen = [float("inf")]
 
@@ -682,8 +859,10 @@ def optimize_profile(
         _apply_profile(
             bundle, controller, ah, al, params, causal_shape, cfg, preserve_basis, preserve_lookup,
             ple_ah=ple_ah, ple_al=ple_al, ple_preserve_lookup=ple_preserve_lookup,
+            pler_ah=pler_ah, pler_al=pler_al, pler_preserve_lookup=pler_preserve_lookup,
             plee_ah=plee_ah, plee_al=plee_al, plee_preserve_basis=plee_preserve_basis,
             kv_ah=kv_ah, kv_al=kv_al, kv_preserve_lookup=kv_preserve_lookup,
+            q_ah=q_ah, q_al=q_al, q_preserve_lookup=q_preserve_lookup,
         )
         kl = kl_harmless(bundle, controller, eval_harmless, cfg.batch_size, positions=cfg.kl_positions)
         kl_part = _kl_loss(kl, cfg)
@@ -747,8 +926,10 @@ def optimize_profile(
             _apply_profile(
                 bundle, controller, ah, al, h["params"], causal_shape, cfg, preserve_basis, preserve_lookup,
                 ple_ah=ple_ah, ple_al=ple_al, ple_preserve_lookup=ple_preserve_lookup,
+                pler_ah=pler_ah, pler_al=pler_al, pler_preserve_lookup=pler_preserve_lookup,
                 plee_ah=plee_ah, plee_al=plee_al, plee_preserve_basis=plee_preserve_basis,
                 kv_ah=kv_ah, kv_al=kv_al, kv_preserve_lookup=kv_preserve_lookup,
+                q_ah=q_ah, q_al=q_al, q_preserve_lookup=q_preserve_lookup,
             )
             with controller.active():
                 ref = refusal_rate(bundle, eval_harmful, cfg.opt_gen_tokens, cfg.batch_size)
@@ -826,7 +1007,9 @@ def optimize_profile(
     _apply_profile(
         bundle, controller, ah, al, best_params, causal_shape, cfg, preserve_basis, preserve_lookup,
         ple_ah=ple_ah, ple_al=ple_al, ple_preserve_lookup=ple_preserve_lookup,
+        pler_ah=pler_ah, pler_al=pler_al, pler_preserve_lookup=pler_preserve_lookup,
         plee_ah=plee_ah, plee_al=plee_al, plee_preserve_basis=plee_preserve_basis,
         kv_ah=kv_ah, kv_al=kv_al, kv_preserve_lookup=kv_preserve_lookup,
+        q_ah=q_ah, q_al=q_al, q_preserve_lookup=q_preserve_lookup,
     )
     return best_params, best_attrs, history

@@ -169,6 +169,45 @@ class ModelBundle:
                 out.append((part, mod))
         return out
 
+    def query_writers(self, layer: torch.nn.Module) -> List[torch.nn.Module]:
+        attn = self.attn_module(layer)
+        if attn is None:
+            return []
+        mod = getattr(attn, "q_proj", None)
+        return [mod] if mod is not None else []
+
+    def query_layer_candidates(self) -> List[int]:
+        layers = self.layers()
+        writable = [i for i, layer in enumerate(layers) if self.query_writers(layer)]
+        if not writable:
+            return []
+
+        def add_spread(out: set[int], vals: List[int]):
+            if not vals:
+                return
+            out.add(vals[0])
+            out.add(vals[len(vals) // 2])
+            out.add(vals[-1])
+
+        picks: set[int] = set()
+        shared = [
+            i for i in writable
+            if bool(getattr(self.attn_module(layers[i]), "is_kv_shared_layer", False))
+        ]
+        if shared:
+            picks.update(i for i in self.kv_source_layers() if i in writable)
+            by_type: dict[str, List[int]] = {}
+            for i in shared:
+                attn = self.attn_module(layers[i])
+                by_type.setdefault(str(getattr(attn, "layer_type", "")), []).append(i)
+            for vals in by_type.values():
+                add_spread(picks, vals)
+        else:
+            add_spread(picks, writable)
+            for frac in (0.55, 0.70, 0.85, 0.95):
+                picks.add(writable[min(len(writable) - 1, int(frac * len(writable)))])
+        return sorted(i for i in picks if i in writable)
+
     def kv_source_layers(self) -> List[int]:
         layers = self.layers()
         shared_sources = []
@@ -266,6 +305,10 @@ class ModelBundle:
     def ple_writers(self, layer: torch.nn.Module) -> List[torch.nn.Module]:
         gate = getattr(layer, "per_layer_input_gate", None)
         return [gate] if gate is not None else []
+
+    def ple_projection_writers(self, layer: torch.nn.Module) -> List[torch.nn.Module]:
+        proj = getattr(layer, "per_layer_projection", None)
+        return [proj] if proj is not None else []
 
     def has_ple(self) -> bool:
         return any(self.ple_writers(layer) for layer in self.layers())
