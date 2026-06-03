@@ -95,7 +95,7 @@ def main(argv=None) -> int:
     if cmd == "talk":
         return run_module(["-m", "apostate.chat", *args], f"apostate talk {' '.join(args)}".strip())
     if cmd == "quantize":
-        return run_module(["-m", "apostate.quantize", *args])
+        return run_module(["-m", "apostate.quant", *args])
     if cmd == "train":
         return run_module(["-m", "apostate.finetune", *args])
 

@@ -1,3 +1,5 @@
+# fold the final projection into residual-writer weights and save a standalone checkpoint.
+
 from __future__ import annotations
 
 import os
@@ -5,7 +7,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from .config import ApostateConfig
-from .model import ModelBundle, model_metadata, set_config_value
+from .model import ModelBundle, model_metadata, set_config_value, _is_conv1d
 
 _DTYPES = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}
 
@@ -25,15 +27,32 @@ def _edit_embed(W: torch.Tensor, R: torch.Tensor, coeff: float) -> torch.Tensor:
     return (Wf + coeff * ((Wf @ R) @ R.t())).to(W.dtype)
 
 
+def _edit_out(mod, R: torch.Tensor, coeff: float):
+    # project R out of what `mod` writes to the residual. Conv1D weight is [in, out]
+    # (transposed vs Linear [out, in]), so the output axis is columns, not rows.
+    if _is_conv1d(mod):
+        mod.weight.data = _edit_embed(mod.weight.data, R, coeff)
+    else:
+        mod.weight.data = _edit_linear(mod.weight.data, R, coeff)
+    if getattr(mod, "bias", None) is not None:
+        mod.bias.data = _edit_vec(mod.bias.data, R, coeff)
+
+
+def _edit_in(mod, R: torch.Tensor, coeff: float):
+    # project R out of `mod`'s input (reader side); input axis flips for Conv1D.
+    if _is_conv1d(mod):
+        mod.weight.data = _edit_linear(mod.weight.data, R, coeff)
+    else:
+        mod.weight.data = _edit_embed(mod.weight.data, R, coeff)
+
+
 def _edit_writer(mod, R: torch.Tensor, coeff: float):
     down = getattr(mod, "down_proj", None)
     if isinstance(down, torch.nn.Parameter) and down.dim() == 3:
         edited = [_edit_linear(down.data[i], R, coeff) for i in range(down.shape[0])]
         down.data = torch.stack(edited, dim=0)
         return
-    mod.weight.data = _edit_linear(mod.weight.data, R, coeff)
-    if getattr(mod, "bias", None) is not None:
-        mod.bias.data = _edit_vec(mod.bias.data, R, coeff)
+    _edit_out(mod, R, coeff)
 
 
 @torch.no_grad()
@@ -63,6 +82,20 @@ def bake(cfg: ApostateConfig, export: dict, tokenizer=None, drop_layers=None) ->
     for e in edits:
         R = e["R"].float()
         sign = float(e["sign"])
+        if e.get("kind") == "reader":
+            # post-norm models: project the (per-layer) direction out of each reader's input columns
+            R_layers = e.get("R_layers")
+            for L, layer in enumerate(layers):
+                a = float(e["layer_alphas"][L])
+                if a == 0:
+                    continue
+                RL = R
+                if R_layers is not None and L < len(R_layers) and R_layers[L] is not None:
+                    RL = R_layers[L].float()
+                for mod in bundle.reader_modules(layer):
+                    if isinstance(getattr(mod, "weight", None), torch.Tensor):
+                        _edit_in(mod, RL, sign * a)
+            continue
         if e.get("kind") == "ple_gate":
             for L, layer in enumerate(layers):
                 a = float(e["layer_alphas"][L])

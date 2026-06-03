@@ -1,3 +1,5 @@
+# model loading + architecture probing: locate the decoder, its residual writers and readers.
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -42,11 +44,62 @@ def _as_decoder(mod):
         return None
     if hasattr(mod, "layers"):
         return mod
-    for alias in ("h", "blocks"):
-        if hasattr(mod, alias):
+    for alias in ("h", "blocks", "layer"):
+        if hasattr(mod, alias) and isinstance(getattr(mod, alias), torch.nn.ModuleList):
             mod.layers = getattr(mod, alias)
             return mod
     return None
+
+
+def _dynamic_decoder(root):
+    # last-resort, name-agnostic: the decoder is the module owning the biggest
+    # ModuleList of repeated compound blocks (the transformer layers).
+    best = None
+    for mod in root.modules():
+        for child in mod.children():
+            if not isinstance(child, torch.nn.ModuleList) or len(child) < 2:
+                continue
+            head = child[0]
+            if not isinstance(head, torch.nn.Module) or not any(True for _ in head.children()):
+                continue
+            if best is None or len(child) > len(best[1]):
+                best = (mod, child)
+    if best is None:
+        return None
+    mod, ml = best
+    if not hasattr(mod, "layers"):
+        mod.layers = ml
+    return mod
+
+
+try:
+    from transformers.pytorch_utils import Conv1D as _Conv1D
+    _LINEAR_LIKE = (torch.nn.Linear, _Conv1D)
+except Exception:  # older/newer transformers without Conv1D
+    _Conv1D = ()
+    _LINEAR_LIKE = (torch.nn.Linear,)
+
+
+def _is_conv1d(m) -> bool:
+    return bool(_Conv1D) and isinstance(m, _Conv1D)
+
+
+def _io_features(m):
+    # (in_features, out_features) for nn.Linear and gpt2-style Conv1D (weight is [in, out])
+    if isinstance(m, torch.nn.Linear):
+        return m.in_features, m.out_features
+    if _is_conv1d(m):
+        w = m.weight
+        return w.shape[0], w.shape[1]
+    return None, None
+
+
+def _writes_residual(m, hidden) -> bool:
+    return isinstance(m, _LINEAR_LIKE) and _io_features(m)[1] == hidden
+
+
+def _reads_residual(m, hidden) -> bool:
+    return isinstance(m, _LINEAR_LIKE) and _io_features(m)[0] == hidden
 
 
 def _config_sections(config):
@@ -117,43 +170,79 @@ class ModelBundle:
             dec = _as_decoder(inner)
             if dec is not None:
                 return dec
+        dec = _dynamic_decoder(m)  # name-agnostic fallback for unknown layouts
+        if dec is not None:
+            return dec
         raise AttributeError("Could not locate decoder stack on this model.")
 
     def layers(self) -> List[torch.nn.Module]:
         dec = self._decoder()
         return list(getattr(dec, "layers"))
 
+    def _hidden(self) -> Optional[int]:
+        h = config_value(self.model.config, "hidden_size")
+        return int(h) if h else (self.hidden_size or None)
+
     def embed(self) -> torch.nn.Module:
         dec = self._decoder()
-        for name in ("embed_tokens", "wte"):
+        for name in ("embed_tokens", "wte", "word_embeddings", "tok_embeddings"):
             if hasattr(dec, name):
                 return getattr(dec, name)
+        # fallback: the embedding whose width matches the hidden size
+        hidden = self._hidden()
+        cands = [m for m in self.model.modules() if isinstance(m, torch.nn.Embedding)]
+        for m in cands:
+            if hidden is None or m.embedding_dim == hidden:
+                return m
+        if cands:
+            return cands[0]
         raise AttributeError("Could not locate token embedding.")
 
     def final_norm(self):
         dec = self._decoder()
-        for name in ("norm", "ln_f", "final_layernorm"):
+        for name in ("norm", "ln_f", "final_layernorm", "final_norm", "ln_out"):
             if hasattr(dec, name):
                 return getattr(dec, name)
-        return None
+        # fallback: the last norm-like direct child of the decoder
+        last = None
+        for _name, child in dec.named_children():
+            if isinstance(child, torch.nn.ModuleList):
+                continue
+            if hasattr(child, "weight") and getattr(child, "weight", None) is not None \
+                    and not isinstance(child, (torch.nn.Linear, torch.nn.Embedding)):
+                last = child
+        return last
 
     def lm_head(self):
         for root in (self.model, self._decoder()):
-            if hasattr(root, "lm_head"):
-                return getattr(root, "lm_head")
+            for name in ("lm_head", "output", "embed_out", "output_layer"):
+                if hasattr(root, name) and isinstance(getattr(root, name), _LINEAR_LIKE):
+                    return getattr(root, name)
+        # fallback: a linear whose output width is the vocab size
+        vocab = config_value(self.model.config, "vocab_size")
+        for m in self.model.modules():
+            if isinstance(m, _LINEAR_LIKE) and vocab and _io_features(m)[1] == int(vocab):
+                return m
         return None
 
     def attn_writer(self, layer: torch.nn.Module) -> torch.nn.Module:
-        for attn_name in ("self_attn", "attention", "attn"):
-            if hasattr(layer, attn_name):
-                attn = getattr(layer, attn_name)
-                for proj in ("o_proj", "out_proj", "dense", "c_proj"):
-                    if hasattr(attn, proj):
-                        return getattr(attn, proj)
+        attn = self.attn_module(layer)
+        if attn is not None:
+            for proj in ("o_proj", "out_proj", "dense", "c_proj", "wo", "proj"):
+                if hasattr(attn, proj) and isinstance(getattr(attn, proj), _LINEAR_LIKE):
+                    return getattr(attn, proj)
+        # fallback: in the attention block, the linear that writes back to the residual
+        # (output width == hidden), preferring the one that isn't a q/k/v reader.
+        hidden = self._hidden()
+        if attn is not None and hidden is not None:
+            outs = [m for m in attn.modules() if _writes_residual(m, hidden)]
+            if outs:
+                ins = [m for m in outs if _io_features(m)[0] != hidden]
+                return (ins or outs)[-1]
         raise AttributeError("Could not locate attention output projection.")
 
     def attn_module(self, layer: torch.nn.Module):
-        for attn_name in ("self_attn", "attention", "attn"):
+        for attn_name in ("self_attn", "attention", "attn", "self_attention", "mixer"):
             if hasattr(layer, attn_name):
                 return getattr(layer, attn_name)
         return None
@@ -230,7 +319,7 @@ class ModelBundle:
         return False
 
     def _mlp(self, layer: torch.nn.Module):
-        for name in ("mlp", "feed_forward", "ffn", "block_sparse_moe"):
+        for name in ("mlp", "feed_forward", "ffn", "block_sparse_moe", "feed_forward_layer", "moe"):
             if hasattr(layer, name):
                 return getattr(layer, name)
         return None
@@ -241,6 +330,12 @@ class ModelBundle:
                 out = getattr(mod, proj)
                 if isinstance(out, torch.nn.Module):
                     return out
+        # fallback: the linear in this mlp whose output is the residual width
+        hidden = self._hidden()
+        if hidden is not None:
+            outs = [m for m in mod.modules() if _writes_residual(m, hidden)]
+            if outs:
+                return outs[-1]
         return None
 
     def _packed_expert_writer(self, mod):
@@ -300,7 +395,74 @@ class ModelBundle:
         ple = getattr(layer, "per_layer_projection", None)
         if ple is not None:
             out.append(ple)
+        out = [w for w in out if w is not None]
+        if not out:
+            # name-agnostic fallback: every linear-like that writes the residual
+            hidden = self._hidden()
+            if hidden is not None:
+                out = [m for m in layer.modules() if _writes_residual(m, hidden)]
         return out
+
+    def _mlp_readers(self, mod) -> List[torch.nn.Module]:
+        # matrices that read the residual into the mlp (gate + up, across naming variants)
+        out = []
+        for name in ("gate_proj", "up_proj", "w1", "w3", "c_fc", "fc_in", "gate_up_proj", "dense_h_to_4h"):
+            m = getattr(mod, name, None)
+            if isinstance(m, torch.nn.Module):
+                out.append(m)
+        return out
+
+    def mlp_readers(self, layer: torch.nn.Module) -> List[torch.nn.Module]:
+        mlp = self._mlp(layer)
+        if mlp is None:
+            return []
+        out = []
+        experts = getattr(mlp, "experts", None)
+        if experts is not None and len(experts) > 0:
+            for e in experts:
+                out.extend(self._mlp_readers(e))
+            for sname in ("shared_expert", "shared_experts"):
+                se = getattr(mlp, sname, None)
+                if se is not None:
+                    out.extend(self._mlp_readers(se))
+            gate = getattr(mlp, "gate", None)  # moe router
+            if isinstance(gate, torch.nn.Module):
+                out.append(gate)
+        else:
+            out.extend(self._mlp_readers(mlp))
+        return out
+
+    def reader_modules(self, layer: torch.nn.Module) -> List[torch.nn.Module]:
+        # matrices that read the residual: q/k/v, mlp gate/up (+moe), per-layer gate.
+        out = list(self.query_writers(layer))
+        out.extend(mod for _part, mod in self.kv_writers(layer))
+        out.extend(self.mlp_readers(layer))
+        gate = getattr(layer, "per_layer_input_gate", None)
+        if isinstance(gate, torch.nn.Module):
+            out.append(gate)
+        out = [m for m in out if isinstance(m, torch.nn.Module)]
+        if not out:
+            # name-agnostic fallback: linear-likes that read the residual (input width == hidden),
+            # minus the writers (an o_proj can share the hidden width when heads*head_dim == hidden)
+            hidden = self._hidden()
+            if hidden is not None:
+                writers = {id(w) for w in self.layer_writers(layer)}
+                out = [m for m in layer.modules()
+                       if _reads_residual(m, hidden) and id(m) not in writers]
+        seen, uniq = set(), []
+        for m in out:
+            if m is not None and id(m) not in seen:
+                seen.add(id(m))
+                uniq.append(m)
+        return uniq
+
+    def uses_post_norm(self) -> bool:
+        # gemma2/3/4 sandwich: a norm between writer and residual; if present, ablate reader-side.
+        layers = self.layers()
+        if not layers:
+            return False
+        L = layers[0]
+        return any(hasattr(L, n) for n in ("post_attention_layernorm", "post_feedforward_layernorm"))
 
     def ple_writers(self, layer: torch.nn.Module) -> List[torch.nn.Module]:
         gate = getattr(layer, "per_layer_input_gate", None)

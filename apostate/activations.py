@@ -1,3 +1,5 @@
+# collect last-token / response-mean activations for harmful and harmless prompts.
+
 from __future__ import annotations
 
 from typing import Dict, List

@@ -75,3 +75,98 @@ def checkpoints() -> List[str]:
                 seen.add(str(d))
                 out.append(str(d))
     return out
+
+
+def _is_model_dir(files) -> bool:
+    return "config.json" in files and any(f.endswith(".safetensors") for f in files)
+
+
+def is_apostate_dir(path: Path, files=None) -> bool:
+    """true if this dir was baked by apostate (marker file or -apostate name)."""
+    try:
+        files = files if files is not None else {f.name for f in Path(path).iterdir()}
+    except OSError:
+        return False
+    if not _is_model_dir(files):
+        return False
+    return (Path(path).name.endswith("-apostate")
+            or "apostate_config.json" in files or "report.json" in files)
+
+
+def apostate_checkpoints() -> List[str]:
+    """fast local pass: apostate-baked dirs in cwd / repo root."""
+    return [c for c in checkpoints() if is_apostate_dir(Path(c))]
+
+
+# big or irrelevant trees we never descend into during a scan
+_SKIP = {
+    "windows", "program files", "program files (x86)", "programdata",
+    "$recycle.bin", "system volume information", "node_modules", "__pycache__",
+    "appdata", ".cache", "recovery", "perflogs", "msocache", "windows.old", "venv",
+}
+
+
+def _env_roots() -> List[Path]:
+    raw = os.environ.get("APOSTATE_MODEL_ROOTS", "")
+    return [Path(p) for p in raw.split(os.pathsep) if p.strip()]
+
+
+def _scan_roots() -> List[Path]:
+    # every mounted drive, plus the cwd/repo drive and any APOSTATE_MODEL_ROOTS.
+    roots = list(_env_roots())
+    for anchor in (Path.cwd(), Path(__file__).resolve().parent.parent, Path.home()):
+        try:
+            roots.append(Path(anchor.anchor or os.sep))
+        except OSError:
+            pass
+    if os.name == "nt":
+        roots += [Path(f"{d}:\\") for d in "CDEFGHIJKLMNOP"]
+    else:
+        roots.append(Path(os.sep))
+    out, seen = [], set()
+    for r in roots:
+        try:
+            ok = r.exists() and r.is_dir()
+        except OSError:
+            ok = False
+        key = str(r).lower()
+        if ok and key not in seen:
+            seen.add(key)
+            out.append(r)
+    return out
+
+
+def _walk_for_apostate(root: Path, seen: set, found: List[str]):
+    for dirpath, dirnames, filenames in os.walk(root, onerror=lambda e: None):
+        dirnames[:] = [
+            d for d in dirnames
+            if d.lower() not in _SKIP
+            and not d.startswith(".")
+            and not d.startswith("$")
+            and not d.startswith("models--")
+        ]
+        files = set(filenames)
+        if _is_model_dir(files):
+            if is_apostate_dir(Path(dirpath), files):
+                found.append(dirpath)
+            dirnames[:] = []  # a model dir has no nested models
+
+
+def scan_apostate(root: str = None) -> List[str]:
+    # dynamically walk every drive for baked models, pruning system and cache trees.
+    roots = [Path(root)] if root is not None else _scan_roots()
+    seen, found = set(), []
+    for r in roots:
+        _walk_for_apostate(r, seen, found)
+    return sorted(set(found))
+
+
+def apostate_models() -> List[str]:
+    # everything talk/test offers: local checkpoints + a full drive scan.
+    out, seen = [], set()
+    for m in apostate_checkpoints() + scan_apostate():
+        key = str(Path(m).resolve()).lower()
+        if key not in seen:
+            seen.add(key)
+            out.append(m)
+    return out

@@ -1,6 +1,8 @@
+# build the refusal subspace and score each layer's causal contribution to refusal.
+
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 import torch
 
 
@@ -108,3 +110,37 @@ def augment_subspace(existing: torch.Tensor, new_dirs: torch.Tensor, max_rank: i
         return existing
     merged = torch.cat([existing, extra], dim=1)
     return merged[:, :max_rank]
+
+
+# per-layer strength prior: ablate each layer alone, turn the refusal drop into an alpha.
+
+def causal_layer_scores(
+    bundle,
+    controller,
+    eval_instructions: List[str],
+    batch_size: int = 16,
+    floor: float = 0.25,
+    temperature: float = 1.0,
+) -> List[float]:
+    from .evaluate import refusal_logit_margin  # local import avoids an import cycle
+
+    controller.set_uniform_alpha(0.0)
+    with controller.active():
+        base = refusal_logit_margin(bundle, eval_instructions, batch_size)
+
+    drops: List[float] = []
+    for L in range(bundle.num_layers):
+        controller.isolate_layer(L)
+        with controller.active():
+            m = refusal_logit_margin(bundle, eval_instructions, batch_size)
+        drops.append(max(0.0, base - m))
+
+    t = torch.tensor(drops)
+    if float(t.max()) <= 1e-6:
+        return [1.0] * bundle.num_layers
+
+    t = t / t.max()
+    if temperature != 1.0:
+        t = t ** (1.0 / max(1e-3, temperature))
+    alphas = floor + (1.0 - floor) * t
+    return [float(x) for x in alphas]

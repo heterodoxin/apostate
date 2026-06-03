@@ -1,3 +1,5 @@
+# runtime edit controller: forward hooks that project refusal directions out; off == original model.
+
 from __future__ import annotations
 
 from contextlib import contextmanager
@@ -12,11 +14,18 @@ class ProjectionController:
         self.bundle = bundle
         self.device = next(bundle.model.parameters()).device
         self.enabled = False
+        # post-norm models (gemma2/3/4) renormalize writer outputs, so we ablate the
+        # reader side (q/k/v/gate/up inputs) instead via pre-hooks. see model.uses_post_norm.
+        self.reader_mode = bool(bundle.uses_post_norm())
         self._handles = []
+        self._pre_handles = []
         self._hooked = set()
+        self._pre_hooked = set()
         self._modules: List[torch.nn.Module] = []
         self._residual_layers: List[torch.nn.Module] = []
         self._layer_writers: List[Tuple[torch.nn.Module, torch.nn.Module]] = []
+        self._reader_modules: List[Tuple[torch.nn.Module, ...]] = []
+        self._module_layer: dict = {}  # reader module id -> layer index, for per-layer dirs
         self._kv_writers: List[Tuple[Tuple[str, torch.nn.Module], ...]] = []
         self._query_writers: List[Tuple[torch.nn.Module, ...]] = []
         self._ple_writers: List[Tuple[torch.nn.Module, ...]] = []
@@ -27,7 +36,8 @@ class ProjectionController:
         self._final: Optional[torch.nn.Module] = None
         self.edits: List[dict] = []
         self._register()
-        self.add_edit("primary", sign=-1.0, default_alpha=1.0)
+        self.add_edit("primary", sign=-1.0, default_alpha=1.0,
+                      kind="reader" if self.reader_mode else "hidden")
         self.add_edit("head_token", sign=-1.0, default_alpha=0.0)
         if any(self._ple_writers):
             self.add_edit("ple", sign=-1.0, default_alpha=0.0, kind="ple_gate")
@@ -52,6 +62,7 @@ class ProjectionController:
             query = tuple(b.query_writers(layer))
             self._residual_layers.append(layer)
             self._layer_writers.append(writers)
+            self._reader_modules.append(tuple(b.reader_modules(layer)))
             self._kv_writers.append(kv)
             self._query_writers.append(query)
             self._ple_writers.append(ple)
@@ -67,6 +78,11 @@ class ProjectionController:
         self._modules = uniq
         for m in self._modules:
             self._ensure_hook(m)
+        if self.reader_mode:
+            for li, mods in enumerate(self._reader_modules):
+                for m in mods:
+                    self._module_layer[id(m)] = li
+                    self._ensure_pre_hook(m)
 
     def _ensure_hook(self, module: torch.nn.Module):
         mid = id(module)
@@ -75,7 +91,16 @@ class ProjectionController:
         self._hooked.add(mid)
         self._handles.append(module.register_forward_hook(self._make_hook(module)))
 
+    def _ensure_pre_hook(self, module: torch.nn.Module):
+        mid = id(module)
+        if mid in self._pre_hooked:
+            return
+        self._pre_hooked.add(mid)
+        self._pre_handles.append(module.register_forward_pre_hook(self._make_pre_hook(module)))
+
     def _modules_for_kind(self, kind: str) -> List[torch.nn.Module]:
+        if kind == "reader":
+            return [m for mods in self._reader_modules for m in mods]
         if kind == "ple_gate":
             return [m for mods in self._ple_writers for m in mods]
         if kind == "ple_residual":
@@ -117,6 +142,8 @@ class ProjectionController:
             t = out[0] if isinstance(out, tuple) else out
             delta = None
             for e in self.edits:
+                if e.get("kind") == "reader":  # reader edits run on inputs, via pre-hooks
+                    continue
                 R = e["R"]
                 if R is None:
                     continue
@@ -138,6 +165,43 @@ class ProjectionController:
 
         return hook
 
+    def _make_pre_hook(self, module):
+        # remove the refusal direction from a reader's input (q/k/v/gate/up etc.)
+        mod_id = id(module)
+
+        layer = self._module_layer.get(mod_id)
+
+        def pre_hook(_mod, args):
+            if not self.enabled or not args:
+                return None
+            x = args[0]
+            if not isinstance(x, torch.Tensor):
+                return None
+            delta = None
+            for e in self.edits:
+                if e.get("kind") != "reader":
+                    continue
+                a = e["alpha"].get(mod_id, 0.0)
+                if a == 0.0:
+                    continue
+                R = self._reader_R(e, layer)  # per-layer direction (falls back to single R)
+                if R is None or R.shape[0] != x.shape[-1]:
+                    continue
+                Rd = R.to(dtype=x.dtype, device=x.device)
+                contrib = (e["sign"] * a) * ((x @ Rd) @ Rd.t())
+                delta = contrib if delta is None else delta + contrib
+            if delta is None:
+                return None
+            return (x + delta,) + tuple(args[1:])
+
+        return pre_hook
+
+    def _reader_R(self, edit: dict, layer):
+        rl = edit.get("R_layers")
+        if rl is not None and layer is not None and layer < len(rl) and rl[layer] is not None:
+            return rl[layer]
+        return edit["R"]
+
     def add_edit(self, name: str, sign: float, default_alpha: float = 0.0, kind: str = "hidden"):
         alpha = {id(m): default_alpha for m in self._modules_for_kind(kind)}
         self.edits.append({"name": name, "kind": kind, "sign": float(sign), "R": None, "alpha": alpha})
@@ -153,9 +217,27 @@ class ProjectionController:
         e["R"] = R.to(self.device).float()
         e["_cast"] = None
 
+    def set_reader_layer_subspace(self, layer_idx: int, R: torch.Tensor, name: str = "primary"):
+        # per-layer refusal direction for the reader edit (post-norm models need this)
+        e = self._edit(name)
+        rl = e.get("R_layers")
+        if rl is None:
+            rl = [None] * len(self._reader_modules)
+            e["R_layers"] = rl
+        Rd = R.to(self.device).float()
+        rl[layer_idx] = Rd
+        if e["R"] is None:
+            e["R"] = Rd  # representative so export() doesn't skip the edit
+
+    def _layer_targets(self, edit: dict, layer_idx: int):
+        # reader edits act on the layer's readers; everything else on its writers
+        if edit.get("kind") == "reader":
+            return self._reader_modules[layer_idx]
+        return self._layer_writers[layer_idx]
+
     def set_edit_layer_alpha(self, name: str, layer_idx: int, value: float):
         e = self._edit(name)
-        for m in self._layer_writers[layer_idx]:
+        for m in self._layer_targets(e, layer_idx):
             e["alpha"][id(m)] = value
 
     def set_edit_embed_alpha(self, name: str, value: float):
@@ -202,7 +284,11 @@ class ProjectionController:
             e["alpha"][k] = value
 
     def get_edit_layer_alpha(self, name: str, layer_idx: int) -> float:
-        return self._edit(name)["alpha"][id(self._layer_writers[layer_idx][0])]
+        e = self._edit(name)
+        targets = self._layer_targets(e, layer_idx)
+        if not targets:
+            return 0.0
+        return e["alpha"].get(id(targets[0]), 0.0)
 
     @property
     def R(self):
@@ -384,7 +470,8 @@ class ProjectionController:
         return self._edit("ple_model_projection")["alpha"].get(id(self._ple_model_projection), 0.0)
 
     def get_embed_alpha(self) -> float:
-        return self._edit("primary")["alpha"][id(self._embed)]
+        # reader-mode primary has no embed key; tolerate it like the other getters
+        return self._edit("primary")["alpha"].get(id(self._embed), 0.0)
 
     def get_head_alpha(self) -> float:
         if self._final is None:
@@ -447,17 +534,35 @@ class ProjectionController:
             self.enabled = prev
 
     def remove(self):
-        for h in self._handles:
+        for h in self._handles + self._pre_handles:
             h.remove()
         self._handles = []
+        self._pre_handles = []
         self._hooked = set()
+        self._pre_hooked = set()
 
     def export(self) -> dict:
         out_edits = []
         for e in self.edits:
             if e["R"] is None:
                 continue
-            if e.get("kind") == "ple_gate":
+            if e.get("kind") == "reader":
+                layer_alphas = [
+                    e["alpha"].get(id(self._reader_modules[i][0]), 0.0) if self._reader_modules[i] else 0.0
+                    for i in range(len(self._reader_modules))
+                ]
+                embed_alpha = 0.0
+                head_alpha = 0.0
+                rl = e.get("R_layers")
+                if rl is not None:
+                    out_edits.append({
+                        "name": e["name"], "kind": "reader", "sign": e["sign"],
+                        "R": e["R"].detach().cpu(),
+                        "R_layers": [(r.detach().cpu() if r is not None else None) for r in rl],
+                        "embed_alpha": 0.0, "head_alpha": 0.0, "layer_alphas": layer_alphas,
+                    })
+                    continue
+            elif e.get("kind") == "ple_gate":
                 layer_alphas = [
                     e["alpha"].get(id(self._ple_writers[i][0]), 0.0) if self._ple_writers[i] else 0.0
                     for i in range(len(self._ple_writers))

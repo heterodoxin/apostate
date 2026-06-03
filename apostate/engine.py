@@ -1,3 +1,5 @@
+# the pipeline: load, collect, build directions, search, guard, de-escalate KL, bake.
+
 from __future__ import annotations
 
 import gc
@@ -24,9 +26,8 @@ from .activations import (
     collect_ple_projection_activations,
     collect_ple_embed_activations,
 )
-from .directions import refusal_subspace, preservation_subspace, gram_schmidt_remove, separation
+from .directions import refusal_subspace, preservation_subspace, gram_schmidt_remove, separation, causal_layer_scores
 from .projectors import ProjectionController
-from .causal import causal_layer_scores
 from .guard import run_guard
 from .evaluate import (
     generate,
@@ -35,8 +36,7 @@ from .evaluate import (
     strict_refusal_rate_bounded as refusal_rate_bounded,
     kl_harmless,
 )
-from .optimize import optimize_profile, _head_token_subspace
-from .search import _has_optuna
+from .optimize import optimize_profile, _head_token_subspace, _has_optuna
 from .bake import bake
 from .reports import write_model_card, write_run_report
 
@@ -1045,6 +1045,46 @@ def _backoff_to_kl(bundle, controller, cfg, eval_harmful, eval_harmless):
     return ref, kl, steps
 
 
+# post-norm models: per-layer reader-side directions + a calibrated global strength.
+def _reader_profile(bundle, controller, ah, al, cfg, preserve_lookup, eval_harmful, eval_harmless, log):
+    nl = bundle.num_layers
+    for l in range(nl):
+        Rl, _ = refusal_subspace(ah[l], al[l], rank=1, max_rank=cfg.max_rank, seed=cfg.seed)
+        controller.set_reader_layer_subspace(l, gram_schmidt_remove(Rl, preserve_lookup(l)))
+    if cfg.causal_targeting:
+        log("scoring per-layer causal importance (reader) ...")
+        # floor 0 concentrates strength on layers that actually carry refusal; this keeps
+        # kl down (edge layers near the head spike kl for little refusal benefit).
+        causal = causal_layer_scores(
+            bundle, controller, eval_harmful[: cfg.opt_eval_n], cfg.batch_size,
+            floor=0.0, temperature=cfg.causal_temperature,
+        )
+    else:
+        causal = [1.0] * nl
+    hset, lset = eval_harmful[: cfg.opt_eval_n], eval_harmless[: cfg.opt_eval_n]
+
+    def apply(g):
+        controller.set_uniform_alpha(0.0)
+        for l in range(nl):
+            controller.set_layer_alpha(l, g * causal[l])
+
+    controller.enable()
+    best = None  # (g, refusal, kl) -- lowest refusal under the kl ceiling, min strength to break ties
+    for g in cfg.reader_strengths:
+        apply(g)
+        with controller.active():
+            ref = refusal_rate(bundle, hset, cfg.max_new_tokens, cfg.batch_size)
+        kl = kl_harmless(bundle, controller, lset, cfg.batch_size, positions=cfg.kl_positions)
+        log(f"  reader strength {g}: refusal={ref:.3f} kl={kl:.3f}")
+        feasible = kl <= cfg.reader_max_kl
+        if best is None or (feasible and (ref < best[1] - 1e-9 or not best[3])):
+            best = (g, ref, kl, feasible)
+        if ref <= cfg.target_refusal and feasible:
+            break
+    apply(best[0])
+    return {"strength": best[0], "refusal": best[1], "kl": best[2], "causal": causal}
+
+
 def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
     t0 = time.time()
     phase_t = t0
@@ -1199,7 +1239,22 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
             _log(f"preservation subspace rank={preserve_basis.shape[1]} source={preserve_source}")
         mark("activation_fit")
 
-    if head_sweep_profile:
+    reader_mode = bundle.uses_post_norm()
+    if reader_mode:
+        # gemma2/3/4-style post-norm: writer edits get renormalized away, so ablate
+        # reader-side with per-layer directions, and give kl extra headroom.
+        cfg.max_kl = max(cfg.max_kl, cfg.reader_max_kl)
+        cfg.kl_target = max(cfg.kl_target, cfg.reader_kl_target)
+        _log("post-norm architecture: per-layer reader-side ablation")
+        rinfo = _reader_profile(bundle, controller, ah, al, cfg, preserve_lookup,
+                                eval_harmful, eval_harmless, _log)
+        _log(f"reader profile: strength={rinfo['strength']} "
+             f"refusal={rinfo['refusal']:.3f} kl={rinfo['kl']:.3f}")
+        report_extra.update({"reader_mode": True, "reader_strength": rinfo["strength"],
+                             "best_trial": {"refusal": rinfo["refusal"], "kl": rinfo["kl"]},
+                             "n_trials": 0})
+        mark("reader_profile")
+    elif head_sweep_profile:
         _log("optimizing head token profile ...")
         best_params, best_attrs, opt_hist = _head_token_sweep(
             bundle, controller, cfg,
@@ -1289,7 +1344,11 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
 
     guard_hist = []
     skip_guard = False
-    guard_skip_reason = "head token profile" if head_only_profile and cfg.opt_guard else None
+    guard_skip_reason = (
+        "reader mode" if reader_mode
+        else "head token profile" if head_only_profile and cfg.opt_guard
+        else None
+    )
     if guard_skip_reason is None and ((not cfg.optimize) or cfg.opt_guard) and cfg.opt_early_stop:
         with controller.active():
             ref_quick = refusal_rate(bundle, eval_harmful[:min(24, len(eval_harmful))], cfg.max_new_tokens, cfg.batch_size)

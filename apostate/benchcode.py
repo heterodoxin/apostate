@@ -7,9 +7,11 @@ import json
 import torch
 
 from .data import resolve_prompts
-from .codeeval import entry_from_code, entry_from_tests, load_code_problems, pass_at_1
-from .benchmark import _load, _logprobs_lastK, _kl
-from .evalsuite import refusal_eval, gsm8k_eval
+from .benchmark import (
+    entry_from_code, entry_from_tests, load_code_problems, pass_at_1,
+    _load, _logprobs_lastK, _kl,
+)
+from .evaluate import refusal_eval, gsm8k_eval
 from .reports import refresh_candidate_reports, write_benchmark_report
 
 VALID_SUITES = ("humaneval", "mbpp", "gsm8k", "refusal")

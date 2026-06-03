@@ -1,3 +1,5 @@
+# reconstruction guard: re-measure leakage and fold corrective directions back in.
+
 from __future__ import annotations
 
 from typing import List, Optional

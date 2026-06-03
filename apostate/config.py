@@ -115,6 +115,11 @@ class ApostateConfig:
     max_kl: float = 0.16
     target_refusal: float = 0.03
 
+    # post-norm models (reader-side ablation) need more kl headroom to decensor
+    reader_max_kl: float = 0.55
+    reader_kl_target: float = 0.3
+    reader_strengths: tuple = (2.0, 3.0, 4.0, 5.0, 6.0, 7.0)
+
     save_dtype: str = "bfloat16"
     bake: bool = True
 
@@ -128,12 +133,10 @@ class ApostateConfig:
             self.refine_deescalate = True
         model_l = (self.model or "").lower()
         if "gemma-4" in model_l or "gemma4" in model_l:
+            # gemma 4 e4b is big; trim the batch so 4-bit fits a 16gb card. rank stays
+            # at the default 1 (reader-side ablation, see model.uses_post_norm).
             if self.batch_size == 24:
                 self.batch_size = 12
-            if self.max_rank == 1:
-                self.max_rank = 3
-            if self.preserve_rank == 8:
-                self.preserve_rank = 4
         here = os.path.dirname(__file__)
         data = os.path.join(os.path.dirname(here), "data")
         refusal_cal = os.path.join(data, "refusal_calibration.txt")
