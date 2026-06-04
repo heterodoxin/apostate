@@ -22,9 +22,11 @@ dbg.log
 diag_run.log
 **/report.json
 **/activation_cache/
-# scratch files (single leading underscore), but keep dunders like __main__.py
+
+# scratch files and temp output dirs (single leading underscore), keep dunders
 _[!_]*.py
 _[!_]*.sh
+_*/
 
 # env / editor
 .env
@@ -34,4 +36,3 @@ _[!_]*.sh
 
 # built installer
 *.exe
-_g/

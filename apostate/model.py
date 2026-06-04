@@ -242,7 +242,9 @@ class ModelBundle:
         raise AttributeError("Could not locate attention output projection.")
 
     def attn_module(self, layer: torch.nn.Module):
-        for attn_name in ("self_attn", "attention", "attn", "self_attention", "mixer"):
+        # incl. linear-attention / state-space mixers (qwen3.5 gated deltanet, etc.)
+        for attn_name in ("self_attn", "attention", "attn", "self_attention", "mixer",
+                          "linear_attn", "temporal_mixer"):
             if hasattr(layer, attn_name):
                 return getattr(layer, attn_name)
         return None
@@ -433,10 +435,10 @@ class ModelBundle:
         return out
 
     def reader_modules(self, layer: torch.nn.Module) -> List[torch.nn.Module]:
-        # matrices that read the residual: q/k/v, mlp gate/up (+moe), per-layer gate.
-        out = list(self.query_writers(layer))
-        out.extend(mod for _part, mod in self.kv_writers(layer))
-        out.extend(self.mlp_readers(layer))
+        # the readers that carry the refusal feature: mlp gate/up plus the per-layer gate.
+        # attention q/k/v are excluded on purpose -- ablating them perturbs attention
+        # patterns (and shared-kv layers) for no refusal gain; refusal lives in the mlp path.
+        out = list(self.mlp_readers(layer))
         gate = getattr(layer, "per_layer_input_gate", None)
         if isinstance(gate, torch.nn.Module):
             out.append(gate)
@@ -457,12 +459,14 @@ class ModelBundle:
         return uniq
 
     def uses_post_norm(self) -> bool:
-        # gemma2/3/4 sandwich: a norm between writer and residual; if present, ablate reader-side.
+        # gemma2/3/4 sandwich: a norm sits on the mlp/attn OUTPUT before the residual.
+        # detect by the feedforward sandwich norms -- NOT post_attention_layernorm, which
+        # pre-norm models (qwen, llama, mistral) also have as their pre-mlp norm.
         layers = self.layers()
         if not layers:
             return False
         L = layers[0]
-        return any(hasattr(L, n) for n in ("post_attention_layernorm", "post_feedforward_layernorm"))
+        return any(hasattr(L, n) for n in ("post_feedforward_layernorm", "pre_feedforward_layernorm"))
 
     def ple_writers(self, layer: torch.nn.Module) -> List[torch.nn.Module]:
         gate = getattr(layer, "per_layer_input_gate", None)
