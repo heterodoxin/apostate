@@ -119,6 +119,8 @@ class ApostateConfig:
     reader_max_kl: float = 0.55
     reader_kl_target: float = 0.3
     reader_strengths: tuple = (2.0, 3.0, 4.0, 5.0, 6.0, 7.0)
+    reader_guard_rank: int = 3   # corrective directions the reader guard may add
+    reader_margin_target: float = -1.0   # sweep stops once comply tokens win by this margin
 
     save_dtype: str = "bfloat16"
     bake: bool = True
@@ -129,8 +131,21 @@ class ApostateConfig:
             "mlabonne/harmful_behaviors:test:text|"
             "JailbreakBench/JBB-Behaviors@behaviors:harmful:Goal"
         )
-        if (self.profile or "").lower() == "balanced":
+        prof = (self.profile or "").lower()
+        if prof == "balanced":
             self.refine_deescalate = True
+        elif prof == "fast":
+            # uniform fast preset (all models): cheaper search, shallow repair, smaller eval
+            if self.repair_steps == 10:
+                self.repair_steps = 3
+            if self.repair_rerank_k == 4:
+                self.repair_rerank_k = 2
+            if self.repair_eval_n == 48:
+                self.repair_eval_n = 24
+            if self.repair_probe_candidates == 24:
+                self.repair_probe_candidates = 12
+            if self.n_trials == 16:
+                self.n_trials = 8
         model_l = (self.model or "").lower()
         if "gemma-4" in model_l or "gemma4" in model_l:
             # gemma 4 e4b is big; trim the batch so 4-bit fits a 16gb card. rank stays

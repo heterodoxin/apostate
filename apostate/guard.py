@@ -7,9 +7,9 @@ import torch
 
 from .model import ModelBundle
 from .projectors import ProjectionController
-from .activations import collect_layer_activations
+from .activations import collect_layer_activations, collect_activations
 from .directions import refusal_subspace, gram_schmidt_remove, augment_subspace, separation
-from .evaluate import strict_refusal_rate as refusal_rate, kl_harmless
+from .evaluate import strict_refusal_rate as refusal_rate, kl_harmless, refusal_logit_margin
 
 
 def run_guard(
@@ -69,4 +69,65 @@ def run_guard(
             history[-1]["reverted"] = True
             break
 
+    return history
+
+
+def run_reader_guard(
+    bundle: ModelBundle,
+    controller: ProjectionController,
+    harmful: List[str],
+    harmless: List[str],
+    cfg,
+    preserve_lookup,
+    eval_harmful: List[str],
+    eval_harmless: List[str],
+    log,
+) -> List[dict]:
+    # per-layer analog of run_guard for post-norm models: on the edited model,
+    # find the residual refusal that survived and add a corrective direction per layer.
+    nl = bundle.num_layers
+    cap = max(cfg.max_rank, cfg.reader_guard_rank)
+    history: List[dict] = []
+
+    def score():
+        with controller.active():
+            return refusal_rate(bundle, eval_harmful, cfg.opt_gen_tokens, cfg.batch_size)
+
+    m = score()
+    kl = kl_harmless(bundle, controller, eval_harmless, cfg.batch_size, positions=cfg.kl_positions)
+
+    for it in range(cfg.guard_max_iters):
+        log(f"  reader guard {it}: refusal={m:.3f} kl={kl:.3f}")
+        history.append({"iter": it, "refusal": round(m, 4), "kl": round(kl, 4)})
+        if m <= cfg.target_refusal:
+            break
+
+        # snapshot so a step that doesn't help can be undone
+        prev_state = controller.alpha_state()
+        prev_R = [controller.get_reader_layer_subspace(l) for l in range(nl)]
+        with controller.active():
+            ah = collect_activations(bundle, harmful, cfg.batch_size)
+            al = collect_activations(bundle, harmless, cfg.batch_size)
+        for l in range(nl):
+            if controller.get_layer_alpha(l) == 0.0:
+                continue
+            d = ah[l].mean(0) - al[l].mean(0)
+            if float(d.norm()) < 1e-6:
+                continue
+            new = gram_schmidt_remove((d / d.norm()).unsqueeze(1), preserve_lookup(l))
+            merged = augment_subspace(prev_R[l], new, cap)
+            controller.set_reader_layer_subspace(l, merged)
+
+        new_m = score()
+        new_kl = kl_harmless(bundle, controller, eval_harmless, cfg.batch_size, positions=cfg.kl_positions)
+        # only keep a corrective step that actually lowers refusal, within budget
+        if new_m < m - 1e-3 and new_kl <= cfg.reader_max_kl:
+            m, kl = new_m, new_kl
+        else:
+            controller.set_alpha_state(prev_state)
+            for l in range(nl):
+                if prev_R[l] is not None:
+                    controller.set_reader_layer_subspace(l, prev_R[l])
+            log(f"  reader guard: no improvement ({new_m:.3f} kl {new_kl:.3f}), reverted")
+            break
     return history

@@ -28,7 +28,7 @@ from .activations import (
 )
 from .directions import refusal_subspace, preservation_subspace, gram_schmidt_remove, separation, causal_layer_scores
 from .projectors import ProjectionController
-from .guard import run_guard
+from .guard import run_guard, run_reader_guard
 from .evaluate import (
     generate,
     refusal_logit_margin,
@@ -1069,20 +1069,26 @@ def _reader_profile(bundle, controller, ah, al, cfg, preserve_lookup, eval_harmf
             controller.set_layer_alpha(l, g * causal[l])
 
     controller.enable()
-    best = None  # (g, refusal, kl) -- lowest refusal under the kl ceiling, min strength to break ties
+    # rank strengths by real generated refusal (the logit margin is unreliable on post-norm
+    # models) and pick the strongest that stays under the kl budget.
+    best = None  # (g, refusal, kl, feasible)
     for g in cfg.reader_strengths:
         apply(g)
         with controller.active():
-            ref = refusal_rate(bundle, hset, cfg.max_new_tokens, cfg.batch_size)
+            ref = refusal_rate(bundle, hset, cfg.opt_gen_tokens, cfg.batch_size)
         kl = kl_harmless(bundle, controller, lset, cfg.batch_size, positions=cfg.kl_positions)
         log(f"  reader strength {g}: refusal={ref:.3f} kl={kl:.3f}")
         feasible = kl <= cfg.reader_max_kl
-        if best is None or (feasible and (ref < best[1] - 1e-9 or not best[3])):
+        if best is None or (feasible and (ref < best[1] - 1e-6 or not best[3])):
             best = (g, ref, kl, feasible)
         if ref <= cfg.target_refusal and feasible:
             break
+        if best is not None and best[3] and not feasible:
+            break  # kl over budget; higher strengths only raise it further
     apply(best[0])
-    return {"strength": best[0], "refusal": best[1], "kl": best[2], "causal": causal}
+    with controller.active():  # one real refusal number for the report
+        ref = refusal_rate(bundle, eval_harmful[: cfg.opt_eval_n], cfg.opt_gen_tokens, cfg.batch_size)
+    return {"strength": best[0], "refusal": ref, "kl": best[2], "causal": causal}
 
 
 def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
@@ -1145,6 +1151,7 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
 
     head_only_profile = False
     head_ref_est = None
+    reader_est = None  # (refusal, kl) estimate to skip the redundant validation pass
     head_sweep_profile = _head_sweep_enabled(bundle, cfg)
     head_sweep_attrs = None
     ah = al = None
@@ -1240,6 +1247,7 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
         mark("activation_fit")
 
     reader_mode = bundle.uses_post_norm()
+    fast = (cfg.profile or "balanced").lower() == "fast"  # profile, not architecture
     if reader_mode:
         # gemma2/3/4-style post-norm: writer edits get renormalized away, so ablate
         # reader-side with per-layer directions, and give kl extra headroom.
@@ -1253,7 +1261,16 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
         report_extra.update({"reader_mode": True, "reader_strength": rinfo["strength"],
                              "best_trial": {"refusal": rinfo["refusal"], "kl": rinfo["kl"]},
                              "n_trials": 0})
+        if fast:  # reuse the search estimate instead of a full validation pass
+            reader_est = (rinfo["refusal"], rinfo["kl"])
         mark("reader_profile")
+        if rinfo["refusal"] > cfg.target_refusal:
+            # corrective directions try to push refusal lower; conservative, so it can't hurt
+            _log("running reader guard (corrective directions) ...")
+            run_reader_guard(bundle, controller, fit_harmful[: cfg.opt_eval_n],
+                             harmless[: cfg.opt_eval_n], cfg, preserve_lookup,
+                             eval_harmful[: cfg.opt_eval_n], eval_harmless[: cfg.opt_eval_n], _log)
+        mark("reader_guard")
     elif head_sweep_profile:
         _log("optimizing head token profile ...")
         best_params, best_attrs, opt_hist = _head_token_sweep(
@@ -1396,6 +1413,8 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
 
     edited_refusal = refine_ref
     kl = refine_kl
+    if (edited_refusal is None or kl is None) and reader_est is not None:
+        edited_refusal, kl = reader_est  # reuse the sweep estimate; skip a generation pass
     if edited_refusal is None or kl is None:
         with controller.active():
             edited_refusal = refusal_rate(bundle, eval_harmful, cfg.max_new_tokens, cfg.batch_size)

@@ -34,3 +34,4 @@ _[!_]*.sh
 
 # built installer
 *.exe
+_g/

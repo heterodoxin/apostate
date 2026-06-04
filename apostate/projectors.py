@@ -229,6 +229,11 @@ class ProjectionController:
         if e["R"] is None:
             e["R"] = Rd  # representative so export() doesn't skip the edit
 
+    def get_reader_layer_subspace(self, layer_idx: int, name: str = "primary"):
+        rl = self._edit(name).get("R_layers")
+        r = rl[layer_idx] if rl is not None else None
+        return r.detach().cpu() if r is not None else None
+
     def _layer_targets(self, edit: dict, layer_idx: int):
         # reader edits act on the layer's readers; everything else on its writers
         if edit.get("kind") == "reader":
