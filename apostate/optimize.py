@@ -215,8 +215,6 @@ def _head_token_subspace(bundle: ModelBundle) -> torch.Tensor:
 
 
 def _anchor_profiles(bundle: ModelBundle, space: dict) -> list:
-    if bundle.can_edit_embed():
-        return []
     rank_hi = int(space["refusal_rank"][2])
     strength_hi = float(space["strength"][2])
     head_ok = "ablate_head" in space
@@ -260,6 +258,32 @@ def _anchor_profiles(bundle: ModelBundle, space: dict) -> list:
                 "direction_sign": direction_sign,
                 "ablate_head": head if head_ok else False,
                 "head_scale": head_scale if head_ok else 0.0,
+            })
+    if "embed_scale" in space and bundle.can_edit_embed():
+        # strong embed+head ablation anchors for embed-editable models (qwen/llama):
+        # without these the search never starts near the strong-edit region and settles
+        # for a near-no-op edit. mid-layer direction where refusal is most removable.
+        for frac, strength, embed_scale, head_scale, head_alpha in (
+            (0.50, 1.20, 0.22, 0.20, 1.4),
+            (0.55, 1.25, 0.28, 0.25, 1.8),
+            (0.45, 1.25, 0.18, 0.15, 1.0),
+            (0.62, 1.10, 0.14, 0.12, 0.8),
+        ):
+            rows.append({
+                "direction_source": "activations",
+                "direction_layer_frac": frac,
+                "refusal_rank": 1,
+                "strength": min(strength, strength_hi),
+                "band_center": frac,
+                "band_width": 0.62,
+                "causal_mix": 0.3,
+                "causal_power": 1.5,
+                "ablate_embed": True,
+                "embed_scale": embed_scale,
+                "direction_sign": 1.0,
+                "ablate_head": head_ok,
+                "head_scale": head_scale if head_ok else 0.0,
+                "head_alpha": head_alpha if head_ok else 0.0,
             })
     if "embed_scale" in space and not bundle.can_edit_embed():
         for direction_sign in (1.0, -1.0):
