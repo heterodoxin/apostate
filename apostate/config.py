@@ -46,6 +46,10 @@ class ApostateConfig:
     max_rank: int = 1
     direction_layer_frac: float = 0.60
     direction_scope: str = "global"
+    # reader-mode (post-norm/entangled models) only: keep only the refusal component
+    # orthogonal to the harmless mean. collapses KL on gemma; hurts clean models (qwen),
+    # so it is applied on the reader path, not the writer/optimizer path.
+    orthogonalize_direction: bool = True
 
     causal_targeting: bool = True
     causal_floor: float = 0.10

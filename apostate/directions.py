@@ -38,11 +38,17 @@ def refusal_subspace(
     variance_threshold: float = 0.90,
     max_rank: int = 4,
     seed: int = 0,
+    orthogonalize: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     harmful = harmful.float()
     harmless = harmless.float()
     mu_harmless = harmless.mean(0)
     mean_diff = harmful.mean(0) - mu_harmless
+    if orthogonalize:
+        # keep only the part orthogonal to the harmless mean, so ablating it disturbs
+        # general behavior less (the part along the harmless mean is "be a normal model").
+        gh = mu_harmless / (mu_harmless.norm() + 1e-8)
+        mean_diff = mean_diff - (mean_diff @ gh) * gh
     mean_dir = mean_diff / (mean_diff.norm() + 1e-8)
 
     if rank is not None and rank == 1:

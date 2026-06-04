@@ -1049,7 +1049,8 @@ def _backoff_to_kl(bundle, controller, cfg, eval_harmful, eval_harmless):
 def _reader_profile(bundle, controller, ah, al, cfg, preserve_lookup, eval_harmful, eval_harmless, log):
     nl = bundle.num_layers
     for l in range(nl):
-        Rl, _ = refusal_subspace(ah[l], al[l], rank=1, max_rank=cfg.max_rank, seed=cfg.seed)
+        Rl, _ = refusal_subspace(ah[l], al[l], rank=1, max_rank=cfg.max_rank, seed=cfg.seed,
+                                 orthogonalize=cfg.orthogonalize_direction)
         controller.set_reader_layer_subspace(l, gram_schmidt_remove(Rl, preserve_lookup(l)))
     if cfg.causal_targeting:
         log("scoring per-layer causal importance (reader) ...")
