@@ -7,6 +7,10 @@ import shlex
 import sys
 
 from .config import ApostateConfig
+from .moe_compat import apply_model_bundle_patches
+
+apply_model_bundle_patches()
+
 from .engine import run
 
 
