@@ -1045,12 +1045,26 @@ def _backoff_to_kl(bundle, controller, cfg, eval_harmful, eval_harmless):
     return ref, kl, steps
 
 
+def _direction_kwargs(cfg):
+    return {
+        "multi": bool(getattr(cfg, "multi_refusal", True)),
+        "clusters": int(getattr(cfg, "multi_refusal_clusters", 6)),
+        "min_norm_frac": float(getattr(cfg, "multi_refusal_min_norm", 0.08)),
+        "min_separation": float(getattr(cfg, "multi_refusal_min_separation", 0.05)),
+        "min_coverage": float(getattr(cfg, "multi_refusal_min_coverage", 0.05)),
+    }
+
+
 # post-norm models: per-layer reader-side directions + a calibrated global strength.
 def _reader_profile(bundle, controller, ah, al, cfg, preserve_lookup, eval_harmful, eval_harmless, log):
     nl = bundle.num_layers
     for l in range(nl):
-        Rl, _ = refusal_subspace(ah[l], al[l], rank=1, max_rank=cfg.max_rank, seed=cfg.seed,
-                                 orthogonalize=cfg.orthogonalize_direction)
+        Rl, _ = refusal_subspace(
+            ah[l], al[l], rank=max(1, min(cfg.max_rank, cfg.refusal_rank)),
+            max_rank=cfg.max_rank, seed=cfg.seed,
+            orthogonalize=cfg.orthogonalize_direction,
+            **_direction_kwargs(cfg),
+        )
         controller.set_reader_layer_subspace(l, gram_schmidt_remove(Rl, preserve_lookup(l)))
     if cfg.causal_targeting:
         log("scoring per-layer causal importance (reader) ...")
@@ -1294,7 +1308,10 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
         })
         mark("head_sweep")
     elif cfg.optimize:
-        Rseed, _ = refusal_subspace(ah[L_dir], al[L_dir], rank=1, max_rank=cfg.max_rank, seed=cfg.seed)
+        Rseed, _ = refusal_subspace(
+            ah[L_dir], al[L_dir], rank=1, max_rank=cfg.max_rank, seed=cfg.seed,
+            **_direction_kwargs(cfg),
+        )
         controller.set_subspace(gram_schmidt_remove(Rseed, preserve_basis))
         if cfg.causal_targeting:
             _log("scoring per-layer causal importance (prior) ...")
@@ -1334,6 +1351,7 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
             ah[L_dir], al[L_dir],
             rank=cfg.refusal_rank, variance_threshold=cfg.variance_threshold,
             max_rank=cfg.max_rank, seed=cfg.seed,
+            **_direction_kwargs(cfg),
         )
         _log(f"refusal subspace rank={R.shape[1]} (svals={[round(float(s),2) for s in svals]})")
         preserve_basis = preserve_lookup(L_dir)
@@ -1503,6 +1521,12 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
         "hidden_size": bundle.hidden_size,
         "direction_layer": L_dir,
         "refusal_subspace_rank": int(controller.R.shape[1]),
+        "max_refusal_rank": cfg.max_rank,
+        "multi_refusal": cfg.multi_refusal,
+        "multi_refusal_clusters": cfg.multi_refusal_clusters,
+        "multi_refusal_min_norm": cfg.multi_refusal_min_norm,
+        "multi_refusal_min_separation": cfg.multi_refusal_min_separation,
+        "multi_refusal_min_coverage": cfg.multi_refusal_min_coverage,
         "initial_separation": round(initial_sep, 4),
         "baseline_refusal_rate": round(base_refusal, 4),
         "baseline_eval_n": len(base_eval),

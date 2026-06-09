@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+import shlex
 from pathlib import Path
 
 from . import discover
@@ -72,9 +73,12 @@ def main(argv=None) -> int:
         model = _flag(args, "--model", DEFAULT_MODEL)
         out = _flag(args, "--out", _flag(args, "--output-dir", "out"))
         rest = _strip(args, ["--model", "--out", "--output-dir"])
+        label = "apostate ablate --model " + shlex.quote(model) + " --out " + shlex.quote(out)
+        if rest:
+            label += " " + " ".join(shlex.quote(x) for x in rest)
         return run_module(
             ["-m", "apostate.cli", "--optimize", "--model", model, "--output-dir", out, *rest],
-            f"apostate ablate --model {model} --out {out}")
+            label)
 
     if cmd == "turbo":
         model = _flag(args, "--model", DEFAULT_MODEL)

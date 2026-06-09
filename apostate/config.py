@@ -43,9 +43,14 @@ class ApostateConfig:
 
     refusal_rank: int = 1
     variance_threshold: float = 0.90
-    max_rank: int = 1
+    max_rank: int = 3
     direction_layer_frac: float = 0.60
     direction_scope: str = "global"
+    multi_refusal: bool = True
+    multi_refusal_clusters: int = 6
+    multi_refusal_min_norm: float = 0.08
+    multi_refusal_min_separation: float = 0.05
+    multi_refusal_min_coverage: float = 0.05
     # reader-mode (post-norm/entangled models) only: keep only the refusal component
     # orthogonal to the harmless mean. collapses KL on gemma; hurts clean models (qwen),
     # so it is applied on the reader path, not the writer/optimizer path.

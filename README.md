@@ -32,11 +32,11 @@ Qwen2.5-7B-Instruct was run on an RTX 4070 Ti SUPER with 4-bit NF4 load, seed `0
 | apostate | 4.2% | 93.8% | 80.0% | 70.0% | 70.8% | 0.143 | 306.8s |
 | heretic | 8.3% | 87.5% | 72.5% | 72.5% | 70.8% | 0.099 | 1166.7s |
 
-This is a same-budget comparison against Heretic `1.3.0`, not Heretic's 200-trial default. Apostate exported a baked checkpoint. Heretic exported a PEFT LoRA adapter. Full commands and raw counts are in `docs/benchmark-runs/2026-05-31-heretic-head-to-head.md`.
+This is a same-budget comparison against Heretic `1.3.0`, not Heretic's 200-trial default. Apostate exported a baked checkpoint. Heretic exported a PEFT LoRA adapter.
 
 ## Method
 
-Apostate collects harmful and harmless activations from the base model. It forms a low-rank basis from the harmful-minus-harmless mean and treats that basis as the refusal subspace. Preservation directions from harmless prompts, or from `--preserve-path`, are removed before the projection is scored.
+Apostate collects harmful and harmless activations from the base model. It forms a low-rank basis from the harmful-minus-harmless mean and treats that basis as the first refusal axis. When `multi_refusal=true`, it also searches for independent refusal axes from harmful clusters, harmful clusters against nearest harmless clusters, high-residual harmful tails, and residual SVD axes. Each new axis has to survive harmful/harmless separation and harmful-coverage filters before it is fused into the subspace. The optimizer can still choose rank 1 when extra axes cost too much KL.
 
 Layer strength is measured instead of guessed. The runner temporarily ablates one layer at a time, records how much refusal behavior moves, and uses that response curve as the alpha prior. The search then scores direction layer, rank, layer band, strength, causal mix, causal sharpness, embedding strength, and head strength when the architecture supports it.
 
@@ -68,7 +68,7 @@ apostate ablate --model Qwen/Qwen2.5-7B-Instruct --out qwen-apostate --resume
 
 `--resume` reuses activation cache files after an interrupted run. A finished run writes `report.json`, `report.md`, `apostate_config.json`, a checkpoint `README.md`, and any `activation_cache/*.pt` files used by resume.
 
-Balanced defaults are `target_refusal=0.03`, `kl_target=0.06`, `max_kl=0.16`, `preserve_rank=8`, `refine_deescalate=true`, `refine_kl_steps=10`, `refine_kl_layer_steps=10`, and `repair_steps=10`. The hard cap is `max_kl`; `kl_target` is the pressure point used during search.
+Balanced defaults are `target_refusal=0.03`, `kl_target=0.06`, `max_kl=0.16`, `preserve_rank=8`, `max_rank=3`, `multi_refusal=true`, `multi_refusal_min_coverage=0.05`, `refine_deescalate=true`, `refine_kl_steps=10`, `refine_kl_layer_steps=10`, and `repair_steps=10`. The hard cap is `max_kl`; `kl_target` is the pressure point used during search.
 
 ## Benchmark
 
@@ -111,7 +111,7 @@ Model support is detected from module layout. Current coverage includes Llama 2/
 
 Multimodal wrapper models are supported for the text path when Transformers exposes a causal language decoder inside the model object. Image and audio pipelines are not edited yet.
 
-Gemma 2/3/4 use a post-norm sandwich, so editing writer outputs gets renormalized away. Apostate detects this and switches to reader-side ablation: it projects the per-layer refusal direction out of the inputs of the modules that read the residual (attention q/k/v, MLP gate/up, the per-layer input gate), which bakes cleanly into a standalone checkpoint. Gemma 4 E4B goes from about 85% refusal to roughly 5-15% this way, coherent and complying, at a higher KL than dense pre-norm models.
+Gemma 2/3/4 use a post-norm sandwich, so editing writer outputs gets renormalized away. Apostate detects this and switches to reader-side ablation: it projects the per-layer refusal direction out of the inputs of the modules that read the residual, mainly MLP gate/up paths and the per-layer input gate. Attention q/k/v is skipped because it added attention drift without reliable refusal gain. The edit still bakes cleanly into a standalone checkpoint. Gemma 4 E4B goes from about 85% refusal to roughly 5-15% this way, coherent and complying, at a higher KL than dense pre-norm models.
 
 ## Requirements
 

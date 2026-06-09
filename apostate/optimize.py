@@ -214,6 +214,16 @@ def _head_token_subspace(bundle: ModelBundle) -> torch.Tensor:
     return cached
 
 
+def _direction_kwargs(cfg):
+    return {
+        "multi": bool(getattr(cfg, "multi_refusal", True)),
+        "clusters": int(getattr(cfg, "multi_refusal_clusters", 6)),
+        "min_norm_frac": float(getattr(cfg, "multi_refusal_min_norm", 0.08)),
+        "min_separation": float(getattr(cfg, "multi_refusal_min_separation", 0.05)),
+        "min_coverage": float(getattr(cfg, "multi_refusal_min_coverage", 0.05)),
+    }
+
+
 def _anchor_profiles(bundle: ModelBundle, space: dict) -> list:
     rank_hi = int(space["refusal_rank"][2])
     strength_hi = float(space["strength"][2])
@@ -238,7 +248,7 @@ def _anchor_profiles(bundle: ModelBundle, space: dict) -> list:
                 "head_scale": 0.0,
                 "head_alpha": alpha,
             })
-    for direction_sign in (1.0, -1.0):
+    for direction_sign in (1.0,):
         for direction_layer_frac, rank, band_center, band_width, strength, causal_mix, causal_power, head, head_scale in (
             (0.58, 1, 0.58, 0.78, 1.15, 0.25, 1.50, False, 0.0),
             (0.58, 1, 0.58, 0.78, 0.85, 0.25, 1.50, True, 0.55),
@@ -285,8 +295,33 @@ def _anchor_profiles(bundle: ModelBundle, space: dict) -> list:
                 "head_scale": head_scale if head_ok else 0.0,
                 "head_alpha": head_alpha if head_ok else 0.0,
             })
+        for rank, frac, strength, embed_scale, head_scale, head_alpha, width in (
+            (2, 0.55, 0.95, 0.20, 0.18, 1.20, 0.56),
+            (2, 0.58, 1.05, 0.16, 0.14, 1.00, 0.50),
+            (2, 0.64, 0.85, 0.12, 0.10, 0.80, 0.44),
+            (3, 0.62, 0.78, 0.10, 0.08, 0.65, 0.42),
+            (3, 0.70, 0.70, 0.06, 0.06, 0.50, 0.36),
+        ):
+            if rank > rank_hi:
+                continue
+            rows.append({
+                "direction_source": "activations",
+                "direction_layer_frac": frac,
+                "refusal_rank": rank,
+                "strength": min(strength, strength_hi),
+                "band_center": frac,
+                "band_width": width,
+                "causal_mix": 0.45,
+                "causal_power": 1.8,
+                "ablate_embed": True,
+                "embed_scale": embed_scale,
+                "direction_sign": 1.0,
+                "ablate_head": head_ok,
+                "head_scale": head_scale if head_ok else 0.0,
+                "head_alpha": head_alpha if head_ok else 0.0,
+            })
     if "embed_scale" in space and not bundle.can_edit_embed():
-        for direction_sign in (1.0, -1.0):
+        for direction_sign in (1.0,):
             for strength, embed_scale, head_scale in (
                 (0.85, 0.06, 0.20),
                 (1.15, 0.08, 0.15),
@@ -331,7 +366,7 @@ def _anchor_profiles(bundle: ModelBundle, space: dict) -> list:
                 "head_scale": 0.0,
             })
     if "ple_ablate" in space:
-        for direction_sign in (1.0, -1.0):
+        for direction_sign in (1.0,):
             for ple_layer_frac, ple_strength, ple_band_center, ple_band_width, head, head_scale in (
                 (0.18, 0.65, 0.18, 0.45, False, 0.0),
                 (0.58, 0.75, 0.58, 0.55, False, 0.0),
@@ -359,7 +394,7 @@ def _anchor_profiles(bundle: ModelBundle, space: dict) -> list:
                     "ple_band_width": ple_band_width,
                 })
     if "ple_residual_ablate" in space:
-        for direction_sign in (1.0, -1.0):
+        for direction_sign in (1.0,):
             for frac, strength, center, width, head_alpha in (
                 (0.18, 0.35, 0.18, 0.35, 0.0),
                 (0.36, 0.45, 0.36, 0.42, 0.0),
@@ -391,7 +426,7 @@ def _anchor_profiles(bundle: ModelBundle, space: dict) -> list:
                     "global_scale": 1.0,
                 })
     if "ple_embed_ablate" in space:
-        for direction_sign in (1.0, -1.0):
+        for direction_sign in (1.0,):
             for alpha in (0.04, 0.08, 0.12):
                 rows.append({
                     "direction_source": "activations",
@@ -546,6 +581,7 @@ def _kv_refusal_subspace(bundle: ModelBundle, kv_ah: dict, kv_al: dict, part: st
         cache[key] = refusal_subspace(
             kv_ah[part][layer_idx], kv_al[part][layer_idx],
             rank=rank, max_rank=max(1, min(rank, cfg.max_rank)), seed=cfg.seed + layer_idx,
+            **_direction_kwargs(cfg),
         )[0]
     return cache[key]
 
@@ -560,6 +596,7 @@ def _query_refusal_subspace(bundle: ModelBundle, q_ah: dict, q_al: dict, layer_i
         cache[key] = refusal_subspace(
             q_ah[layer_idx], q_al[layer_idx],
             rank=rank, max_rank=max(1, min(rank, cfg.max_rank)), seed=cfg.seed + 31 + layer_idx,
+            **_direction_kwargs(cfg),
         )[0]
     return cache[key]
 
@@ -751,6 +788,7 @@ def _apply_profile(
         R, _ = refusal_subspace(
             ah[L_dir], al[L_dir],
             rank=int(params["refusal_rank"]), max_rank=cfg.max_rank, seed=cfg.seed,
+            **_direction_kwargs(cfg),
         )
         basis = preserve_lookup(L_dir) if preserve_lookup is not None else preserve_basis
         R = gram_schmidt_remove(R, basis)
@@ -796,6 +834,7 @@ def _apply_profile(
             ple_ah[L_ple], ple_al[L_ple],
             rank=ple_rank, max_rank=max(1, min(int(getattr(cfg, "ple_max_rank", 2)), ple_rank)),
             seed=cfg.seed,
+            **_direction_kwargs(cfg),
         )
         basis = ple_preserve_lookup(L_ple) if ple_preserve_lookup is not None else None
         Rple = gram_schmidt_remove(Rple, basis)
@@ -819,6 +858,7 @@ def _apply_profile(
             pler_ah[L_pler], pler_al[L_pler],
             rank=rank, max_rank=max(1, min(int(getattr(cfg, "ple_max_rank", 2)), rank)),
             seed=cfg.seed + 17,
+            **_direction_kwargs(cfg),
         )
         basis = pler_preserve_lookup(L_pler) if pler_preserve_lookup is not None else None
         Rpler = gram_schmidt_remove(Rpler, basis)
@@ -840,6 +880,7 @@ def _apply_profile(
         Rplee, _ = refusal_subspace(
             plee_ah, plee_al,
             rank=1, max_rank=1, seed=cfg.seed,
+            **_direction_kwargs(cfg),
         )
         Rplee = gram_schmidt_remove(Rplee, plee_preserve_basis)
         controller.set_ple_embed_subspace(Rplee)
@@ -848,6 +889,7 @@ def _apply_profile(
         Rplep, _ = refusal_subspace(
             plee_ah, plee_al,
             rank=1, max_rank=1, seed=cfg.seed,
+            **_direction_kwargs(cfg),
         )
         Rplep = gram_schmidt_remove(Rplep, plee_preserve_basis)
         controller.set_ple_model_projection_subspace(Rplep)
@@ -907,7 +949,7 @@ def optimize_profile(
         "band_width": ("float", 0.08, width_hi),
         "causal_mix": ("float", 0.0, 1.0),
         "causal_power": ("float", 1.0, 3.0),
-        "direction_sign": ("cat", [1.0, -1.0]),
+        "direction_sign": ("cat", [1.0]),
     }
     embed_ok = bundle.can_edit_embed() or bundle.has_ple()
     if embed_ok:
@@ -965,7 +1007,7 @@ def optimize_profile(
         space["kv_rank"] = ("int", 1, max(1, min(2, cfg.max_rank)))
         space["kv_strength"] = ("float", 0.0, 1.25)
         space["kv_part"] = ("cat", ["value", "key_value", "key"])
-        space["kv_sign"] = ("cat", [1.0, -1.0])
+        space["kv_sign"] = ("cat", [1.0])
         space["global_scale"] = ("float", 0.55, 1.0)
     query_layers = _query_layer_candidates(bundle, q_ah, q_al)
     if query_layers:
@@ -973,7 +1015,7 @@ def optimize_profile(
         space["query_layer_idx"] = ("int", 0, len(query_layers) - 1)
         space["query_rank"] = ("int", 1, max(1, min(2, cfg.max_rank)))
         space["query_strength"] = ("float", 0.0, 1.30)
-        space["query_sign"] = ("cat", [1.0, -1.0])
+        space["query_sign"] = ("cat", [1.0])
         space["global_scale"] = ("float", 0.55, 1.0)
 
     best_seen = [float("inf")]

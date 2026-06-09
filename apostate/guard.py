@@ -12,6 +12,16 @@ from .directions import refusal_subspace, gram_schmidt_remove, augment_subspace,
 from .evaluate import strict_refusal_rate as refusal_rate, kl_harmless, refusal_logit_margin
 
 
+def _direction_kwargs(cfg):
+    return {
+        "multi": bool(getattr(cfg, "multi_refusal", True)),
+        "clusters": int(getattr(cfg, "multi_refusal_clusters", 6)),
+        "min_norm_frac": float(getattr(cfg, "multi_refusal_min_norm", 0.08)),
+        "min_separation": float(getattr(cfg, "multi_refusal_min_separation", 0.05)),
+        "min_coverage": float(getattr(cfg, "multi_refusal_min_coverage", 0.05)),
+    }
+
+
 def run_guard(
     bundle: ModelBundle,
     controller: ProjectionController,
@@ -48,10 +58,14 @@ def run_guard(
         prev_R = controller.R.detach().cpu().clone()
         prev_alpha = dict(controller.alpha)
 
+        guard_rank = cfg.refusal_rank
+        if getattr(cfg, "multi_refusal", True):
+            guard_rank = max(guard_rank, min(2, cfg.max_rank))
         new_basis, _ = refusal_subspace(
             ah, al,
-            rank=cfg.refusal_rank, variance_threshold=cfg.variance_threshold,
+            rank=guard_rank, variance_threshold=cfg.variance_threshold,
             max_rank=cfg.max_rank, seed=cfg.seed,
+            **_direction_kwargs(cfg),
         )
         new_basis = gram_schmidt_remove(new_basis, preserve_basis)
         merged = augment_subspace(prev_R, new_basis, cfg.max_rank)
@@ -111,10 +125,17 @@ def run_reader_guard(
         for l in range(nl):
             if controller.get_layer_alpha(l) == 0.0:
                 continue
-            d = ah[l].mean(0) - al[l].mean(0)
-            if float(d.norm()) < 1e-6:
-                continue
-            new = gram_schmidt_remove((d / d.norm()).unsqueeze(1), preserve_lookup(l))
+            guard_rank = max(1, min(cap, cfg.refusal_rank))
+            if getattr(cfg, "multi_refusal", True):
+                guard_rank = max(guard_rank, min(2, cap))
+            new, _ = refusal_subspace(
+                ah[l], al[l],
+                rank=guard_rank,
+                max_rank=cap, seed=cfg.seed + l,
+                orthogonalize=getattr(cfg, "orthogonalize_direction", False),
+                **_direction_kwargs(cfg),
+            )
+            new = gram_schmidt_remove(new, preserve_lookup(l))
             merged = augment_subspace(prev_R[l], new, cap)
             controller.set_reader_layer_subspace(l, merged)
 
