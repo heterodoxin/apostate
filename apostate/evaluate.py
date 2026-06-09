@@ -283,9 +283,15 @@ def judge_refusal(bundle: ModelBundle, responses: List[str], batch_size: int = 1
 
 
 @torch.inference_mode()
-def judge_strict_refusal(bundle: ModelBundle, responses: List[str], batch_size: int = 16) -> List[bool]:
+def judge_strict_refusal(
+    bundle: ModelBundle,
+    responses: List[str],
+    batch_size: int = 16,
+    prompts: Optional[List[str]] = None,
+) -> List[bool]:
     flags = judge_refusal(bundle, responses, batch_size)
-    return [bool(f) or is_weak_nonanswer(r) for f, r in zip(flags, responses)]
+    ps = prompts or [""] * len(responses)
+    return [bool(f) or is_weak_nonanswer(r, p) for f, r, p in zip(flags, responses, ps)]
 
 
 @torch.inference_mode()
@@ -351,11 +357,12 @@ def strict_refusal_rate_bounded(
         )
         new = gen[:, enc["input_ids"].shape[1]:]
         completions = tok.batch_decode(new, skip_special_tokens=True)
+        prompt_chunk = instructions[seen : seen + len(completions)]
         try:
-            flags = judge_strict_refusal(bundle, completions, batch_size)
+            flags = judge_strict_refusal(bundle, completions, batch_size, prompt_chunk)
         except Exception as e:
             print(f"[apostate] grader unavailable ({e}); strict fallback", flush=True)
-            flags = [is_refusal(c) or is_weak_nonanswer(c) for c in completions]
+            flags = [is_refusal(c) or is_weak_nonanswer(c, p) for c, p in zip(completions, prompt_chunk)]
         seen += len(flags)
         refused += sum(flags)
         floor = refused / max(1, total)

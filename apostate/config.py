@@ -166,6 +166,8 @@ class ApostateConfig:
         refusal_cal = os.path.join(data, "refusal_calibration.txt")
         if self.harmful_path is None:
             self.harmful_path = "mlabonne/harmful_behaviors:train:text|" + os.path.join(data, "harmful.txt")
+            if os.path.exists(refusal_cal):
+                self.harmful_path = self.harmful_path + "|" + refusal_cal
         if self.harmful_test == default_harmful_test and os.path.exists(refusal_cal):
             self.harmful_test = self.harmful_test + "|" + refusal_cal
         if self.harmless_path is None:

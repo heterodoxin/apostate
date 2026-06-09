@@ -72,13 +72,9 @@ Balanced defaults are `target_refusal=0.03`, `kl_target=0.06`, `max_kl=0.16`, `p
 
 ## Benchmark
 
-```bash
-apostate test --model qwen-apostate --base Qwen/Qwen2.5-7B-Instruct --suite humaneval
-apostate test --model qwen-apostate --base Qwen/Qwen2.5-7B-Instruct --suite humaneval,gsm8k,refusal
-apostate test --model qwen-apostate --base Qwen/Qwen2.5-7B-Instruct --suite all
-```
+The benchmark path is built into the TUI. Open `apostate`, choose `Test`, pick the edited model and base model, then use the suite selector. Space toggles a suite and Enter runs the selected set.
 
-Suites are `humaneval`, `mbpp`, `gsm8k`, `refusal`, or `all`. The TUI benchmark screen is a multi-select list: Space toggles a suite and Enter runs the selected set. DeepSWE is not listed.
+Suites are `humaneval`, `mbpp`, `gsm8k`, `refusal`, or `all`. DeepSWE is not listed.
 
 Benchmark output is written to `benchcode.json` and `benchcode.md`. If the candidate directory has an Apostate `report.json`, the benchmark result is merged into the candidate report and model card.
 
