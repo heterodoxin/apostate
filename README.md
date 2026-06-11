@@ -42,6 +42,8 @@ Layer strength is measured instead of guessed. The runner temporarily ablates on
 
 Balanced mode targets low refusal first, then pulls KL back down with global alpha scaling and layer trimming. Repair passes add corrective directions only when they improve the refusal/KL tradeoff. Capability drift is penalized with canonical-answer logprob probes on small math and code items, then checked again with public benchmarks.
 
+The projection itself is oblique, not symmetric. A plain `I - R R^T` removal shifts the harmless residual mean along the refusal direction, and that mean shift is the dominant source of KL. Apostate instead removes `R` along a co-vector `U = R` minus its harmless-mean component, so the projector `E = I - Rbake U^T` still zeroes `R` (`E R = 0`) but leaves the harmless mean untouched (`E mu = mu`). The mean-shift KL term collapses while harmful inputs are still fully ablated. It is weight-only with no bias, so it bakes into bias-free checkpoints like Qwen2.5, and because it is a fixed linear map it composes correctly across MoE router gates. `oblique_strength` interpolates between symmetric (`0`) and full mean-preservation (`1`); the co-vector is clamped when `R` aligns too closely with the harmless mean.
+
 The main optimization target combines classifier-judged refusal rate, a weak-response guard, harmless-token KL, penalty above `kl_target`, penalty above `max_kl`, and cheap capability drift. The weak-response guard is used during optimization so short answers, deflections, safety lectures, and generic overviews do not count as solved harmful prompts. Public benchmark refusal scoring uses `protectai/distilroberta-base-rejection-v1` by default and reports weak/noncompliance rates separately. Keyword refusal scoring remains available with `--judge keyword`.
 
 ## Install
@@ -68,7 +70,7 @@ apostate ablate --model Qwen/Qwen2.5-7B-Instruct --out qwen-apostate --resume
 
 `--resume` reuses activation cache files after an interrupted run. A finished run writes `report.json`, `report.md`, `apostate_config.json`, a checkpoint `README.md`, and any `activation_cache/*.pt` files used by resume.
 
-Balanced defaults are `target_refusal=0.03`, `kl_target=0.06`, `max_kl=0.16`, `preserve_rank=8`, `max_rank=3`, `multi_refusal=true`, `multi_refusal_min_coverage=0.05`, `refine_deescalate=true`, `refine_kl_steps=10`, `refine_kl_layer_steps=10`, and `repair_steps=10`. The hard cap is `max_kl`; `kl_target` is the pressure point used during search.
+Balanced defaults are `target_refusal=0.0`, `kl_target=0.04`, `max_kl=0.12`, `kl_positions=8`, `preserve_rank=8`, `max_rank=3`, `multi_refusal=true`, `multi_refusal_min_coverage=0.05`, `refine_deescalate=true`, `refine_kl_steps=10`, `refine_kl_layer_steps=10`, `repair_steps=4`, and `oblique_ablation=true`. The hard cap is `max_kl`; `kl_target` is the pressure point used during search. Set `--oblique-ablation false` to fall back to the symmetric projection.
 
 ## Benchmark
 
@@ -97,7 +99,7 @@ Use `APOSTATE_MODEL_ROOTS` to add scan roots. Values are separated with the plat
 
 ## Data
 
-Default fit data combines `mlabonne/harmful_behaviors` train prompts, `mlabonne/harmless_alpaca` train prompts, and local prompt files under `data/`. Held-out eval uses `mlabonne/harmful_behaviors` test, JailbreakBench behaviors, `mlabonne/harmless_alpaca` test, and the local refusal calibration set.
+Default fit data combines `mlabonne/harmful_behaviors` train prompts, `mlabonne/harmless_alpaca` train prompts, and local prompt files under `data/`. Held-out eval uses `mlabonne/harmful_behaviors` test, JailbreakBench behaviors, `mlabonne/harmless_alpaca` test, and the local refusal calibration set. Balanced mode front-loads 64 refusal calibration prompts and 48 public harmless KL prompts into validation so the optimizer sees the same hard refusal and KL distribution used by the public report path.
 
 Custom data specs use `repo:split:col`, `repo@config:split:col`, or several sources joined with `|`. Local text files are accepted.
 

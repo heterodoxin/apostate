@@ -28,6 +28,9 @@ _[!_]*.py
 _[!_]*.sh
 _*/
 
+# tests
+test_*.py
+
 # env / editor
 .env
 .DS_Store

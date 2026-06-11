@@ -12,30 +12,36 @@ from .model import ModelBundle, model_metadata, set_config_value, _is_conv1d
 _DTYPES = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}
 
 
-def _edit_linear(W: torch.Tensor, R: torch.Tensor, coeff: float) -> torch.Tensor:
+# R is the left/removal basis; U is the right co-vector (oblique mean-preserving edit).
+# when U is None the edit is the usual symmetric projection (U == R).
+
+def _edit_linear(W: torch.Tensor, R: torch.Tensor, coeff: float, U: torch.Tensor = None) -> torch.Tensor:
+    right = R if U is None else U
     Wf = W.float()
-    return (Wf + coeff * (R @ (R.t() @ Wf))).to(W.dtype)
+    return (Wf + coeff * (R @ (right.t() @ Wf))).to(W.dtype)
 
 
-def _edit_vec(b: torch.Tensor, R: torch.Tensor, coeff: float) -> torch.Tensor:
+def _edit_vec(b: torch.Tensor, R: torch.Tensor, coeff: float, U: torch.Tensor = None) -> torch.Tensor:
+    right = R if U is None else U
     bf = b.float()
-    return (bf + coeff * (R @ (R.t() @ bf))).to(b.dtype)
+    return (bf + coeff * (R @ (right.t() @ bf))).to(b.dtype)
 
 
-def _edit_embed(W: torch.Tensor, R: torch.Tensor, coeff: float) -> torch.Tensor:
+def _edit_embed(W: torch.Tensor, R: torch.Tensor, coeff: float, U: torch.Tensor = None) -> torch.Tensor:
+    right = R if U is None else U
     Wf = W.float()
-    return (Wf + coeff * ((Wf @ R) @ R.t())).to(W.dtype)
+    return (Wf + coeff * ((Wf @ right) @ R.t())).to(W.dtype)
 
 
-def _edit_out(mod, R: torch.Tensor, coeff: float):
+def _edit_out(mod, R: torch.Tensor, coeff: float, U: torch.Tensor = None):
     # project R out of what `mod` writes to the residual. Conv1D weight is [in, out]
     # (transposed vs Linear [out, in]), so the output axis is columns, not rows.
     if _is_conv1d(mod):
-        mod.weight.data = _edit_embed(mod.weight.data, R, coeff)
+        mod.weight.data = _edit_embed(mod.weight.data, R, coeff, U)
     else:
-        mod.weight.data = _edit_linear(mod.weight.data, R, coeff)
+        mod.weight.data = _edit_linear(mod.weight.data, R, coeff, U)
     if getattr(mod, "bias", None) is not None:
-        mod.bias.data = _edit_vec(mod.bias.data, R, coeff)
+        mod.bias.data = _edit_vec(mod.bias.data, R, coeff, U)
 
 
 def _edit_in(mod, R: torch.Tensor, coeff: float):
@@ -46,13 +52,29 @@ def _edit_in(mod, R: torch.Tensor, coeff: float):
         mod.weight.data = _edit_embed(mod.weight.data, R, coeff)
 
 
-def _edit_writer(mod, R: torch.Tensor, coeff: float):
+def _edit_head(W: torch.Tensor, R: torch.Tensor, coeff: float, U: torch.Tensor = None) -> torch.Tensor:
+    # input-side fold (lm_head reads the final hidden): W -> W + coeff (W @ R) @ outer.t().
+    # for oblique the edit on the input t is t + coeff (t @ U) @ Rbake.t(), which folds as
+    # (W @ Rbake) @ U.t() -- the read side, so R=Rbake here and the outer vector is U.
+    outer = R if U is None else U
+    Wf = W.float()
+    return (Wf + coeff * ((Wf @ R) @ outer.t())).to(W.dtype)
+
+
+def _is_packed_writer(mod) -> bool:
     down = getattr(mod, "down_proj", None)
-    if isinstance(down, torch.nn.Parameter) and down.dim() == 3:
-        edited = [_edit_linear(down.data[i], R, coeff) for i in range(down.shape[0])]
+    return isinstance(down, torch.nn.Parameter) and down.dim() == 3
+
+
+def _edit_writer(mod, R: torch.Tensor, coeff: float, U: torch.Tensor = None):
+    # oblique edit is a fixed linear operator, so per-expert slices compose under the router
+    # gates exactly like the symmetric projection -> packed MoE bakes correctly, no bias.
+    if _is_packed_writer(mod):
+        down = mod.down_proj
+        edited = [_edit_linear(down.data[i], R, coeff, U) for i in range(down.shape[0])]
         down.data = torch.stack(edited, dim=0)
         return
-    _edit_out(mod, R, coeff)
+    _edit_out(mod, R, coeff, U)
 
 
 @torch.no_grad()
@@ -151,18 +173,25 @@ def bake(cfg: ApostateConfig, export: dict, tokenizer=None, drop_layers=None) ->
                     if getattr(mod, "bias", None) is not None:
                         mod.bias.data = _edit_vec(mod.bias.data, R, sign * a)
             continue
+        # oblique (mean-preserving) edit: left = Rbake, right co-vector = U. symmetric when absent.
+        U = e["U"].float() if e.get("U") is not None else None
+        left = e["Rbake"].float() if e.get("Rbake") is not None else R
+        # embed rows and the lm-head input are not residual writers; under writers-only they
+        # stay symmetric (matching the runtime hook, which skips oblique for those modules).
+        writers_only = bool(e.get("oblique_writers_only", False))
+        emb_left, emb_U = (R, None) if writers_only else (left, U)
         a_emb = float(e["embed_alpha"])
         if a_emb != 0:
-            emb.weight.data = _edit_embed(emb.weight.data, R, sign * a_emb)
+            emb.weight.data = _edit_embed(emb.weight.data, emb_left, sign * a_emb, emb_U)
         a_head = float(e.get("head_alpha", 0.0))
         if a_head != 0 and head is not None:
-            head.weight.data = _edit_embed(head.weight.data, R, sign * a_head)
+            head.weight.data = _edit_head(head.weight.data, emb_left, sign * a_head, emb_U)
         for L, layer in enumerate(layers):
             a = float(e["layer_alphas"][L])
             if a == 0:
                 continue
             for mod in bundle.layer_writers(layer):
-                _edit_writer(mod, R, sign * a)
+                _edit_writer(mod, left, sign * a, U)
 
     if drop_layers:
         drop = set(drop_layers)

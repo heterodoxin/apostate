@@ -175,7 +175,7 @@ def _censored_profanity(s: str, prompt: str = "") -> bool:
     censored = len(_CENSORED_WORD.findall(head))
     if any(d in head for d in _PROFANITY_DODGES):
         return True
-    return has_topic and censored >= (1 if wants_raw else 3)
+    return has_topic and censored >= 3
 
 
 def is_weak_nonanswer(text: str, prompt: str = "") -> bool:

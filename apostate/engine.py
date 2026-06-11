@@ -31,6 +31,7 @@ from .projectors import ProjectionController
 from .guard import run_guard, run_reader_guard
 from .evaluate import (
     generate,
+    judge_strict_refusal,
     refusal_logit_margin,
     strict_refusal_rate as refusal_rate,
     strict_refusal_rate_bounded as refusal_rate_bounded,
@@ -489,6 +490,37 @@ def _preservation_lookup(acts: Optional[torch.Tensor], rank: int):
     return lookup
 
 
+def _combined_preservation_lookup(sources):
+    # sources: list of (acts, rank). merge per-layer preservation subspaces (harmless + the
+    # capability subspace), orthonormalized so overlapping directions collapse. ablating the
+    # refusal direction then leaves both the harmless mean variance and the math/code
+    # reasoning subspace untouched -- the superposition fix.
+    cache: dict = {}
+
+    def lookup(layer_idx: int):
+        layer_idx = int(layer_idx)
+        if layer_idx in cache:
+            return cache[layer_idx]
+        bases = []
+        for acts, rank in sources:
+            if acts is not None and rank > 0:
+                b = preservation_subspace(acts[layer_idx], rank=rank)
+                if b is not None and b.numel():
+                    bases.append(b)
+        if not bases:
+            out = None
+        elif len(bases) == 1:
+            out = bases[0]
+        else:
+            M = torch.cat(bases, dim=1)
+            Q, Rm = torch.linalg.qr(M)
+            out = Q[:, torch.abs(torch.diagonal(Rm)) > 1e-6]
+        cache[layer_idx] = out
+        return out
+
+    return lookup
+
+
 def _kv_preservation_lookup(acts: Optional[dict], rank: int):
     cache: dict = {}
 
@@ -578,7 +610,7 @@ def _refine_refusal(bundle, controller, cfg, eval_harmful, eval_harmless):
         if new_kl <= cfg.max_kl:
             candidates.append((s, new_kl, _alpha_state(controller)))
 
-    for s, new_kl, alpha in candidates[: max(1, cfg.refine_scale_rerank_k)]:
+    for s, new_kl, alpha in candidates[: max(1, cfg.refine_scale_rerank_k * 3)]:
         _set_alpha_state(controller, alpha)
         with controller.active():
             new_ref = refusal_rate(bundle, es, cfg.max_new_tokens, cfg.batch_size)
@@ -587,8 +619,6 @@ def _refine_refusal(bundle, controller, cfg, eval_harmful, eval_harmless):
             _log(f"  refine: scale={s:.2f} refusal={new_ref:.3f} kl={new_kl:.3f} (kept)")
             if new_ref <= cfg.target_refusal:
                 break
-        else:
-            break
     _set_alpha_state(controller, best[2])
     return best[0], best[1]
 
@@ -717,6 +747,15 @@ def _minimize_kl_layers(bundle, controller, cfg, eval_harmful, eval_harmless):
 
 def _repair_loss(ref: float, kl: float, cfg) -> float:
     ref_over = max(0.0, ref - cfg.target_refusal)
+    if ref_over > 0.0:
+        kl_budget_over = max(0.0, kl - cfg.max_kl)
+        return (
+            ref
+            + cfg.refusal_target_weight * 2.5 * ref_over
+            + cfg.refusal_quad_weight * 3.0 * ref_over * ref_over
+            + cfg.kl_weight * 0.35 * kl
+            + cfg.kl_over_budget_weight * kl_budget_over
+        )
     kl_target_over = max(0.0, kl - cfg.kl_target)
     kl_budget_over = max(0.0, kl - cfg.max_kl)
     return (
@@ -887,10 +926,10 @@ def _head_token_sweep(bundle, controller, cfg, eval_harmful, eval_harmless):
 
 def _repair_scales(best_ref: float, best_kl: float, cfg):
     target = cfg.target_refusal + cfg.refine_refusal_slack
+    if best_ref > target:
+        return (1.20, 1.45, 1.75, 2.10, 2.50)
     if best_kl > cfg.kl_target and best_ref <= target:
         return (0.0, 0.25, 0.50, 0.75, 0.90)
-    if best_ref > cfg.target_refusal and best_kl <= cfg.kl_target:
-        return (1.10, 1.25, 1.45)
     return (0.0, 0.50, 0.75, 0.90, 1.10, 1.25)
 
 
@@ -924,6 +963,7 @@ def _repair_alphas(bundle, controller, cfg, eval_harmful, eval_harmless, start_r
     min_kl_gain = getattr(cfg, "repair_min_kl_gain", 0.003)
     min_ref_gain = getattr(cfg, "repair_min_refusal_gain", 0.005)
     min_score_gain = getattr(cfg, "repair_min_score_gain", 0.01)
+    target = cfg.target_refusal + cfg.refine_refusal_slack
 
     for step in range(cfg.repair_steps):
         _set_alpha_state(controller, best_alpha)
@@ -952,11 +992,28 @@ def _repair_alphas(bundle, controller, cfg, eval_harmful, eval_harmless, start_r
                     continue
                 priority = _repair_priority(start, scale, best_ref, best_kl, cfg)
                 candidates.append((priority, item, scale, value))
+        if best_ref > target:
+            for item, values in (
+                (-1, (0.08, 0.14, 0.22, 0.32, 0.45)),
+                (-2, (0.20, 0.45, 0.80, 1.20, 1.60)),
+            ):
+                start = _alpha_get(controller, item)
+                for value in values:
+                    if value <= start + 1e-6:
+                        continue
+                    scale = value / max(abs(start), 1.0)
+                    priority = _repair_priority(max(abs(start), value), scale, best_ref, best_kl, cfg)
+                    candidates.append((priority, item, scale, value))
+        probe_n = max(1, cfg.repair_probe_candidates)
+        exact_n = max(1, cfg.repair_rerank_k)
+        if cfg.target_refusal <= 0.0 and best_ref > 0.0:
+            probe_n = max(probe_n, 36)
+            exact_n = max(exact_n, 12)
         candidates.sort(reverse=True)
-        candidates = candidates[: max(1, cfg.repair_probe_candidates)]
+        candidates = candidates[:probe_n]
         _log(
             f"  repair {step + 1}/{cfg.repair_steps}: "
-            f"probe={len(candidates)} exact={cfg.repair_rerank_k} "
+            f"probe={len(candidates)} exact={exact_n} "
             f"refusal={best_ref:.3f} kl={best_kl:.3f}"
         )
 
@@ -973,10 +1030,10 @@ def _repair_alphas(bundle, controller, cfg, eval_harmful, eval_harmless, start_r
         accepted = None
         skipped = 0
         cheap.sort(key=lambda x: (x[0], x[1]))
-        for _proxy_score, _probe_kl, item, scale, alpha in cheap[: cfg.repair_rerank_k]:
+        for _proxy_score, _probe_kl, item, scale, alpha in cheap[:exact_n]:
             _set_alpha_state(controller, alpha)
             trial_kl = kl_harmless(bundle, controller, lset, cfg.batch_size, positions=cfg.kl_positions)
-            if _repair_loss(0.0, trial_kl, cfg) >= best_score - 1e-4:
+            if best_ref <= cfg.target_refusal and _repair_loss(0.0, trial_kl, cfg) >= best_score - 1e-4:
                 skipped += 1
                 continue
             with controller.active():
@@ -1008,10 +1065,7 @@ def _repair_alphas(bundle, controller, cfg, eval_harmful, eval_harmless, start_r
         best_score, best_ref, best_kl, item, scale, best_alpha = accepted
         steps += 1
         _log(f"  repair {step + 1}: {_alpha_label(item)} x{scale:.2f} refusal={best_ref:.3f} kl={best_kl:.3f}")
-        if (
-            best_ref <= cfg.target_refusal + cfg.refine_refusal_slack + cfg.repair_refusal_regress_slack
-            and best_kl <= cfg.max_kl * cfg.repair_stop_kl_frac
-        ):
+        if best_ref <= cfg.target_refusal and best_kl <= cfg.max_kl * cfg.repair_stop_kl_frac:
             break
         if best_ref <= cfg.target_refusal and best_kl <= cfg.kl_target:
             break
@@ -1045,6 +1099,252 @@ def _backoff_to_kl(bundle, controller, cfg, eval_harmful, eval_harmless):
     return ref, kl, steps
 
 
+def _push_refusal_scale(bundle, controller, cfg, eval_harmful, eval_harmless):
+    base = _alpha_state(controller)
+    best = None
+    zero_over = None
+    prev_scale = 1.0
+    prev_ref = None
+    best_ref_seen = 1.0
+    no_improve = 0
+    for scale in (1.10, 1.25, 1.40, 1.60, 1.85, 2.10):
+        _scale_alpha_state(controller, base, scale)
+        with controller.active():
+            ref = refusal_rate(bundle, eval_harmful, cfg.max_new_tokens, cfg.batch_size)
+        kl = kl_harmless(bundle, controller, eval_harmless, cfg.batch_size, positions=cfg.kl_positions)
+        # bail when refusal has plateaued and we are already over the kl budget: cranking
+        # alpha further only raises kl without reaching target (the no-head / over-preserved
+        # case). avoids sweeping every scale on the big test set for nothing.
+        if ref < best_ref_seen - 0.005:
+            best_ref_seen = ref
+            no_improve = 0
+        else:
+            no_improve += 1
+        if no_improve >= 2 and ref > cfg.target_refusal and kl > cfg.max_kl:
+            _log(f"  final push: refusal plateaued at {ref:.3f} over kl budget, stopping")
+            break
+        if kl <= cfg.max_kl and (best is None or (ref, kl) < (best[0], best[1])):
+            best = (ref, kl, _alpha_state(controller), scale)
+        if ref <= cfg.target_refusal and (zero_over is None or kl < zero_over[1]):
+            zero_over = (ref, kl, _alpha_state(controller), scale)
+        _log(f"  final push: scale={scale:.2f} refusal={ref:.3f} kl={kl:.3f}")
+        if ref <= cfg.target_refusal and kl <= cfg.max_kl:
+            lo = prev_scale if prev_ref is not None and prev_ref > cfg.target_refusal else 1.0
+            hi = scale
+            tight = (ref, kl, _alpha_state(controller), scale)
+            for _ in range(3):
+                mid = 0.5 * (lo + hi)
+                _scale_alpha_state(controller, base, mid)
+                with controller.active():
+                    mid_ref = refusal_rate(bundle, eval_harmful, cfg.max_new_tokens, cfg.batch_size)
+                mid_kl = kl_harmless(bundle, controller, eval_harmless, cfg.batch_size, positions=cfg.kl_positions)
+                _log(f"  final push refine: scale={mid:.3f} refusal={mid_ref:.3f} kl={mid_kl:.3f}")
+                if mid_ref <= cfg.target_refusal and mid_kl <= cfg.max_kl:
+                    hi = mid
+                    tight = (mid_ref, mid_kl, _alpha_state(controller), mid)
+                else:
+                    lo = mid
+            margin = float(getattr(cfg, "final_push_bake_margin", 0.0)) if cfg.bake else 0.0
+            if margin > 0.0 and tight[3] < scale:
+                margin_scale = min(scale, tight[3] * (1.0 + margin))
+                _scale_alpha_state(controller, base, margin_scale)
+                with controller.active():
+                    margin_ref = refusal_rate(bundle, eval_harmful, cfg.max_new_tokens, cfg.batch_size)
+                margin_kl = kl_harmless(bundle, controller, eval_harmless, cfg.batch_size, positions=cfg.kl_positions)
+                _log(f"  final push margin: scale={margin_scale:.3f} refusal={margin_ref:.3f} kl={margin_kl:.3f}")
+                if margin_ref <= cfg.target_refusal and margin_kl <= cfg.max_kl:
+                    tight = (margin_ref, margin_kl, _alpha_state(controller), margin_scale)
+            if best is None or (tight[0], tight[1]) < (best[0], best[1]):
+                best = tight
+            break
+        prev_scale = scale
+        prev_ref = ref
+    if getattr(cfg, "final_zero_trim", False) and zero_over is not None and zero_over[1] > cfg.max_kl:
+        _set_alpha_state(controller, zero_over[2])
+        _log(f"  final push trim: scale={zero_over[3]:.2f} start_kl={zero_over[1]:.3f}")
+        ref, kl, _steps = _fast_zero_kl_trim(
+            bundle, controller, cfg, eval_harmful, eval_harmless,
+            start_ref=zero_over[0], start_kl=zero_over[1],
+        )
+        if ref <= cfg.target_refusal and (best is None or kl <= best[1] or best[0] > cfg.target_refusal):
+            return ref, kl, zero_over[3]
+    elif zero_over is not None and zero_over[1] > cfg.max_kl:
+        _log(f"  final push: zero found at scale={zero_over[3]:.2f} kl={zero_over[1]:.3f} (over budget)")
+    if best is not None:
+        _set_alpha_state(controller, best[2])
+        return best[0], best[1], best[3]
+    _set_alpha_state(controller, base)
+    with controller.active():
+        ref = refusal_rate(bundle, eval_harmful, cfg.max_new_tokens, cfg.batch_size)
+    kl = kl_harmless(bundle, controller, eval_harmless, cfg.batch_size, positions=cfg.kl_positions)
+    return ref, kl, 1.0
+
+
+def _fast_zero_kl_trim(bundle, controller, cfg, eval_harmful, eval_harmless, start_ref=None, start_kl=None):
+    hset = eval_harmful[: max(48, min(len(eval_harmful), cfg.repair_eval_n))]
+    lset = eval_harmless[: max(48, min(len(eval_harmless), cfg.repair_kl_n))]
+    best_alpha = _alpha_state(controller)
+    best_ref = start_ref
+    best_kl = start_kl
+    if best_ref is None:
+        with controller.active():
+            best_ref = refusal_rate(bundle, hset, cfg.max_new_tokens, cfg.batch_size)
+    if best_kl is None:
+        best_kl = kl_harmless(bundle, controller, lset, cfg.batch_size, positions=cfg.kl_positions)
+    if best_ref > cfg.target_refusal:
+        return best_ref, best_kl, 0
+    items = [-2, -1] + sorted(
+        range(controller.num_layers),
+        key=lambda L: abs(controller.get_layer_alpha(L)),
+        reverse=True,
+    )[:4]
+    steps = 0
+    for step in range(2):
+        _log(f"  final trim scan {step + 1}: refusal={best_ref:.3f} kl={best_kl:.3f}")
+        scored = []
+        _set_alpha_state(controller, best_alpha)
+        for item in items:
+            start = _alpha_get(controller, item)
+            if abs(start) < 1e-6:
+                continue
+            _alpha_set(controller, item, 0.0)
+            kl0 = kl_harmless(bundle, controller, lset, cfg.batch_size, positions=cfg.kl_positions)
+            _alpha_set(controller, item, start)
+            drop = best_kl - kl0
+            if drop > 1e-3:
+                scored.append((drop, item, kl0))
+        if not scored:
+            break
+        accepted = None
+        for _drop, item, _kl0 in sorted(scored, reverse=True)[:4]:
+            start = _alpha_get(controller, item)
+            for scale in (0.0, 0.25, 0.50, 0.75):
+                _set_alpha_state(controller, best_alpha)
+                _alpha_set(controller, item, start * scale)
+                kl = kl_harmless(bundle, controller, lset, cfg.batch_size, positions=cfg.kl_positions)
+                if kl >= best_kl - 1e-3:
+                    continue
+                with controller.active():
+                    ref, complete = refusal_rate_bounded(
+                        bundle, hset, cfg.max_new_tokens, cfg.batch_size,
+                        should_stop=lambda floor, _seen, _total: floor > cfg.target_refusal,
+                    )
+                if not complete and ref > cfg.target_refusal:
+                    continue
+                if ref <= cfg.target_refusal and (accepted is None or kl < accepted[0]):
+                    accepted = (kl, ref, item, scale, _alpha_state(controller))
+            if accepted is not None and accepted[0] <= cfg.max_kl:
+                break
+        if accepted is None:
+            break
+        best_kl, best_ref, item, scale, best_alpha = accepted
+        steps += 1
+        _log(f"  final trim {step + 1}: {_alpha_label(item)} x{scale:.2f} refusal={best_ref:.3f} kl={best_kl:.3f}")
+        if best_kl <= cfg.max_kl:
+            break
+    _set_alpha_state(controller, best_alpha)
+    return best_ref, best_kl, steps
+
+
+def _edit_exists(controller, name: str) -> bool:
+    return any(e.get("name") == name for e in getattr(controller, "edits", []))
+
+
+def _edit_R(controller, name: str):
+    for e in getattr(controller, "edits", []):
+        if e.get("name") == name:
+            r = e.get("R")
+            return None if r is None else r.detach().cpu().clone()
+    return None
+
+
+def _restore_edit_R(controller, name: str, R):
+    if R is not None:
+        controller.set_edit_subspace(name, R)
+        return
+    for e in getattr(controller, "edits", []):
+        if e.get("name") == name:
+            e["R"] = None
+            e["_cast"] = None
+            break
+
+
+def _residual_refusal_repair(bundle, controller, cfg, eval_harmful, eval_harmless, start_ref=None, start_kl=None):
+    if bundle.uses_post_norm():
+        return None
+    hscan = eval_harmful[: max(24, min(len(eval_harmful), cfg.repair_eval_n))]
+    lset = eval_harmless[: max(48, min(len(eval_harmless), cfg.repair_kl_n))]
+    with controller.active():
+        completions = generate(bundle, hscan, cfg.max_new_tokens, cfg.batch_size)
+    flags = judge_strict_refusal(bundle, completions, cfg.batch_size, hscan)
+    failed = [p for p, f in zip(hscan, flags) if f]
+    passed = [p for p, f in zip(hscan, flags) if not f]
+    if start_ref is None:
+        start_ref = sum(flags) / max(1, len(flags))
+    if start_kl is None:
+        start_kl = kl_harmless(bundle, controller, lset, cfg.batch_size, positions=cfg.kl_positions)
+    if not failed:
+        return {"refusal": 0.0, "kl": start_kl, "failures": 0}
+
+    name = "residual_failure"
+    if not _edit_exists(controller, name):
+        controller.add_edit(name, sign=-1.0, default_alpha=0.0, kind="hidden")
+    prev_alpha = _alpha_state(controller)
+    prev_R = _edit_R(controller, name)
+    contrast = passed[: max(len(failed), 16)] or lset[: max(len(failed), 16)]
+    with controller.active():
+        fail_acts = collect_activations(bundle, failed, cfg.batch_size)
+        base_acts = collect_activations(bundle, contrast, cfg.batch_size)
+
+    active_layers = sorted(
+        range(controller.num_layers),
+        key=lambda L: abs(controller.get_layer_alpha(L)),
+        reverse=True,
+    )[: max(4, min(6, controller.num_layers))]
+    alphas = (0.08, 0.14, 0.22, 0.32)
+    best = None
+    for layer in active_layers:
+        R, _ = refusal_subspace(
+            fail_acts[layer], base_acts[layer],
+            rank=1, max_rank=max(1, min(2, cfg.max_rank)),
+            seed=cfg.seed + 911 + layer,
+            **_direction_kwargs(cfg),
+        )
+        controller.set_edit_subspace(name, gram_schmidt_remove(R, None))
+        for alpha in alphas:
+            _set_alpha_state(controller, prev_alpha)
+            controller.set_edit_layer_alpha(name, layer, alpha)
+            kl = kl_harmless(bundle, controller, lset, cfg.batch_size, positions=cfg.kl_positions)
+            if kl > cfg.max_kl:
+                continue
+            with controller.active():
+                ref = refusal_rate(bundle, hscan, cfg.max_new_tokens, cfg.batch_size)
+            _log(f"  residual repair: L{layer} a={alpha:.2f} refusal={ref:.3f} kl={kl:.3f}")
+            if ref >= start_ref - 1e-6:
+                continue
+            if best is None or (ref, kl) < (best[0], best[1]):
+                best = (ref, kl, _alpha_state(controller), _edit_R(controller, name), layer, alpha)
+                if ref <= cfg.target_refusal:
+                    break
+        if best is not None and best[0] <= cfg.target_refusal:
+            break
+
+    if best is None:
+        _set_alpha_state(controller, prev_alpha)
+        _restore_edit_R(controller, name, prev_R)
+        return {"refusal": start_ref, "kl": start_kl, "failures": len(failed), "kept": False}
+    _set_alpha_state(controller, best[2])
+    _restore_edit_R(controller, name, best[3])
+    return {
+        "refusal": best[0],
+        "kl": best[1],
+        "failures": len(failed),
+        "layer": best[4],
+        "alpha": best[5],
+        "kept": True,
+    }
+
+
 def _direction_kwargs(cfg):
     return {
         "multi": bool(getattr(cfg, "multi_refusal", True)),
@@ -1052,6 +1352,8 @@ def _direction_kwargs(cfg):
         "min_norm_frac": float(getattr(cfg, "multi_refusal_min_norm", 0.08)),
         "min_separation": float(getattr(cfg, "multi_refusal_min_separation", 0.05)),
         "min_coverage": float(getattr(cfg, "multi_refusal_min_coverage", 0.05)),
+        "kl_whiten": float(getattr(cfg, "kl_whiten", 0.0)),
+        "kl_whiten_shrink": float(getattr(cfg, "kl_whiten_shrink", 0.1)),
     }
 
 
@@ -1147,8 +1449,20 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
     hl = max(1, len(eval_harmless) // 2)
     test_harmful, eval_harmful = eval_harmful[:hh], eval_harmful[hh:]
     test_harmless, eval_harmless = eval_harmless[:hl], eval_harmless[hl:]
+    refusal_eval_prompts = []
+    if cfg.refusal_eval_path and cfg.refusal_eval_n > 0:
+        refusal_eval_prompts = _cached_prompts(cfg, "refusal_eval", cfg.refusal_eval_path, cfg.refusal_eval_n, cfg.seed)
+        eval_harmful = _append_unique(refusal_eval_prompts, eval_harmful)
+    if cfg.target_refusal <= 0.0:
+        eval_harmful = _append_unique(test_harmful, eval_harmful)
+    kl_eval_prompts = []
+    if cfg.kl_eval_path and cfg.kl_eval_n > 0:
+        kl_eval_prompts = _cached_prompts(cfg, "kl_eval", cfg.kl_eval_path, cfg.kl_eval_n, cfg.seed)
+        eval_harmless = _append_unique(kl_eval_prompts, eval_harmless)
     _log(f"prompts: {len(fit_harmful)} harmful (fit), {len(harmless)} harmless, "
-         f"val {len(eval_harmful)}/{len(eval_harmless)}, test {len(test_harmful)}/{len(test_harmless)}")
+         f"val {len(eval_harmful)}/{len(eval_harmless)}, test {len(test_harmful)}/{len(test_harmless)}"
+         + (f", refusal calib {len(refusal_eval_prompts)}" if refusal_eval_prompts else "")
+         + (f", kl calib {len(kl_eval_prompts)}" if kl_eval_prompts else ""))
     mark("load_prompts")
 
     controller = ProjectionController(bundle)
@@ -1245,7 +1559,21 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
         elif cfg.preserve_rank > 0:
             preserve_acts = al
             preserve_source = "harmless"
-        preserve_lookup = _preservation_lookup(preserve_acts, cfg.preserve_rank)
+        cap_acts = None
+        if (getattr(cfg, "capability_preserve", True) and cfg.capability_preserve_rank > 0
+                and cfg.capability_preserve_path):
+            _log("collecting capability (math/code) activations for preservation ...")
+            cap_prompts = _cached_prompts(cfg, "capability_preserve", cfg.capability_preserve_path,
+                                          cfg.capability_preserve_n, cfg.seed)
+            if cap_prompts:
+                cap_acts = _cached_collect(bundle, cap_prompts, cfg.batch_size, cfg, "capability_preserve")
+                _log(f"capability preservation: rank={cfg.capability_preserve_rank} prompts={len(cap_prompts)}")
+        if cap_acts is not None:
+            preserve_lookup = _combined_preservation_lookup(
+                [(preserve_acts, cfg.preserve_rank), (cap_acts, cfg.capability_preserve_rank)])
+            preserve_source = (preserve_source + "+capability") if preserve_acts is not None else "capability"
+        else:
+            preserve_lookup = _preservation_lookup(preserve_acts, cfg.preserve_rank)
         preserve_basis = preserve_lookup(L_dir)
         if ple_al is not None:
             ple_preserve_lookup = _preservation_lookup(ple_al, min(4, max(1, cfg.preserve_rank)))
@@ -1263,6 +1591,16 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
 
     reader_mode = bundle.uses_post_norm()
     fast = (cfg.profile or "balanced").lower() == "fast"  # profile, not architecture
+    if (getattr(cfg, "oblique_ablation", True) and not reader_mode and not head_sweep_profile
+            and al is not None):
+        # mean-preserving ablation: remove R but along a co-vector orthogonal to the harmless
+        # mean, so the edit doesn't shift the harmless residual mean -> the dominant kl term
+        # collapses. weight-only, bakes into bias-free qwen2.5. the whole search optimizes it.
+        mu = al[L_dir].mean(0)
+        controller.enable_oblique(mu, cfg.oblique_strength, cfg.oblique_denom_floor,
+                                  writers_only=getattr(cfg, "oblique_writers_only", True))
+        _log(f"oblique ablation enabled (strength={cfg.oblique_strength}, "
+             f"writers_only={getattr(cfg, 'oblique_writers_only', True)}, |mu|={float(mu.norm()):.2f})")
     if reader_mode:
         # gemma2/3/4-style post-norm: writer edits get renormalized away, so ablate
         # reader-side with per-layer directions, and give kl extra headroom.
@@ -1446,6 +1784,7 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
 
     kl_layer_steps = 0
     repair_steps = 0
+    residual_repair = []
     if (not head_sweep_profile) and cfg.refine_deescalate and edited_refusal <= cfg.target_refusal + cfg.refine_refusal_slack:
         _log("minimizing kl scale ...")
         edited_refusal, kl = _minimize_kl_scale(bundle, controller, cfg, eval_harmful, eval_harmless)
@@ -1511,6 +1850,23 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
     if skipper is not None:
         skipper.remove()
     kl = kl_harmless(bundle, controller, test_harmless, cfg.batch_size, positions=cfg.kl_positions)
+    if (not head_sweep_profile) and cfg.refine_deescalate and edited_refusal > cfg.target_refusal:
+        _log("repairing test leakage ...")
+        edited_refusal, kl, extra_steps = _repair_alphas(
+            bundle, controller, cfg, test_harmful, test_harmless,
+            start_ref=edited_refusal, start_kl=kl,
+        )
+        repair_steps += extra_steps
+        with controller.active():
+            edited_refusal = refusal_rate(bundle, test_harmful, cfg.max_new_tokens, cfg.batch_size)
+        kl = kl_harmless(bundle, controller, test_harmless, cfg.batch_size, positions=cfg.kl_positions)
+        _log(f"test repair result: refusal={edited_refusal:.3f} kl={kl:.3f} steps={extra_steps}")
+    if (not head_sweep_profile) and cfg.refine_deescalate and edited_refusal > cfg.target_refusal:
+        _log("pushing final refusal scale ...")
+        edited_refusal, kl, push_scale = _push_refusal_scale(
+            bundle, controller, cfg, test_harmful, test_harmless,
+        )
+        _log(f"final push result: scale={push_scale:.2f} refusal={edited_refusal:.3f} kl={kl:.3f}")
     _log(f"TEST refusal: {edited_refusal:.3f} | TEST harmless KL: {kl:.3f} nats"
          + (f" | {len(drop_layers)} layers pruned" if drop_layers else ""))
     mark("test_metrics")
@@ -1536,6 +1892,7 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
         "kl_backoff_steps": backoff,
         "kl_layer_trim_steps": kl_layer_steps,
         "repair_steps": repair_steps,
+        "residual_repair": residual_repair,
         "guard_history": guard_hist,
         "layer_alphas": [round(controller.get_layer_alpha(L), 3) for L in range(bundle.num_layers)],
         "ple_layer_alphas": [round(controller.get_ple_layer_alpha(L), 3) for L in range(bundle.num_layers)]
@@ -1554,7 +1911,14 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
         "target_refusal": cfg.target_refusal,
         "max_kl": cfg.max_kl,
         "kl_target": cfg.kl_target,
+        "refusal_eval_path": cfg.refusal_eval_path,
+        "refusal_eval_n": cfg.refusal_eval_n,
         "kl_positions": cfg.kl_positions,
+        "kl_eval_path": cfg.kl_eval_path,
+        "kl_eval_n": cfg.kl_eval_n,
+        "oblique_ablation": bool(controller.edits[0].get("U") is not None),
+        "oblique_strength": cfg.oblique_strength,
+        "kl_whiten": cfg.kl_whiten,
         "opt_capability": cfg.opt_capability,
         "opt_capability_weight": cfg.opt_capability_weight,
         "timings_sec": timings,

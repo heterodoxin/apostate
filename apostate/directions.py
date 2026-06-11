@@ -31,6 +31,46 @@ def _kmeans(X: torch.Tensor, k: int, iters: int = 30, seed: int = 0):
     return labels
 
 
+_HARMLESS_EIG_CACHE: dict = {}
+
+
+def _harmless_eig(harmless: torch.Tensor):
+    # covariance eigendecomposition is the expensive part of whitening and depends only on the
+    # harmless activations (per layer), not the trial params -- cache it across the search.
+    hf = harmless.float()
+    key = (tuple(hf.shape), round(float(hf.sum().item()), 1), round(float((hf * hf).sum().item()), 1))
+    hit = _HARMLESS_EIG_CACHE.get(key)
+    if hit is not None:
+        return hit
+    X = hf - hf.mean(0, keepdim=True)
+    sigma = (X.t() @ X) / max(1, X.shape[0] - 1)
+    evals, evecs = torch.linalg.eigh(sigma)
+    out = (evals.clamp_min(0.0), evecs)
+    if len(_HARMLESS_EIG_CACHE) < 64:
+        _HARMLESS_EIG_CACHE[key] = out
+    return out
+
+
+def _whiten_direction(
+    mean_diff: torch.Tensor,
+    harmless: torch.Tensor,
+    weight: float,
+    shrink: float,
+) -> torch.Tensor:
+    # reweight mean_diff by the harmless covariance: d = Sigma_reg^{-weight} (mu_h - mu_l).
+    # weight=0 -> identity (plain difference of means); weight=1 -> full inverse-covariance
+    # (fisher/lda whitening). high-harmless-variance axes get down-weighted so removing the
+    # direction perturbs harmless activations less per unit of class separation -> lower kl.
+    if weight <= 0.0 or harmless.shape[0] < 4:
+        return mean_diff
+    evals, evecs = _harmless_eig(harmless)
+    mean_ev = float(evals.mean()) + 1e-8
+    reg = evals / mean_ev + max(1e-4, shrink)
+    inv = reg ** (-float(weight))
+    coords = evecs.t() @ mean_diff.float()
+    return (evecs @ (inv * coords)).to(mean_diff.dtype)
+
+
 def _oriented(d: torch.Tensor, harmful: torch.Tensor, harmless: torch.Tensor) -> torch.Tensor:
     hp = harmful @ d
     lp_mean = (harmless @ d).mean()
@@ -156,6 +196,8 @@ def refusal_subspace(
     min_norm_frac: float = 0.08,
     min_separation: float = 0.05,
     min_coverage: float = 0.05,
+    kl_whiten: float = 0.0,
+    kl_whiten_shrink: float = 0.1,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     harmful = harmful.float()
     harmless = harmless.float()
@@ -166,6 +208,8 @@ def refusal_subspace(
         # general behavior less (the part along the harmless mean is "be a normal model").
         gh = mu_harmless / (mu_harmless.norm() + 1e-8)
         mean_diff = mean_diff - (mean_diff @ gh) * gh
+    if kl_whiten > 0.0:
+        mean_diff = _whiten_direction(mean_diff, harmless, kl_whiten, kl_whiten_shrink)
     mean_dir = mean_diff / (mean_diff.norm() + 1e-8)
     mean_dir = _oriented(mean_dir, harmful, harmless)
 

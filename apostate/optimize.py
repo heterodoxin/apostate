@@ -152,7 +152,7 @@ def _low_kl_pick(history: list, cfg):
     ]
     if feasible:
         return min(feasible, key=lambda h: (
-            float(h.get("kl", 99.0)), float(h.get("capability_drift", 0.0)), _ref_attr(h), h["value"]
+            float(h.get("capability_drift", 0.0)), float(h.get("kl", 99.0)), _ref_attr(h), h["value"]
         ))
     under_budget = [h for h in history if float(h.get("kl", 99.0)) <= cfg.max_kl]
     if under_budget:
@@ -184,6 +184,10 @@ def _candidate_pool(history: list, cfg) -> list:
     k = max(1, cfg.opt_rerank_k)
     add(sorted(history, key=lambda h: h["value"])[:k])
     add(sorted(history, key=lambda h: (_ref_attr(h), float(h.get("kl", 99.0)), h["value"]))[: max(3, k)])
+    add(sorted(
+        [h for h in history if _ref_attr(h) <= cfg.target_refusal + getattr(cfg, "refine_refusal_slack", 0.02)],
+        key=lambda h: (float(h.get("capability_drift", 0.0)), float(h.get("kl", 99.0)), h["value"]),
+    )[: max(4, k)])
     add(sorted(
         [h for h in history if float(h.get("kl", 99.0)) <= cfg.max_kl * 3.0],
         key=lambda h: (_ref_attr(h), max(0.0, float(h.get("kl", 99.0)) - cfg.max_kl), h["value"]),
@@ -221,6 +225,8 @@ def _direction_kwargs(cfg):
         "min_norm_frac": float(getattr(cfg, "multi_refusal_min_norm", 0.08)),
         "min_separation": float(getattr(cfg, "multi_refusal_min_separation", 0.05)),
         "min_coverage": float(getattr(cfg, "multi_refusal_min_coverage", 0.05)),
+        "kl_whiten": float(getattr(cfg, "kl_whiten", 0.0)),
+        "kl_whiten_shrink": float(getattr(cfg, "kl_whiten_shrink", 0.1)),
     }
 
 
@@ -270,14 +276,15 @@ def _anchor_profiles(bundle: ModelBundle, space: dict) -> list:
                 "head_scale": head_scale if head_ok else 0.0,
             })
     if "embed_scale" in space and bundle.can_edit_embed():
-        # strong embed+head ablation anchors for embed-editable models (qwen/llama):
-        # without these the search never starts near the strong-edit region and settles
-        # for a near-no-op edit. mid-layer direction where refusal is most removable.
         for frac, strength, embed_scale, head_scale, head_alpha in (
-            (0.50, 1.20, 0.22, 0.20, 1.4),
-            (0.55, 1.25, 0.28, 0.25, 1.8),
-            (0.45, 1.25, 0.18, 0.15, 1.0),
-            (0.62, 1.10, 0.14, 0.12, 0.8),
+            (0.50, 1.05, 0.12, 0.08, 0.55),
+            (0.55, 1.10, 0.16, 0.10, 0.70),
+            (0.45, 1.00, 0.10, 0.06, 0.45),
+            (0.62, 0.95, 0.08, 0.05, 0.35),
+            (0.55, 1.25, 0.28, 0.25, 1.80),
+            (0.52, 1.30, 0.24, 0.22, 1.45),
+            (0.55, 1.22, 0.24, 0.18, 1.20),
+            (0.50, 1.18, 0.20, 0.16, 1.00),
         ):
             rows.append({
                 "direction_source": "activations",
@@ -296,11 +303,11 @@ def _anchor_profiles(bundle: ModelBundle, space: dict) -> list:
                 "head_alpha": head_alpha if head_ok else 0.0,
             })
         for rank, frac, strength, embed_scale, head_scale, head_alpha, width in (
-            (2, 0.55, 0.95, 0.20, 0.18, 1.20, 0.56),
-            (2, 0.58, 1.05, 0.16, 0.14, 1.00, 0.50),
-            (2, 0.64, 0.85, 0.12, 0.10, 0.80, 0.44),
-            (3, 0.62, 0.78, 0.10, 0.08, 0.65, 0.42),
-            (3, 0.70, 0.70, 0.06, 0.06, 0.50, 0.36),
+            (2, 0.55, 0.85, 0.12, 0.08, 0.55, 0.50),
+            (2, 0.58, 0.90, 0.10, 0.07, 0.45, 0.46),
+            (2, 0.64, 0.78, 0.08, 0.05, 0.35, 0.42),
+            (3, 0.62, 0.68, 0.06, 0.04, 0.28, 0.38),
+            (3, 0.70, 0.62, 0.04, 0.03, 0.22, 0.34),
         ):
             if rank > rank_hi:
                 continue
@@ -938,7 +945,7 @@ def optimize_profile(
             base_cap = _target_logprob(bundle, cap_samples, cfg.batch_size)
         print(f"[apostate] capability logprob baseline: {base_cap:.4f}", flush=True)
 
-    strength_hi = 1.70 if not bundle.can_edit_embed() else 1.25
+    strength_hi = 1.70 if not bundle.can_edit_embed() else 1.35
     width_hi = 0.82 if not bundle.can_edit_embed() else 0.65
     space = {
         "direction_source": ("cat", ["activations"]),
@@ -954,14 +961,14 @@ def optimize_profile(
     embed_ok = bundle.can_edit_embed() or bundle.has_ple()
     if embed_ok:
         space["ablate_embed"] = ("cat", [False, True])
-        space["embed_scale"] = ("float", 0.0, 0.35 if bundle.can_edit_embed() else 0.14)
+        space["embed_scale"] = ("float", 0.0, 0.28 if bundle.can_edit_embed() else 0.14)
     else:
         space["ablate_embed"] = ("cat", [False])
         print("[apostate] embed edit disabled: per-layer embeddings", flush=True)
     if bundle.final_norm() is not None and bundle.lm_head() is not None:
         space["ablate_head"] = ("cat", [False, True])
-        space["head_scale"] = ("float", 0.0, 0.75 if not bundle.can_edit_embed() else 0.35)
-        space["head_alpha"] = ("float", 0.0, 6.0 if not bundle.can_edit_embed() else 2.0)
+        space["head_scale"] = ("float", 0.0, 0.75 if not bundle.can_edit_embed() else 0.25)
+        space["head_alpha"] = ("float", 0.0, 6.0 if not bundle.can_edit_embed() else 1.60)
         if not bundle.can_edit_embed() and getattr(cfg, "head_sweep", True):
             space["direction_source"] = ("cat", ["activations", "head_tokens"])
             space["head_token_alpha"] = ("float", 0.0, 4.5)
@@ -1077,12 +1084,19 @@ def optimize_profile(
         print(f"  Loss: {value:.6f}")
         anchor_history.append({"params": params, "value": value, **attrs})
 
-    best_params, best_attrs, best_value, history = run_search(
-        objective, space, cfg.n_trials, cfg.seed,
-        early_stop=cfg.opt_early_stop, early_stop_margin=cfg.opt_early_stop_margin,
-        adaptive=cfg.adaptive_trials
-    )
-    history = anchor_history + history
+    if cfg.n_trials > 0:
+        best_params, best_attrs, best_value, history = run_search(
+            objective, space, cfg.n_trials, cfg.seed,
+            early_stop=cfg.opt_early_stop, early_stop_margin=cfg.opt_early_stop_margin,
+            adaptive=cfg.adaptive_trials
+        )
+        history = anchor_history + history
+    else:
+        history = anchor_history
+        best = min(history, key=lambda h: h["value"])
+        best_params = best["params"]
+        best_attrs = {k: v for k, v in best.items() if k not in ("params", "value")}
+        best_value = best["value"]
 
     if history:
         exact = []
