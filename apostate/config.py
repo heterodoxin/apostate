@@ -65,13 +65,8 @@ class ApostateConfig:
     causal_temperature: float = 1.0
 
     preserve_rank: int = 8
-    # superposition / disentanglement: refusal shares directions with useful features (math,
-    # code reasoning). preserve the capability subspace too, so ablating refusal removes only
-    # the component orthogonal to capability -- protects gsm8k/humaneval and lowers kl.
-    # capability preservation (off by default): over-constraining R against a big preserve
-    # subspace blocks true 0% refusal and inflates kl, and the apparent gsm8k "drop" it chased
-    # was n=24 benchmark noise (humaneval n=80 stays flat). kept as a knob for capability-first
-    # runs; use a general corpus, never the eval benchmarks (circular).
+    # also orthogonalize R against a capability subspace. off by default: over-constrains R and
+    # blocks 0%; use a general corpus, never the eval benchmarks (circular).
     capability_preserve: bool = False
     capability_preserve_path: str = "tatsu-lab/alpaca:train:instruction"
     capability_preserve_rank: int = 8
@@ -141,23 +136,17 @@ class ApostateConfig:
     max_kl: float = 0.12
     target_refusal: float = 0.0
 
-    # oblique (mean-preserving) ablation: E = I - Rbake U^T removes the refusal direction R
-    # but along a co-vector U = R minus its harmless-mean component, so E preserves the
-    # harmless mean exactly (E mu = mu) and collapses the dominant mean-shift KL term while
-    # still fully removing R from harmful inputs. weight-only (no bias) so it bakes into
-    # bias-free archs like qwen2.5, and being purely linear it distributes over MoE gates.
+    # mean-preserving ablation E = I - Rbake U^T (U = R minus its harmless-mean component):
+    # removes R fully but leaves the harmless mean, killing the mean-shift kl term. weight-only,
+    # bakes into bias-free qwen2.5, distributes over MoE gates.
     oblique_ablation: bool = True
-    oblique_strength: float = 1.0  # 0 == plain symmetric projection, 1 == full mean-preserve
+    oblique_strength: float = 1.0  # 0 == symmetric, 1 == full mean-preserve
     oblique_denom_floor: float = 0.2  # min eig of U^T R; clamps strength when R aligns with mu
-    # the harmless mean is the residual-stream operating point, so oblique only fits the
-    # residual writers. embed rows and the lm-head input live in different spaces, where the
-    # mid-layer mean is wrong and the (amplified) edit requantizes badly -- keep them symmetric.
+    # writers only -- embed/lm-head live in a different space where the mid-layer mean is wrong.
     oblique_writers_only: bool = True
-    # kl-whitened direction: d = (Sigma_harmless + lambda I)^-1 (mu_h - mu_l), renormalized.
-    # down-weights high-harmless-variance axes so removal disturbs harmless data less per
-    # unit of class separation. kl_whiten in [0,1] interpolates identity -> inverse-cov.
+    # whitened direction (off): down-weight high-harmless-variance axes. weakens refusal removal.
     kl_whiten: float = 0.0
-    kl_whiten_shrink: float = 0.1  # ridge as a fraction of mean harmless eigenvalue
+    kl_whiten_shrink: float = 0.1
 
     # post-norm models (reader-side ablation) need more kl headroom to decensor
     reader_max_kl: float = 0.55

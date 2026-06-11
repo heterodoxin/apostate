@@ -53,9 +53,7 @@ def _edit_in(mod, R: torch.Tensor, coeff: float):
 
 
 def _edit_head(W: torch.Tensor, R: torch.Tensor, coeff: float, U: torch.Tensor = None) -> torch.Tensor:
-    # input-side fold (lm_head reads the final hidden): W -> W + coeff (W @ R) @ outer.t().
-    # for oblique the edit on the input t is t + coeff (t @ U) @ Rbake.t(), which folds as
-    # (W @ Rbake) @ U.t() -- the read side, so R=Rbake here and the outer vector is U.
+    # input-side fold (lm_head reads the hidden): (W @ Rbake) @ U.t(), so R=Rbake, outer=U.
     outer = R if U is None else U
     Wf = W.float()
     return (Wf + coeff * ((Wf @ R) @ outer.t())).to(W.dtype)
@@ -67,8 +65,7 @@ def _is_packed_writer(mod) -> bool:
 
 
 def _edit_writer(mod, R: torch.Tensor, coeff: float, U: torch.Tensor = None):
-    # oblique edit is a fixed linear operator, so per-expert slices compose under the router
-    # gates exactly like the symmetric projection -> packed MoE bakes correctly, no bias.
+    # fixed linear op, so per-expert slices compose under the router gates -> packed MoE ok.
     if _is_packed_writer(mod):
         down = mod.down_proj
         edited = [_edit_linear(down.data[i], R, coeff, U) for i in range(down.shape[0])]

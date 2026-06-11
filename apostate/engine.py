@@ -491,10 +491,7 @@ def _preservation_lookup(acts: Optional[torch.Tensor], rank: int):
 
 
 def _combined_preservation_lookup(sources):
-    # sources: list of (acts, rank). merge per-layer preservation subspaces (harmless + the
-    # capability subspace), orthonormalized so overlapping directions collapse. ablating the
-    # refusal direction then leaves both the harmless mean variance and the math/code
-    # reasoning subspace untouched -- the superposition fix.
+    # merge per-layer preservation subspaces (harmless + capability), orthonormalized.
     cache: dict = {}
 
     def lookup(layer_idx: int):
@@ -1112,9 +1109,7 @@ def _push_refusal_scale(bundle, controller, cfg, eval_harmful, eval_harmless):
         with controller.active():
             ref = refusal_rate(bundle, eval_harmful, cfg.max_new_tokens, cfg.batch_size)
         kl = kl_harmless(bundle, controller, eval_harmless, cfg.batch_size, positions=cfg.kl_positions)
-        # bail when refusal has plateaued and we are already over the kl budget: cranking
-        # alpha further only raises kl without reaching target (the no-head / over-preserved
-        # case). avoids sweeping every scale on the big test set for nothing.
+        # plateaued and over budget -> more alpha just raises kl, give up the sweep.
         if ref < best_ref_seen - 0.005:
             best_ref_seen = ref
             no_improve = 0
@@ -1593,9 +1588,7 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
     fast = (cfg.profile or "balanced").lower() == "fast"  # profile, not architecture
     if (getattr(cfg, "oblique_ablation", True) and not reader_mode and not head_sweep_profile
             and al is not None):
-        # mean-preserving ablation: remove R but along a co-vector orthogonal to the harmless
-        # mean, so the edit doesn't shift the harmless residual mean -> the dominant kl term
-        # collapses. weight-only, bakes into bias-free qwen2.5. the whole search optimizes it.
+        # oblique edit preserves the harmless mean; the whole search then optimizes it.
         mu = al[L_dir].mean(0)
         controller.enable_oblique(mu, cfg.oblique_strength, cfg.oblique_denom_floor,
                                   writers_only=getattr(cfg, "oblique_writers_only", True))

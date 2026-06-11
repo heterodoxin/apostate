@@ -10,10 +10,8 @@ from .model import ModelBundle
 
 
 def oblique_vectors(R: torch.Tensor, mu: torch.Tensor, strength: float, denom_floor: float = 0.2):
-    # build the mean-preserving oblique projector E = I - Rbake U^T for removal basis R.
-    # U = R minus (strength * its harmless-mean component) so U^T mu = 0 => E mu = mu, and
-    # Rbake = R (U^T R)^-1 so E R = 0 (refusal still fully removed). strength is clamped down
-    # if U^T R becomes ill-conditioned (R nearly parallel to the harmless mean).
+    # E = I - Rbake U^T. U = R minus strength*its harmless-mean part (U^T mu = 0 => E mu = mu);
+    # Rbake = R (U^T R)^-1 (E R = 0). strength clamps down if U^T R is ill-conditioned.
     R = R.float()
     mu = mu.float()
     mhat = mu / (mu.norm() + 1e-8)
@@ -64,8 +62,7 @@ class ProjectionController:
         self._oblique_floor: float = 0.2
         self._oblique_writers_only: bool = True
         self._register()
-        # embed rows and the final-norm/lm-head input are not residual writers, so the
-        # harmless-mean co-vector does not fit them -- they stay symmetric under writers-only.
+        # embed/final aren't residual writers -> stay symmetric under writers-only.
         self._non_writer_ids = {id(m) for m in (self._embed, self._final) if m is not None}
         self.add_edit("primary", sign=-1.0, default_alpha=1.0,
                       kind="reader" if self.reader_mode else "hidden")
@@ -177,9 +174,7 @@ class ProjectionController:
         return v
 
     def _project_pair(self, edit: dict, dtype, device, mod_id=None):
-        # returns (left, right) so the removal term is (t @ right) @ left.t().
-        # oblique edits use (Rbake, U); symmetric edits (and non-writer modules under
-        # writers-only) use (R, R).
+        # (left, right) for removal (t @ right) @ left.t(): oblique = (Rbake, U), else (R, R).
         oblique = edit.get("Rbake") is not None and edit.get("U") is not None
         if oblique and self._oblique_writers_only and mod_id in self._non_writer_ids:
             oblique = False
@@ -266,8 +261,7 @@ class ProjectionController:
 
     def enable_oblique(self, mu: torch.Tensor, strength: float = 1.0, denom_floor: float = 0.2,
                        writers_only: bool = True):
-        # mean-preserving ablation for the primary writer edit. stores the harmless mean and
-        # refreshes the oblique vectors against whatever R is currently (and later) set.
+        # store the harmless mean; oblique vectors refresh against whatever R is set later.
         self._oblique_mean = mu.to(self.device).float()
         self._oblique_strength = float(strength)
         self._oblique_floor = float(denom_floor)
@@ -284,9 +278,7 @@ class ProjectionController:
             e["_rbcast"] = None
 
     def _refresh_oblique(self, edit: dict):
-        # only the primary residual-writer edit gets the oblique treatment; others stay
-        # symmetric. recomputed whenever R changes (optimizer trials, guard) since U/Rbake
-        # depend on R. R-independent harmless mean stays fixed.
+        # primary writer edit only; recomputed whenever R changes (U/Rbake depend on R).
         mu = getattr(self, "_oblique_mean", None)
         edit["_ucast"] = None
         edit["_rbcast"] = None

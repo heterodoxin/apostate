@@ -35,8 +35,7 @@ _HARMLESS_EIG_CACHE: dict = {}
 
 
 def _harmless_eig(harmless: torch.Tensor):
-    # covariance eigendecomposition is the expensive part of whitening and depends only on the
-    # harmless activations (per layer), not the trial params -- cache it across the search.
+    # cache the per-layer covariance eigendecomp (the slow part) across the search.
     hf = harmless.float()
     key = (tuple(hf.shape), round(float(hf.sum().item()), 1), round(float((hf * hf).sum().item()), 1))
     hit = _HARMLESS_EIG_CACHE.get(key)
