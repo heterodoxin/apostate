@@ -65,12 +65,6 @@ class ApostateConfig:
     causal_temperature: float = 1.0
 
     preserve_rank: int = 8
-    # also orthogonalize R against a capability subspace. off by default: over-constrains R and
-    # blocks 0%; use a general corpus, never the eval benchmarks (circular).
-    capability_preserve: bool = False
-    capability_preserve_path: str = "tatsu-lab/alpaca:train:instruction"
-    capability_preserve_rank: int = 8
-    capability_preserve_n: int = 256
 
     refine_refusal: bool = True
     refine_max_scale: float = 2.0
@@ -144,9 +138,10 @@ class ApostateConfig:
     oblique_denom_floor: float = 0.2  # min eig of U^T R; clamps strength when R aligns with mu
     # writers only -- embed/lm-head live in a different space where the mid-layer mean is wrong.
     oblique_writers_only: bool = True
-    # whitened direction (off): down-weight high-harmless-variance axes. weakens refusal removal.
-    kl_whiten: float = 0.0
-    kl_whiten_shrink: float = 0.1
+    # predictive co-vector D = R - W (W = harmless predictor of R^T x): preserves harmless
+    # VARIANCE along R, not just the mean, so harmless KL drops. removes only the OOD excursion.
+    oblique_predictive: bool = False
+    predictive_ridge: float = 1e-2
 
     # post-norm models (reader-side ablation) need more kl headroom to decensor
     reader_max_kl: float = 0.55

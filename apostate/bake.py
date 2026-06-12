@@ -172,6 +172,7 @@ def bake(cfg: ApostateConfig, export: dict, tokenizer=None, drop_layers=None) ->
             continue
         # oblique (mean-preserving) edit: left = Rbake, right co-vector = U. symmetric when absent.
         U = e["U"].float() if e.get("U") is not None else None
+        U_layers = e.get("U_layers")  # per-layer predictive co-vector D_L, indexed by layer
         left = e["Rbake"].float() if e.get("Rbake") is not None else R
         # embed rows and the lm-head input are not residual writers; under writers-only they
         # stay symmetric (matching the runtime hook, which skips oblique for those modules).
@@ -187,8 +188,11 @@ def bake(cfg: ApostateConfig, export: dict, tokenizer=None, drop_layers=None) ->
             a = float(e["layer_alphas"][L])
             if a == 0:
                 continue
+            U_L = U
+            if U_layers is not None and L < len(U_layers) and U_layers[L] is not None:
+                U_L = U_layers[L].float()
             for mod in bundle.layer_writers(layer):
-                _edit_writer(mod, left, sign * a, U)
+                _edit_writer(mod, left, sign * a, U_L)
 
     if drop_layers:
         drop = set(drop_layers)

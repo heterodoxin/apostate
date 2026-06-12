@@ -490,34 +490,6 @@ def _preservation_lookup(acts: Optional[torch.Tensor], rank: int):
     return lookup
 
 
-def _combined_preservation_lookup(sources):
-    # merge per-layer preservation subspaces (harmless + capability), orthonormalized.
-    cache: dict = {}
-
-    def lookup(layer_idx: int):
-        layer_idx = int(layer_idx)
-        if layer_idx in cache:
-            return cache[layer_idx]
-        bases = []
-        for acts, rank in sources:
-            if acts is not None and rank > 0:
-                b = preservation_subspace(acts[layer_idx], rank=rank)
-                if b is not None and b.numel():
-                    bases.append(b)
-        if not bases:
-            out = None
-        elif len(bases) == 1:
-            out = bases[0]
-        else:
-            M = torch.cat(bases, dim=1)
-            Q, Rm = torch.linalg.qr(M)
-            out = Q[:, torch.abs(torch.diagonal(Rm)) > 1e-6]
-        cache[layer_idx] = out
-        return out
-
-    return lookup
-
-
 def _kv_preservation_lookup(acts: Optional[dict], rank: int):
     cache: dict = {}
 
@@ -1347,8 +1319,6 @@ def _direction_kwargs(cfg):
         "min_norm_frac": float(getattr(cfg, "multi_refusal_min_norm", 0.08)),
         "min_separation": float(getattr(cfg, "multi_refusal_min_separation", 0.05)),
         "min_coverage": float(getattr(cfg, "multi_refusal_min_coverage", 0.05)),
-        "kl_whiten": float(getattr(cfg, "kl_whiten", 0.0)),
-        "kl_whiten_shrink": float(getattr(cfg, "kl_whiten_shrink", 0.1)),
     }
 
 
@@ -1554,21 +1524,7 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
         elif cfg.preserve_rank > 0:
             preserve_acts = al
             preserve_source = "harmless"
-        cap_acts = None
-        if (getattr(cfg, "capability_preserve", True) and cfg.capability_preserve_rank > 0
-                and cfg.capability_preserve_path):
-            _log("collecting capability (math/code) activations for preservation ...")
-            cap_prompts = _cached_prompts(cfg, "capability_preserve", cfg.capability_preserve_path,
-                                          cfg.capability_preserve_n, cfg.seed)
-            if cap_prompts:
-                cap_acts = _cached_collect(bundle, cap_prompts, cfg.batch_size, cfg, "capability_preserve")
-                _log(f"capability preservation: rank={cfg.capability_preserve_rank} prompts={len(cap_prompts)}")
-        if cap_acts is not None:
-            preserve_lookup = _combined_preservation_lookup(
-                [(preserve_acts, cfg.preserve_rank), (cap_acts, cfg.capability_preserve_rank)])
-            preserve_source = (preserve_source + "+capability") if preserve_acts is not None else "capability"
-        else:
-            preserve_lookup = _preservation_lookup(preserve_acts, cfg.preserve_rank)
+        preserve_lookup = _preservation_lookup(preserve_acts, cfg.preserve_rank)
         preserve_basis = preserve_lookup(L_dir)
         if ple_al is not None:
             ple_preserve_lookup = _preservation_lookup(ple_al, min(4, max(1, cfg.preserve_rank)))
@@ -1591,8 +1547,10 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
         # oblique edit preserves the harmless mean; the whole search then optimizes it.
         mu = al[L_dir].mean(0)
         controller.enable_oblique(mu, cfg.oblique_strength, cfg.oblique_denom_floor,
-                                  writers_only=getattr(cfg, "oblique_writers_only", True))
-        _log(f"oblique ablation enabled (strength={cfg.oblique_strength}, "
+                                  writers_only=getattr(cfg, "oblique_writers_only", True),
+                                  predictive=getattr(cfg, "oblique_predictive", False), harmless=al[L_dir],
+                                  ridge=getattr(cfg, "predictive_ridge", 1e-2), harmless_layers=al)
+        _log(f"oblique ablation enabled (predictive={getattr(cfg, 'oblique_predictive', False)}, "
              f"writers_only={getattr(cfg, 'oblique_writers_only', True)}, |mu|={float(mu.norm()):.2f})")
     if reader_mode:
         # gemma2/3/4-style post-norm: writer edits get renormalized away, so ablate
@@ -1911,7 +1869,6 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
         "kl_eval_n": cfg.kl_eval_n,
         "oblique_ablation": bool(controller.edits[0].get("U") is not None),
         "oblique_strength": cfg.oblique_strength,
-        "kl_whiten": cfg.kl_whiten,
         "opt_capability": cfg.opt_capability,
         "opt_capability_weight": cfg.opt_capability_weight,
         "timings_sec": timings,

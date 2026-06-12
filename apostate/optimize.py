@@ -225,8 +225,6 @@ def _direction_kwargs(cfg):
         "min_norm_frac": float(getattr(cfg, "multi_refusal_min_norm", 0.08)),
         "min_separation": float(getattr(cfg, "multi_refusal_min_separation", 0.05)),
         "min_coverage": float(getattr(cfg, "multi_refusal_min_coverage", 0.05)),
-        "kl_whiten": float(getattr(cfg, "kl_whiten", 0.0)),
-        "kl_whiten_shrink": float(getattr(cfg, "kl_whiten_shrink", 0.1)),
     }
 
 

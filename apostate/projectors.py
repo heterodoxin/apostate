@@ -10,8 +10,8 @@ from .model import ModelBundle
 
 
 def oblique_vectors(R: torch.Tensor, mu: torch.Tensor, strength: float, denom_floor: float = 0.2):
-    # E = I - Rbake U^T. U = R minus strength*its harmless-mean part (U^T mu = 0 => E mu = mu);
-    # Rbake = R (U^T R)^-1 (E R = 0). strength clamps down if U^T R is ill-conditioned.
+    # E = I - Rbake U^T. U = R minus strength*its harmless-mean part (E mu = mu); Rbake = R(U^T R)^-1
+    # (E R = 0). strength clamps down if U^T R is ill-conditioned (R near-parallel to mu).
     R = R.float()
     mu = mu.float()
     mhat = mu / (mu.norm() + 1e-8)
@@ -29,6 +29,28 @@ def oblique_vectors(R: torch.Tensor, mu: torch.Tensor, strength: float, denom_fl
                 pass
         s -= 0.05
     return R, R  # fell back to symmetric
+
+
+def predictive_covector(R: torch.Tensor, harmless: torch.Tensor, ridge: float = 1e-2):
+    # read co-vector D = R - W, W = harmless ridge-predictor of R^T x from x orthogonal to R.
+    # harmless R-variance is predictable (W reproduces it) so D^T x ~ 0 there -> preserved;
+    # the harmful refusal excursion is OOD for W -> D^T x large -> removed. E R = 0 (W _|_ R),
+    # E mu ~ mu, but preserves harmless VARIANCE along R, not just the mean. bake: U = D, Rbake = R.
+    R = R.float()
+    X = harmless.float()
+    Xp = X - (X @ R) @ R.t()          # harmless with the R-subspace removed
+    try:
+        G = Xp.t() @ Xp
+        lam = float(ridge) * (float(torch.diagonal(G).mean()) + 1e-8)
+        G = G + lam * torch.eye(G.shape[0], dtype=G.dtype, device=G.device)
+        W = torch.linalg.solve(G, Xp.t() @ (X @ R))   # [hidden, r]
+        W = W - R @ (R.t() @ W)       # keep W orthogonal to R
+        D = R - W
+        if not torch.isfinite(D).all():
+            return None, None
+        return D, R                   # U = D, Rbake = R
+    except RuntimeError:
+        return None, None
 
 
 class ProjectionController:
@@ -82,7 +104,7 @@ class ProjectionController:
         self._ple_model_projection = b.ple_model_projection()
         self._modules = [self._embed]
         self._final = b.final_norm()
-        for layer in b.layers():
+        for li, layer in enumerate(b.layers()):
             writers = b.layer_writers(layer)
             ple = tuple(b.ple_writers(layer))
             ple_proj = tuple(b.ple_projection_writers(layer))
@@ -90,6 +112,8 @@ class ProjectionController:
             query = tuple(b.query_writers(layer))
             self._residual_layers.append(layer)
             self._layer_writers.append(writers)
+            for m in writers:  # writer module -> layer index, for per-layer oblique co-vectors
+                self._module_layer[id(m)] = li
             self._reader_modules.append(tuple(b.reader_modules(layer)))
             self._kv_writers.append(kv)
             self._query_writers.append(query)
@@ -180,6 +204,20 @@ class ProjectionController:
             oblique = False
         if oblique:
             left = self._cast_field(edit, "Rbake", "_rbcast", dtype, device)
+            U_layers = edit.get("U_layers")
+            if U_layers is not None and mod_id is not None:
+                L = self._module_layer.get(mod_id)
+                if L is not None and L in U_layers:
+                    cache = edit.get("_ucast_layers")
+                    if cache is None:
+                        cache = {}
+                        edit["_ucast_layers"] = cache
+                    key = (L, dtype, device)
+                    right = cache.get(key)
+                    if right is None:
+                        right = U_layers[L].to(dtype=dtype, device=device)
+                        cache[key] = right
+                    return left, right
             right = self._cast_field(edit, "U", "_ucast", dtype, device)
             return left, right
         Rd = self._cast(edit, dtype, device)
@@ -260,12 +298,20 @@ class ProjectionController:
                            "U": None, "Rbake": None})
 
     def enable_oblique(self, mu: torch.Tensor, strength: float = 1.0, denom_floor: float = 0.2,
-                       writers_only: bool = True):
+                       writers_only: bool = True, predictive: bool = False, harmless=None, ridge: float = 1e-2,
+                       harmless_layers=None):
         # store the harmless mean; oblique vectors refresh against whatever R is set later.
         self._oblique_mean = mu.to(self.device).float()
         self._oblique_strength = float(strength)
         self._oblique_floor = float(denom_floor)
         self._oblique_writers_only = bool(writers_only)
+        self._oblique_predictive = bool(predictive)
+        self._oblique_ridge = float(ridge)
+        self._oblique_harmless = harmless.to(self.device).float() if harmless is not None else None
+        # per-layer harmless activations (kept on cpu; streamed to gpu per-layer during refresh).
+        self._oblique_harmless_layers = (
+            [a.detach().float().cpu() if a is not None else None for a in harmless_layers]
+            if harmless_layers is not None else None)
         for e in self.edits:
             self._refresh_oblique(e)
 
@@ -282,11 +328,33 @@ class ProjectionController:
         mu = getattr(self, "_oblique_mean", None)
         edit["_ucast"] = None
         edit["_rbcast"] = None
+        edit["_ucast_layers"] = None
+        edit["U_layers"] = None
         if mu is None or edit.get("kind") != "hidden" or edit.get("name") != "primary" or edit.get("R") is None:
             edit["U"] = None
             edit["Rbake"] = None
             return
-        U, Rbake = oblique_vectors(edit["R"], mu, self._oblique_strength, self._oblique_floor)
+        U = Rbake = None
+        predictive = getattr(self, "_oblique_predictive", False)
+        ridge = getattr(self, "_oblique_ridge", 1e-2)
+        hl_layers = getattr(self, "_oblique_harmless_layers", None)
+        if predictive and hl_layers is not None:
+            # per-layer D_L = R - W_L so each writer layer preserves ITS OWN harmless variance.
+            U_layers = {}
+            for L, hl in enumerate(hl_layers):
+                if hl is None:
+                    continue
+                D_L, _ = predictive_covector(edit["R"], hl.to(self.device), ridge)
+                if D_L is not None:
+                    U_layers[L] = D_L.to(self.device).float()
+            if U_layers:
+                edit["U_layers"] = U_layers
+                U = next(iter(U_layers.values()))  # fallback for any layer without per-layer D
+                Rbake = edit["R"]
+        elif predictive and getattr(self, "_oblique_harmless", None) is not None:
+            U, Rbake = predictive_covector(edit["R"], self._oblique_harmless, ridge)
+        if U is None:
+            U, Rbake = oblique_vectors(edit["R"], mu, self._oblique_strength, self._oblique_floor)
         edit["U"] = U.to(self.device).float()
         edit["Rbake"] = Rbake.to(self.device).float()
 
@@ -713,6 +781,10 @@ class ProjectionController:
                 "layer_alphas": layer_alphas,
                 "U": e["U"].detach().cpu() if e.get("U") is not None else None,
                 "Rbake": e["Rbake"].detach().cpu() if e.get("Rbake") is not None else None,
+                "U_layers": ([
+                    e["U_layers"][i].detach().cpu() if i in e["U_layers"] else None
+                    for i in range(len(self._layer_writers))
+                ] if e.get("U_layers") else None),
                 "oblique_writers_only": self._oblique_writers_only,
             })
         return {"edits": out_edits}
