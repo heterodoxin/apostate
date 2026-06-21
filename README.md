@@ -11,7 +11,8 @@ The edit touches modules that write back into the residual stream: token embeddi
 
 ## Downloads
 
-- [Qwen3.6 27B Apostate](https://huggingface.co/heterodoxin/qwen3.6-27b-apostate)
+- [Qwen3.6 27B Apostate](https://huggingface.co/heterodoxin/qwen3.6-27b-apostate) — bf16 weights
+- [Qwen3.6 27B Apostate GGUF](https://huggingface.co/heterodoxin/qwen3.6-27b-apostate-gguf) — Q5_K_M
 - [Qwen2.5 7B Instruct Apostate](https://huggingface.co/heterodoxin/qwen2.5-7b-instruct-apostate)
 
 Gemma 4 E4B is not listed as a passing release. The stale HF repo at
