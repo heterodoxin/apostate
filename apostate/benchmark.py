@@ -15,6 +15,7 @@ import tempfile
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
+from . import accel
 from .model import ModelBundle
 from .data import resolve_prompts, format_chat
 from .evaluate import is_refusal, judge_refusal
@@ -51,17 +52,31 @@ def _load(path: str):
             base_path = json.load(f)["base_model_name_or_path"]
         adapter_dir = path
 
-    bnb = BitsAndBytesConfig(
-        load_in_4bit=True, bnb_4bit_quant_type="nf4",
-        bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=torch.bfloat16,
-    )
+    dev = accel.resolve_device("auto")
+    accel.require_gpu(dev)
+    accel.gpu_smoke_test(dev)
+    bnb_ok, why = accel.bitsandbytes_status()
+    use_4bit = bnb_ok and dev == "cuda"
+    if not use_4bit:
+        print(f"[bench] bitsandbytes not usable ({why}); loading {base_path} in bf16.", flush=True)
+    accel.maybe_preflight(dev, model_id=base_path, load_in_4bit=use_4bit, compute_dtype="bfloat16")
+
     tok = AutoTokenizer.from_pretrained(base_path, trust_remote_code=True)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
     tok.padding_side = "left"
-    model = AutoModelForCausalLM.from_pretrained(
-        base_path, quantization_config=bnb, device_map={"": 0}, trust_remote_code=True,
-    )
+    if use_4bit:
+        bnb = BitsAndBytesConfig(
+            load_in_4bit=True, bnb_4bit_quant_type="nf4",
+            bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=torch.bfloat16,
+        )
+        model = AutoModelForCausalLM.from_pretrained(
+            base_path, quantization_config=bnb, device_map={"": 0}, trust_remote_code=True,
+        )
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            base_path, torch_dtype=torch.bfloat16, device_map={"": dev}, trust_remote_code=True,
+        )
     if adapter_dir:
         from peft import PeftModel
 

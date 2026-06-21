@@ -26,17 +26,26 @@ def _masked_mean(t: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
     return (t * m).sum(dim=1) / m.sum(dim=1).clamp_min(1.0)
 
 
-def _prompt_batches(bundle, tok, prompts, batch_size, device):
+# cap prompt length during activation collection; prevents outlier-length prompts from padding
+# an entire batch to thousands of tokens and making O(n²) attention cost blow up.
+_ACT_MAX_LEN = 768
+
+
+def _prompt_batches(bundle, tok, prompts, batch_size, device, max_len: int = _ACT_MAX_LEN):
     cache = getattr(bundle, "_act_enc_cache", None)
     if cache is None:
         cache = {}
         setattr(bundle, "_act_enc_cache", cache)
-    key = (tuple(prompts), batch_size, str(device))
+    key = (tuple(prompts), batch_size, str(device), max_len)
     if key not in cache:
+        # sort by approximate length so each batch pads to its own local max (not global).
+        # downstream callers (refusal_subspace, causal_scores) use means/PCA — order-insensitive.
+        sorted_prompts = sorted(prompts, key=len, reverse=True)
         batches = []
-        for i in range(0, len(prompts), batch_size):
-            batch = prompts[i : i + batch_size]
-            enc = tok(batch, return_tensors="pt", padding=True, add_special_tokens=False)
+        for i in range(0, len(sorted_prompts), batch_size):
+            batch = sorted_prompts[i : i + batch_size]
+            enc = tok(batch, return_tensors="pt", padding=True, truncation=True,
+                      max_length=max_len, add_special_tokens=False)
             batches.append({k: v.to(device) for k, v in enc.items()})
         cache[key] = batches
     return cache[key]
@@ -139,7 +148,7 @@ def collect_activations(
     def make_hook(layer: int):
         def hook(_mod, _inp, out):
             t = _out_tensor(out)
-            per_layer[layer].append(t[:, -1, :].detach().float().cpu())
+            per_layer[layer].append(t[:, -1, :].detach().to(torch.float16).cpu())
         return hook
 
     for layer, mod in enumerate(bundle.layers()):
@@ -206,7 +215,7 @@ def collect_response_activations(
     def make_hook(layer: int):
         def hook(_mod, _inp, out):
             t = _out_tensor(out)
-            per_layer[layer].append(_masked_mean(t, current_mask[0]).detach().float().cpu())
+            per_layer[layer].append(_masked_mean(t, current_mask[0]).detach().to(torch.float16).cpu())
         return hook
 
     for layer, mod in enumerate(bundle.layers()):
@@ -434,7 +443,7 @@ def collect_ple_gate_activations(
     def make_hook(layer: int):
         def hook(_mod, _inp, out):
             t = _out_tensor(out)
-            per_layer[layer].append(_masked_mean(t, current_mask[0]).detach().float().cpu())
+            per_layer[layer].append(_masked_mean(t, current_mask[0]).detach().to(torch.float16).cpu())
         return hook
 
     for layer, mods in enumerate(modules):
@@ -476,7 +485,7 @@ def collect_ple_projection_activations(
     def make_hook(layer: int):
         def hook(_mod, _inp, out):
             t = _out_tensor(out)
-            per_layer[layer].append(_masked_mean(t, current_mask[0]).detach().float().cpu())
+            per_layer[layer].append(_masked_mean(t, current_mask[0]).detach().to(torch.float16).cpu())
         return hook
 
     for layer, mods in enumerate(modules):

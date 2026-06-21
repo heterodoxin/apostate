@@ -39,9 +39,12 @@ def run_guard(
     eval_harmless = eval_harmless or harmless[: cfg.opt_eval_n]
 
     for it in range(cfg.guard_max_iters):
+        # collect residual activations with ablation active (measures what leakage remains)
+        # but do it in a separate context from generation so we don't compound hook overhead
         with controller.active():
             ah = collect_layer_activations(bundle, harmful, direction_layer, cfg.batch_size)
             al = collect_layer_activations(bundle, harmless, direction_layer, cfg.batch_size)
+        with controller.active():
             ref = refusal_rate(bundle, eval_harmful, cfg.opt_gen_tokens, cfg.batch_size)
         kl = kl_harmless(bundle, controller, eval_harmless, cfg.batch_size, positions=cfg.kl_positions)
         sep = separation(ah, al)

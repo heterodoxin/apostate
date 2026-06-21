@@ -18,12 +18,8 @@ def _dedupe_modules(mods: List[torch.nn.Module]) -> List[torch.nn.Module]:
 
 
 def _iter_expert_modules(experts) -> List[torch.nn.Module]:
-    """Return expert modules from both list-like and packed MoE containers.
-
-    Some architectures expose ``mlp.experts`` as a ModuleList/list; others
-    expose a single packed module like Qwen3_5MoeExperts or Glm4MoeNaiveMoe,
-    which is a torch.nn.Module but does not implement len().
-    """
+    # Returns expert modules from both list-like and packed MoE containers.
+    # Packed modules like Qwen3_5MoeExperts are a single torch.nn.Module without len().
     if experts is None:
         return []
 
@@ -56,7 +52,6 @@ def _shared_expert_modules(mod) -> List[torch.nn.Module]:
 
 
 def _packed_expert_reader(mod):
-    """Detect packed expert modules with reader-side packed parameters."""
     if mod is None:
         return None
     for name in ("gate_proj", "up_proj", "w1", "w3", "gate_up_proj"):
@@ -138,7 +133,6 @@ def _compatible_mlp_readers(self, layer: torch.nn.Module) -> List[torch.nn.Modul
 
 
 def apply_model_bundle_patches() -> None:
-    """Install MoE compatibility patches for custom packed expert containers."""
     bundle = _model.ModelBundle
     if getattr(bundle, "_packed_moe_compat_patched", False):
         return

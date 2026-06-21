@@ -1,4 +1,4 @@
-"""apostate cli. no args opens the tui; subcommands run the engine."""
+# apostate cli. no args opens the tui; subcommands run the engine.
 
 from __future__ import annotations
 
@@ -17,7 +17,9 @@ DEFAULT_MODEL = "Qwen/Qwen2.5-7B-Instruct"
 HELP = """\
 apostate            interactive menu (default)
 apostate setup      install python deps, check gpu
+apostate doctor     verify the GPU can run a kernel before any big load (cuda/rocm)
 apostate ablate --model M --out D   remove refusals (--resume reuses activation cache)
+apostate finetune --model M --out D [--data path.jsonl] [--steps N]  QLoRA finetune (train alias)
 apostate test   --model D --base M  benchmark (--suite humaneval,mbpp,gsm8k,refusal,all)
 apostate talk   --model D [--backend vllm]   chat
 apostate list       show cached hf models + local checkpoints
@@ -25,7 +27,6 @@ apostate list       show cached hf models + local checkpoints
 
 
 def run_module(mod_args, label=None) -> int:
-    """run a python -m subcommand with the engine on the path."""
     env = dict(os.environ, PYTHONPATH=str(ROOT), PYTHONUNBUFFERED="1")
     if label:
         env["APOSTATE_COMMAND"] = label
@@ -69,6 +70,9 @@ def main(argv=None) -> int:
         from .setup_wizard import main as setup_main
         return setup_main(args)
 
+    if cmd == "doctor":
+        return run_module(["-m", "apostate.doctor", *args], "apostate doctor")
+
     if cmd in ("ablate", "boost"):
         model = _flag(args, "--model", DEFAULT_MODEL)
         out = _flag(args, "--out", _flag(args, "--output-dir", "out"))
@@ -100,7 +104,7 @@ def main(argv=None) -> int:
         return run_module(["-m", "apostate.chat", *args], f"apostate talk {' '.join(args)}".strip())
     if cmd == "quantize":
         return run_module(["-m", "apostate.quant", *args])
-    if cmd == "train":
+    if cmd in ("train", "finetune"):
         return run_module(["-m", "apostate.finetune", *args])
 
     if cmd == "list":

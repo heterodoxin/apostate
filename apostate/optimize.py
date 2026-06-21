@@ -122,11 +122,16 @@ def run_search(objective: Objective, space: Space, n_trials: int, seed: int = 0,
 def _kl_loss(kl: float, cfg) -> float:
     over_target = max(0.0, kl - cfg.kl_target)
     over_budget = max(0.0, kl - cfg.max_kl)
+    # headroom bonus: rewards KL well below budget so TPE can push strength higher to reduce refusal.
+    # prevents KL=0.004 and KL=0.048 from looking nearly equal in the loss.
+    headroom = max(0.0, cfg.max_kl - kl)
+    headroom_bonus = cfg.kl_headroom_weight * headroom * headroom
     return (
         cfg.kl_weight * kl
         + cfg.kl_quad_weight * kl * kl
         + cfg.kl_target_weight * over_target
         + cfg.kl_over_budget_weight * over_budget
+        - headroom_bonus
     )
 
 

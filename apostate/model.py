@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
+from . import accel
 from .config import ApostateConfig
+
+
+def _log(msg: str):
+    print(f"[apostate] {msg}", flush=True)
 
 _DTYPES = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}
 _DECODER_PATHS = (
@@ -508,16 +513,46 @@ class ModelBundle:
 
 def load_model(cfg: ApostateConfig) -> ModelBundle:
     torch.manual_seed(cfg.seed)
-    if cfg.device == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError(
-            "cuda requested but torch cannot see a gpu. "
-            f"torch={torch.__version__}, cuda_build={torch.version.cuda}. "
-            "install cuda torch, for example: "
-            "python -m pip install --force-reinstall --index-url "
-            "https://download.pytorch.org/whl/cu128 torch torchvision torchaudio"
-        )
+
+    # 'auto' -> concrete device; ROCm resolves to 'cuda' (its runtime uses the
+    # cuda device string). Store it back so reports record the real device.
+    cfg.device = accel.resolve_device(cfg.device)
+    accel.require_gpu(cfg.device)  # backend-aware error (steers AMD users to the ROCm wheel)
+    backend = accel.gpu_backend()
+
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
+
+    # decide quantization up front so the VRAM preflight reflects what we'll load.
+    use_4bit = bool(cfg.load_in_4bit) and cfg.device == "cuda"
+    if use_4bit:
+        ok, why = accel.bitsandbytes_status()
+        if not ok:
+            # don't crash mid-load or silently mis-allocate: drop to full precision.
+            # the preflight below catches the case where bf16 then won't fit.
+            _log(f"4-bit requested but bitsandbytes is not usable here ({why}); "
+                 f"falling back to {cfg.compute_dtype}. on ROCm, install a ROCm-enabled "
+                 f"bitsandbytes or run with --no-load-in-4bit.")
+            use_4bit = False
+        elif backend == "rocm":
+            _log("note: bitsandbytes 4-bit on ROCm is experimental; if it errors or "
+                 "produces garbage, rerun with --no-load-in-4bit (bf16 fits a 24GB+ card "
+                 "for <=14B models).")
+
+    # anti-freeze guards: confirm the runtime can execute a kernel for this arch,
+    # then confirm the model fits in VRAM -- both BEFORE the big allocation. an
+    # over-allocation or an unsupported-arch kernel can hang amdgpu and freeze the
+    # whole machine, so we fail fast and cheap on the cpu side instead.
+    accel.gpu_smoke_test(cfg.device, log=_log)
+    accel.maybe_preflight(
+        cfg.device,
+        model_id=cfg.model,
+        load_in_4bit=use_4bit,
+        compute_dtype=cfg.compute_dtype,
+        batch_size=cfg.batch_size,
+        log=_log,
+    )
+
     tok = AutoTokenizer.from_pretrained(cfg.model, trust_remote_code=True)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
@@ -525,7 +560,7 @@ def load_model(cfg: ApostateConfig) -> ModelBundle:
 
     compute_dtype = _DTYPES[cfg.compute_dtype]
     kwargs = dict(trust_remote_code=True, low_cpu_mem_usage=True)
-    if cfg.load_in_4bit and cfg.device == "cuda":
+    if use_4bit:
         kwargs["quantization_config"] = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",

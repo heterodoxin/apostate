@@ -10,7 +10,7 @@ class ApostateConfig:
     model: str = "Qwen/Qwen3-8B"
     output_dir: str = "apostate-out"
     profile: str = "balanced"
-    device: str = "cuda"
+    device: str = "auto"  # auto -> cuda/rocm if present, else mps/xpu/cpu (see apostate.accel)
     load_in_4bit: bool = True
     compute_dtype: str = "bfloat16"
     seed: int = 0
@@ -104,6 +104,7 @@ class ApostateConfig:
     kl_target: float = 0.04
     kl_target_weight: float = 18.0
     kl_quad_weight: float = 22.0
+    kl_headroom_weight: float = 0.0
     kl_over_budget_weight: float = 72.0
     refusal_target_weight: float = 4.0
     refusal_quad_weight: float = 8.0
@@ -179,6 +180,46 @@ class ApostateConfig:
             if self.n_trials == 16:
                 self.n_trials = 8
         model_l = (self.model or "").lower()
+
+        # Large model auto-scaling: loosen search budget and raise rank ceiling.
+        # 27B-72B models have more distributed refusal circuits than 7B-14B.
+        _large_tags = ("27b", "28b", "32b", "34b", "40b", "70b", "72b", "65b", "123b")
+        if any(t in model_l for t in _large_tags):
+            if self.max_rank == 3:
+                self.max_rank = 6
+            if self.n_trials == 16:
+                self.n_trials = 32
+            if self.refusal_rank == 1:
+                self.refusal_rank = 2
+            if self.causal_floor == 0.10:
+                self.causal_floor = 0.05
+            # trade KL headroom for lower refusal on large models
+            if self.kl_target == 0.04:
+                self.kl_target = 0.10
+            if self.max_kl == 0.12:
+                self.max_kl = 0.18
+            if self.kl_weight == 6.0:
+                self.kl_weight = 2.0
+            if self.kl_target_weight == 18.0:
+                self.kl_target_weight = 6.0
+            if self.kl_over_budget_weight == 72.0:
+                self.kl_over_budget_weight = 20.0
+            if self.kl_quad_weight == 22.0:
+                self.kl_quad_weight = 8.0
+            if self.kl_headroom_weight == 0.0:
+                self.kl_headroom_weight = 12.0
+            if self.repair_eval_n == 96:
+                self.repair_eval_n = 64
+            if self.opt_rerank_k == 5:
+                self.opt_rerank_k = 3
+            # large models set target_refusal=0.02 so the balanced-profile opt_eval_n bump
+            # (which only fires when target_refusal<=0) never runs — fix it here explicitly.
+            # at 32 samples the minimum measurable refusal is 1/32=3.1% > target, pure noise.
+            if self.opt_eval_n == 32:
+                self.opt_eval_n = 64
+            if self.target_refusal == 0.0:
+                self.target_refusal = 0.02
+
         if "gemma-4" in model_l or "gemma4" in model_l:
             # gemma 4 e4b is big; trim the batch so 4-bit fits a 16gb card. rank stays
             # at the default 1 (reader-side ablation, see model.uses_post_norm).

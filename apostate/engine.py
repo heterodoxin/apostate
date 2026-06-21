@@ -26,7 +26,7 @@ from .activations import (
     collect_ple_projection_activations,
     collect_ple_embed_activations,
 )
-from .directions import refusal_subspace, preservation_subspace, gram_schmidt_remove, separation, causal_layer_scores
+from .directions import refusal_subspace, preservation_subspace, gram_schmidt_remove, separation, causal_layer_scores, causal_layer_scores_fast
 from .projectors import ProjectionController
 from .guard import run_guard, run_reader_guard
 from .evaluate import (
@@ -55,7 +55,10 @@ def _prompt_hash(instructions) -> str:
 
 
 def _activation_cache_dir(cfg: ApostateConfig) -> str:
-    return cfg.activation_cache_dir or os.path.join(cfg.output_dir, "activation_cache")
+    if cfg.activation_cache_dir:
+        return cfg.activation_cache_dir
+    # default outside output_dir so it survives output dir deletion/restarts
+    return os.path.join(os.path.expanduser("~/.apostate"), "activation_cache")
 
 
 def _cached_collect(bundle, instructions, batch_size: int, cfg: ApostateConfig, name: str, preformatted: bool = False):
@@ -1598,14 +1601,14 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
         mark("head_sweep")
     elif cfg.optimize:
         Rseed, _ = refusal_subspace(
-            ah[L_dir], al[L_dir], rank=1, max_rank=cfg.max_rank, seed=cfg.seed,
+            ah[L_dir], al[L_dir], rank=cfg.refusal_rank, max_rank=cfg.max_rank, seed=cfg.seed,
             **_direction_kwargs(cfg),
         )
         controller.set_subspace(gram_schmidt_remove(Rseed, preserve_basis))
         if cfg.causal_targeting:
-            _log("scoring per-layer causal importance (prior) ...")
-            causal_shape = causal_layer_scores(
-                bundle, controller, eval_harmful[: cfg.opt_eval_n], cfg.batch_size,
+            _log("scoring per-layer causal importance (fast activation projection) ...")
+            causal_shape = causal_layer_scores_fast(
+                ah, al, Rseed,
                 floor=cfg.causal_floor, temperature=cfg.causal_temperature,
             )
         else:
@@ -1680,7 +1683,10 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
         skip_guard = ref_quick <= cfg.target_refusal
     if guard_skip_reason is None and ((not cfg.optimize) or cfg.opt_guard) and not skip_guard:
         _log("running reconstruction guard ...")
-        gcap = max(256, cfg.opt_eval_n)
+        # cap at opt_eval_n: 256 was running all 64 projection hooks × 256 samples,
+        # which caused multi-hour guard timing on large models. opt_eval_n (64) is plenty
+        # for direction re-estimation; the guard's refusal/kl eval uses the same count anyway.
+        gcap = cfg.opt_eval_n
         guard_hist = run_guard(
             bundle, controller, fit_harmful[:gcap], harmless[:gcap], cfg, L_dir, initial_sep,
             preserve_basis,

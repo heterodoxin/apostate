@@ -1,12 +1,18 @@
+# NOTE: torch/torchvision/torchaudio are NOT listed here -- install them first,
+# from the wheel index that matches your GPU backend, because the default PyPI
+# torch is a CUDA build and cannot see an AMD GPU:
+#   CUDA : pip install --index-url https://download.pytorch.org/whl/cu128  torch torchvision torchaudio
+#   ROCm : pip install --index-url https://download.pytorch.org/whl/rocm6.4 torch torchvision torchaudio
+#          (RDNA4 / gfx12xx needs ROCm >= 6.4; `apostate setup` does this for you)
 numpy==2.2.6
 fsspec==2026.2.0
 transformers
 datasets
 safetensors
 optuna
-bitsandbytes
+bitsandbytes  # CUDA-first; only used for 4-bit. On ROCm it's unused (apostate falls back to bf16).
 peft
-accelerate
+accelerate    # required: powers the meta-device VRAM preflight in apostate.accel
 requests
 sentencepiece
 protobuf

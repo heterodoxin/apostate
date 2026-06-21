@@ -1,4 +1,4 @@
-"""textual tui: pick an action and a model, then run the matching cli command."""
+# textual tui: pick an action and a model, then run the matching cli command.
 
 from __future__ import annotations
 
@@ -71,8 +71,6 @@ Input { width: 60; background: black; border: tall #313244; }
 
 
 class Pick(ModalScreen[Optional[str]]):
-    """list picker; returns the chosen value (or None on escape)."""
-
     BINDINGS = [("escape", "dismiss", "back")]
 
     def __init__(self, prompt: str, options: List[str], allow_custom: bool = False):
@@ -110,8 +108,6 @@ class Pick(ModalScreen[Optional[str]]):
 
 
 class AskText(ModalScreen[Optional[str]]):
-    """single text input; returns the string (or None on escape)."""
-
     BINDINGS = [("escape", "dismiss", "back")]
 
     def __init__(self, prompt: str):
@@ -133,8 +129,6 @@ class AskText(ModalScreen[Optional[str]]):
 
 
 class MultiPick(ModalScreen[Optional[str]]):
-    """checkbox list (space toggles, enter runs); returns a comma-joined string."""
-
     BINDINGS = [("escape", "dismiss", "back"), ("space", "toggle", "toggle")]
 
     def __init__(self, prompt: str, options: List[tuple], default: set):
@@ -272,7 +266,6 @@ class Apostate(App):
             self.run_cli(["talk", "--model", model, "--quant", quant])
 
     def run_cli(self, args: List[str]) -> None:
-        """drop to the terminal, run `apostate <args>`, then return to the menu."""
         env = dict(os.environ, PYTHONPATH=str(ROOT), PYTHONUNBUFFERED="1")
         with self.suspend():
             subprocess.run([sys.executable, "-m", "apostate", *args], env=env)

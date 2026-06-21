@@ -1,4 +1,4 @@
-"""find local models: huggingface cache ids and baked checkpoint dirs."""
+# find local models: huggingface cache ids and baked checkpoint dirs.
 
 from __future__ import annotations
 
@@ -38,7 +38,6 @@ def _has_snapshot(d: Path) -> bool:
 
 
 def hf_models() -> List[str]:
-    """repo ids sitting in the HF cache (models--org--name -> org/name)."""
     out, seen = [], set()
     for root in _hf_cache_roots():
         try:
@@ -57,7 +56,6 @@ def hf_models() -> List[str]:
 
 
 def checkpoints() -> List[str]:
-    """local dirs that look like a saved model (config + safetensors)."""
     out, seen = [], set()
     for base in (Path.cwd(), Path(__file__).resolve().parent.parent):
         try:
@@ -82,7 +80,6 @@ def _is_model_dir(files) -> bool:
 
 
 def is_apostate_dir(path: Path, files=None) -> bool:
-    """true if this dir was baked by apostate (marker file or -apostate name)."""
     try:
         files = files if files is not None else {f.name for f in Path(path).iterdir()}
     except OSError:
@@ -94,7 +91,6 @@ def is_apostate_dir(path: Path, files=None) -> bool:
 
 
 def apostate_checkpoints() -> List[str]:
-    """fast local pass: apostate-baked dirs in cwd / repo root."""
     return [c for c in checkpoints() if is_apostate_dir(Path(c))]
 
 

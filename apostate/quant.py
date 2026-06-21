@@ -29,17 +29,25 @@ def _model_size_gb(path: str) -> float:
     return total / 1e9
 
 
+def _low_mem_quant() -> str:
+    # 4-bit needs working bitsandbytes; on ROCm-without-bnb fall back to bf16
+    # rather than picking a mode that errors (or hangs) at load.
+    from . import accel
+    ok, _ = accel.bitsandbytes_status()
+    return "nf4" if ok else "bf16"
+
+
 def auto_quant(model_path: str) -> str:
     try:
         if not torch.cuda.is_available():
             return "bf16"
         free = torch.cuda.mem_get_info()[0] / 1e9
     except Exception:
-        return "nf4"
+        return _low_mem_quant()
     size = _model_size_gb(model_path)
     if size and free > size * 1.25 + 1.5:
         return "bf16"
-    return "nf4"
+    return _low_mem_quant()
 
 
 def quant_kwargs(mode: str, tokenizer=None, calib=None) -> dict:
@@ -51,6 +59,14 @@ def quant_kwargs(mode: str, tokenizer=None, calib=None) -> dict:
         return {"dtype": torch.float16}
 
     from transformers import BitsAndBytesConfig
+    if mode in ("int8", "nf4", "fp4"):
+        from . import accel
+        ok, why = accel.bitsandbytes_status()
+        if not ok:
+            raise RuntimeError(
+                f"quant '{mode}' needs bitsandbytes but it is not usable here ({why}). "
+                "use --quant bf16 (or fp16), or install a ROCm-enabled bitsandbytes."
+            )
     if mode == "int8":
         return {"quantization_config": BitsAndBytesConfig(load_in_8bit=True)}
     if mode in ("nf4", "fp4"):

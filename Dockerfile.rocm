@@ -1,0 +1,71 @@
+# ROCm (AMD GPU) image for apostate.
+#
+# Differs from the CUDA Dockerfile on purpose:
+#   - ROCm base image (ships the ROCm userspace runtime), not nvidia/cuda
+#   - torch from the ROCm wheel index, not cu128
+#   - no bitsandbytes (4-bit is experimental on ROCm; apostate runs bf16)
+#   - python entrypoint (no node shim)
+#
+# RDNA4 / gfx12xx (e.g. Radeon AI PRO R9700, RX 9070) needs ROCm >= 6.4. Bump
+# ROCM_VERSION / the wheel index together if your card needs a newer runtime.
+#
+# Build:  docker build -f Dockerfile.rocm -t apostate-rocm \
+#             --build-arg USER_ID=$(id -u) --build-arg GROUP_ID=$(id -g) .
+# Run:    docker run --rm -it \
+#             --device=/dev/kfd --device=/dev/dri --group-add video \
+#             --security-opt seccomp=unconfined --shm-size=8g \
+#             -v "$PWD:/host" -w /host apostate-rocm doctor
+#         (NOTE: ROCm uses --device/--group-add, NOT the NVIDIA-only `--gpus all`.)
+
+ARG ROCM_VERSION=6.4.1
+FROM rocm/dev-ubuntu-22.04:${ROCM_VERSION}-complete AS apostate-rocm
+
+ARG USER_ID=1000
+ARG GROUP_ID=1000
+ARG ROCM_WHEEL_INDEX=https://download.pytorch.org/whl/rocm6.4
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    software-properties-common \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
+    python3.12 \
+    python3.12-venv \
+    python3.12-dev \
+    curl \
+    git \
+    build-essential \
+    && ln -sf /usr/bin/python3.12 /usr/bin/python3 \
+    && ln -sf /usr/bin/python3.12 /usr/bin/python \
+    && curl -fsSL https://bootstrap.pypa.io/get-pip.py | python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd -g ${GROUP_ID} apostate \
+    && useradd -m -u ${USER_ID} -g ${GROUP_ID} -s /bin/bash apostate \
+    && usermod -aG video,render apostate
+
+WORKDIR /app
+
+# ROCm torch first, from the ROCm wheel index (matches gfx12xx when >= rocm6.4)
+RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel \
+    && python3 -m pip install --no-cache-dir \
+    --index-url ${ROCM_WHEEL_INDEX} \
+    torch torchvision torchaudio
+
+# requirements.txt pulls bitsandbytes (CUDA-only); harmless but unused on ROCm.
+COPY requirements.txt /app/requirements.txt
+RUN python3 -m pip install --no-cache-dir -r /app/requirements.txt
+
+COPY . /app
+
+RUN mkdir -p /home/apostate/.cache/huggingface \
+    && chown -R apostate:apostate /app /home/apostate
+
+USER apostate
+ENV PYTHONPATH=/app
+
+# python CLI entrypoint: `docker run ... apostate-rocm doctor` -> `python -m apostate doctor`
+ENTRYPOINT ["python3", "-m", "apostate"]
+CMD ["doctor"]
