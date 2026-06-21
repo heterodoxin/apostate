@@ -11,6 +11,7 @@ The edit touches modules that write back into the residual stream: token embeddi
 
 ## Downloads
 
+- [Qwen3.6 27B Apostate](https://huggingface.co/heterodoxin/qwen3.6-27b-apostate)
 - [Qwen2.5 7B Instruct Apostate](https://huggingface.co/heterodoxin/qwen2.5-7b-instruct-apostate)
 
 Gemma 4 E4B is not listed as a passing release. The stale HF repo at
@@ -24,7 +25,14 @@ TEST refusal `58.3%`, harmless KL `0.109`, no bake, no upload.
 
 ## Current Numbers
 
-Qwen2.5-7B-Instruct was run on an RTX 4070 Ti SUPER with 4-bit NF4 load, seed `0`, 16 optimization trials, HumanEval `n=80`, MBPP `n=80`, GSM8K `n=24`, JBB refusal `n=48`, and KL over 48 harmless prompts.
+**Qwen3.6-27B** — AMD Radeon RX 9700 (gfx1201, ROCm 7.1.1), 4-bit NF4, JBB refusal `n=48`, KL over 48 harmless prompts.
+
+| model | refusal | complied | kl |
+|---|---:|---:|---:|
+| base | 95.8% | 4.2% | 0.000 |
+| apostate | 8.3% | 87.5% | 0.159 |
+
+**Qwen2.5-7B-Instruct** — RTX 4070 Ti SUPER, 4-bit NF4, seed `0`, 16 optimization trials, HumanEval `n=80`, MBPP `n=80`, GSM8K `n=24`, JBB refusal `n=48`, KL over 48 harmless prompts.
 
 | model | refusal | complied | humaneval | mbpp | gsm8k | kl | ablation wall |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -32,7 +40,7 @@ Qwen2.5-7B-Instruct was run on an RTX 4070 Ti SUPER with 4-bit NF4 load, seed `0
 | apostate | 4.2% | 93.8% | 80.0% | 70.0% | 70.8% | 0.143 | 306.8s |
 | heretic | 8.3% | 87.5% | 72.5% | 72.5% | 70.8% | 0.099 | 1166.7s |
 
-This is a same-budget comparison against Heretic `1.3.0`, not Heretic's 200-trial default. Apostate exported a baked checkpoint. Heretic exported a PEFT LoRA adapter.
+The Qwen2.5 comparison against Heretic `1.3.0` is same-budget, not Heretic's 200-trial default. Apostate exported a baked checkpoint; Heretic exported a PEFT LoRA adapter.
 
 ## Method
 
