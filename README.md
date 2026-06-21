@@ -13,16 +13,8 @@ The edit touches modules that write back into the residual stream: token embeddi
 
 - [Qwen3.6 27B Apostate](https://huggingface.co/heterodoxin/qwen3.6-27b-apostate) — bf16 weights
 - [Qwen3.6 27B Apostate GGUF](https://huggingface.co/heterodoxin/qwen3.6-27b-apostate-gguf) — Q5_K_M
+- [Gemma 4 E4B Apostate](https://huggingface.co/heterodoxin/gemma-4-e4b-it-apostate)
 - [Qwen2.5 7B Instruct Apostate](https://huggingface.co/heterodoxin/qwen2.5-7b-instruct-apostate)
-
-Gemma 4 E4B is not listed as a passing release. The stale HF repo at
-`heterodoxin/gemma-4-e4b-it-apostate` failed the 2026-06-02 staging smoke test:
-classifier refusal `25.0%`, strict refusal or weak noncompliance `50.0%`,
-weak nonanswer `25.0%`, and helpful-style starts `100.0%` on four manual prompts.
-The prompt-mean PLE probe found a nonzero packed PLE direction (`6.6467`) but did
-not move refusal at alphas `0.05` through `1.6`; KL rose from `0.0039` to `0.3142`.
-The 2026-06-02 shared-KV plus PLE smoke run also failed release criteria:
-TEST refusal `58.3%`, harmless KL `0.109`, no bake, no upload.
 
 ## Current Numbers
 
