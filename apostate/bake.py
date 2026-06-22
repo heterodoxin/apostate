@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import shutil
 import torch
+from pathlib import Path
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from .config import ApostateConfig
@@ -231,5 +233,20 @@ def bake(cfg: ApostateConfig, export: dict, tokenizer=None, drop_layers=None) ->
 
     tok = tokenizer or AutoTokenizer.from_pretrained(cfg.model, trust_remote_code=True)
     tok.save_pretrained(cfg.output_dir)
+
+    # Copy extra processor configs that save_pretrained skips (vision/video preprocessors).
+    # name_or_path resolves to the HF cache dir for hub models or the local path for local ones.
+    _extra = [
+        "preprocessor_config.json",
+        "video_preprocessor_config.json",
+        "processor_config.json",
+    ]
+    src_dir = Path(tok.name_or_path)
+    for fname in _extra:
+        src_file = src_dir / fname
+        if src_file.exists():
+            shutil.copy2(src_file, Path(cfg.output_dir) / fname)
+            print(f"[bake] copied {fname}", flush=True)
+
     print("[bake] done", flush=True)
     return cfg.output_dir
