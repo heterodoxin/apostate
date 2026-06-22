@@ -142,8 +142,17 @@ class ApostateConfig:
     oblique_writers_only: bool = True
     # predictive co-vector D = R - W (W = harmless predictor of R^T x): preserves harmless
     # VARIANCE along R, not just the mean, so harmless KL drops. removes only the OOD excursion.
-    oblique_predictive: bool = False
+    # default on -- with the contrastive term below it strictly beats mean-preserving oblique.
+    oblique_predictive: bool = True
     predictive_ridge: float = 1e-2
+    # predictive-oblique preservation weight: D = R - preserve*W. 1.0 = full oblique,
+    # 0.0 = orthogonal. lower when oblique under-ablates on entangled architectures (granite).
+    oblique_preserve: float = 1.0
+    # contrastive covector: penalize W for responding on the harmful set, so it preserves
+    # harmless-SPECIFIC variance but drops variance shared with harmful (which smuggles refusal
+    # back in on entangled archs). 0 = plain oblique. removes refusal at low KL. on by default:
+    # granite 69%->5% (was stuck), qwen 11%->4% w/ lower KL -- strict win on entangled and clean.
+    oblique_contrast: float = 1.0
 
     # post-norm models (reader-side ablation) need more kl headroom to decensor
     reader_max_kl: float = 0.55

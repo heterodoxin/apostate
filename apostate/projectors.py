@@ -31,21 +31,34 @@ def oblique_vectors(R: torch.Tensor, mu: torch.Tensor, strength: float, denom_fl
     return R, R  # fell back to symmetric
 
 
-def predictive_covector(R: torch.Tensor, harmless: torch.Tensor, ridge: float = 1e-2):
+def predictive_covector(R: torch.Tensor, harmless: torch.Tensor, ridge: float = 1e-2, preserve: float = 1.0,
+                        harmful: torch.Tensor = None, contrast: float = 0.0):
     # read co-vector D = R - W, W = harmless ridge-predictor of R^T x from x orthogonal to R.
     # harmless R-variance is predictable (W reproduces it) so D^T x ~ 0 there -> preserved;
     # the harmful refusal excursion is OOD for W -> D^T x large -> removed. E R = 0 (W _|_ R),
     # E mu ~ mu, but preserves harmless VARIANCE along R, not just the mean. bake: U = D, Rbake = R.
+    # contrast>0 (with harmful given): W is additionally penalized for responding on the harmful
+    # set -- W = (A^T A + contrast*C^T C + lam I)^-1 A^T b, A=harmless_|_R, C=harmful_|_R. this
+    # preserves harmless-SPECIFIC variance but drops the variance SHARED with harmful (which on
+    # entangled archs smuggles the refusal back in), so D removes refusal AND keeps KL low.
     R = R.float()
     X = harmless.float()
     Xp = X - (X @ R) @ R.t()          # harmless with the R-subspace removed
     try:
         G = Xp.t() @ Xp
         lam = float(ridge) * (float(torch.diagonal(G).mean()) + 1e-8)
+        rhs = Xp.t() @ (X @ R)
+        if harmful is not None and float(contrast) > 0.0:
+            Xf = harmful.float()
+            Xfp = Xf - (Xf @ R) @ R.t()           # harmful with the R-subspace removed
+            G = G + float(contrast) * (Xfp.t() @ Xfp)
         G = G + lam * torch.eye(G.shape[0], dtype=G.dtype, device=G.device)
-        W = torch.linalg.solve(G, Xp.t() @ (X @ R))   # [hidden, r]
+        W = torch.linalg.solve(G, rhs)            # [hidden, r]
         W = W - R @ (R.t() @ W)       # keep W orthogonal to R
-        D = R - W
+        # preserve in [0,1]: 1 = full oblique (keep all predictable harmless R-variance),
+        # 0 = orthogonal (D=R). on entangled archs (granite) W reproduces the refusal
+        # signal too, so full preservation under-ablates; lower preserve trades KL for reach.
+        D = R - float(preserve) * W
         if not torch.isfinite(D).all():
             return None, None
         return D, R                   # U = D, Rbake = R
@@ -299,7 +312,8 @@ class ProjectionController:
 
     def enable_oblique(self, mu: torch.Tensor, strength: float = 1.0, denom_floor: float = 0.2,
                        writers_only: bool = True, predictive: bool = False, harmless=None, ridge: float = 1e-2,
-                       harmless_layers=None):
+                       harmless_layers=None, preserve: float = 1.0,
+                       harmful=None, contrast: float = 0.0, harmful_layers=None):
         # store the harmless mean; oblique vectors refresh against whatever R is set later.
         self._oblique_mean = mu.to(self.device).float()
         self._oblique_strength = float(strength)
@@ -307,11 +321,17 @@ class ProjectionController:
         self._oblique_writers_only = bool(writers_only)
         self._oblique_predictive = bool(predictive)
         self._oblique_ridge = float(ridge)
+        self._oblique_preserve = float(preserve)
+        self._oblique_contrast = float(contrast)
         self._oblique_harmless = harmless.to(self.device).float() if harmless is not None else None
-        # per-layer harmless activations (kept on cpu; streamed to gpu per-layer during refresh).
+        self._oblique_harmful = harmful.to(self.device).float() if harmful is not None else None
+        # per-layer harmless/harmful activations (kept on cpu; streamed to gpu per-layer during refresh).
         self._oblique_harmless_layers = (
             [a.detach().float().cpu() if a is not None else None for a in harmless_layers]
             if harmless_layers is not None else None)
+        self._oblique_harmful_layers = (
+            [a.detach().float().cpu() if a is not None else None for a in harmful_layers]
+            if harmful_layers is not None else None)
         for e in self.edits:
             self._refresh_oblique(e)
 
@@ -337,14 +357,20 @@ class ProjectionController:
         U = Rbake = None
         predictive = getattr(self, "_oblique_predictive", False)
         ridge = getattr(self, "_oblique_ridge", 1e-2)
+        preserve = getattr(self, "_oblique_preserve", 1.0)
+        contrast = getattr(self, "_oblique_contrast", 0.0)
         hl_layers = getattr(self, "_oblique_harmless_layers", None)
+        fl_layers = getattr(self, "_oblique_harmful_layers", None)
         if predictive and hl_layers is not None:
             # per-layer D_L = R - W_L so each writer layer preserves ITS OWN harmless variance.
             U_layers = {}
             for L, hl in enumerate(hl_layers):
                 if hl is None:
                     continue
-                D_L, _ = predictive_covector(edit["R"], hl.to(self.device), ridge)
+                fl = fl_layers[L] if (fl_layers is not None and L < len(fl_layers)) else None
+                D_L, _ = predictive_covector(edit["R"], hl.to(self.device), ridge, preserve=preserve,
+                                             harmful=(fl.to(self.device) if fl is not None else None),
+                                             contrast=contrast)
                 if D_L is not None:
                     U_layers[L] = D_L.to(self.device).float()
             if U_layers:
@@ -352,7 +378,8 @@ class ProjectionController:
                 U = next(iter(U_layers.values()))  # fallback for any layer without per-layer D
                 Rbake = edit["R"]
         elif predictive and getattr(self, "_oblique_harmless", None) is not None:
-            U, Rbake = predictive_covector(edit["R"], self._oblique_harmless, ridge)
+            U, Rbake = predictive_covector(edit["R"], self._oblique_harmless, ridge, preserve=preserve,
+                                           harmful=getattr(self, "_oblique_harmful", None), contrast=contrast)
         if U is None:
             U, Rbake = oblique_vectors(edit["R"], mu, self._oblique_strength, self._oblique_floor)
         edit["U"] = U.to(self.device).float()

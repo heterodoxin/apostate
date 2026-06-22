@@ -1552,7 +1552,10 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
         controller.enable_oblique(mu, cfg.oblique_strength, cfg.oblique_denom_floor,
                                   writers_only=getattr(cfg, "oblique_writers_only", True),
                                   predictive=getattr(cfg, "oblique_predictive", False), harmless=al[L_dir],
-                                  ridge=getattr(cfg, "predictive_ridge", 1e-2), harmless_layers=al)
+                                  ridge=getattr(cfg, "predictive_ridge", 1e-2), harmless_layers=al,
+                                  preserve=getattr(cfg, "oblique_preserve", 1.0),
+                                  harmful=ah[L_dir], harmful_layers=ah,
+                                  contrast=getattr(cfg, "oblique_contrast", 0.0))
         _log(f"oblique ablation enabled (predictive={getattr(cfg, 'oblique_predictive', False)}, "
              f"writers_only={getattr(cfg, 'oblique_writers_only', True)}, |mu|={float(mu.norm()):.2f})")
     if reader_mode:
