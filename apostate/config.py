@@ -12,6 +12,7 @@ class ApostateConfig:
     profile: str = "balanced"
     device: str = "auto"  # auto -> cuda/rocm if present, else mps/xpu/cpu (see apostate.accel)
     load_in_4bit: bool = True
+    cpu_offload_gb: float = 0.0   # GB of model weights to spill to CPU RAM (0 = GPU-only)
     compute_dtype: str = "bfloat16"
     seed: int = 0
     resume: bool = False

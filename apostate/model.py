@@ -543,14 +543,30 @@ def load_model(cfg: ApostateConfig) -> ModelBundle:
     # over-allocation or an unsupported-arch kernel can hang amdgpu and freeze the
     # whole machine, so we fail fast and cheap on the cpu side instead.
     accel.gpu_smoke_test(cfg.device, log=_log)
-    accel.maybe_preflight(
-        cfg.device,
-        model_id=cfg.model,
-        load_in_4bit=use_4bit,
-        compute_dtype=cfg.compute_dtype,
-        batch_size=cfg.batch_size,
-        log=_log,
-    )
+    offload_gb = float(cfg.cpu_offload_gb) if cfg.cpu_offload_gb else 0.0
+    if offload_gb > 0:
+        # CPU offload: don't abort on VRAM — the model will spill to RAM.
+        try:
+            accel.maybe_preflight(
+                cfg.device,
+                model_id=cfg.model,
+                load_in_4bit=use_4bit,
+                compute_dtype=cfg.compute_dtype,
+                batch_size=cfg.batch_size,
+                log=_log,
+            )
+        except RuntimeError as e:
+            _log(f"vram preflight: model exceeds GPU VRAM, but cpu_offload_gb={offload_gb:.0f} "
+                 f"is set — spilling to CPU RAM. forward passes will be slower. ({e})")
+    else:
+        accel.maybe_preflight(
+            cfg.device,
+            model_id=cfg.model,
+            load_in_4bit=use_4bit,
+            compute_dtype=cfg.compute_dtype,
+            batch_size=cfg.batch_size,
+            log=_log,
+        )
 
     tok = AutoTokenizer.from_pretrained(cfg.model, trust_remote_code=True)
     if tok.pad_token is None:
@@ -559,7 +575,27 @@ def load_model(cfg: ApostateConfig) -> ModelBundle:
 
     compute_dtype = _DTYPES[cfg.compute_dtype]
     kwargs = dict(trust_remote_code=True, low_cpu_mem_usage=True)
-    if use_4bit:
+    if offload_gb > 0:
+        # accelerate device_map="auto" with max_memory distributes layers across GPU and CPU.
+        # GPU gets whatever free VRAM is available; the rest spills to cpu_offload_gb of RAM.
+        try:
+            free_vram, _ = torch.cuda.mem_get_info()
+            gpu_limit = f"{int(free_vram * 0.92 / 1e9)}GiB"
+        except Exception:
+            gpu_limit = "30GiB"
+        kwargs["device_map"] = "auto"
+        kwargs["max_memory"] = {0: gpu_limit, "cpu": f"{offload_gb:.0f}GiB"}
+        if use_4bit:
+            kwargs["quantization_config"] = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_compute_dtype=compute_dtype,
+            )
+        else:
+            kwargs["torch_dtype"] = compute_dtype
+        _log(f"cpu offload: gpu_limit={gpu_limit}, cpu={offload_gb:.0f}GiB")
+    elif use_4bit:
         kwargs["quantization_config"] = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
