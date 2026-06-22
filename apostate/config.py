@@ -220,6 +220,14 @@ class ApostateConfig:
             if self.target_refusal == 0.0:
                 self.target_refusal = 0.02
 
+        # Auto-enable 4-bit for models too large to fit in bf16.
+        # 20B+ can't fit 40GB+ of weights on typical single-GPU VRAM; 4-bit halves that.
+        # 7B-14B fit natively in bf16 and run ~8x faster that way, so leave them alone.
+        _large_4bit_tags = ("20b", "22b", "24b", "27b", "28b", "30b", "32b", "34b",
+                            "40b", "65b", "70b", "72b", "123b", "235b")
+        if not self.load_in_4bit and any(t in model_l for t in _large_4bit_tags):
+            self.load_in_4bit = True
+
         if "gemma-4" in model_l or "gemma4" in model_l:
             # gemma 4 e4b is big; trim the batch so 4-bit fits a 16gb card. rank stays
             # at the default 1 (reader-side ablation, see model.uses_post_norm).

@@ -535,9 +535,8 @@ def load_model(cfg: ApostateConfig) -> ModelBundle:
                  f"bitsandbytes or run with --no-load-in-4bit.")
             use_4bit = False
         elif backend == "rocm":
-            _log("note: bitsandbytes 4-bit on ROCm is experimental; if it errors or "
-                 "produces garbage, rerun with --no-load-in-4bit (bf16 fits a 24GB+ card "
-                 "for <=14B models).")
+            from . import triton_nf4
+            triton_nf4.patch_bnb_linear4bit()
 
     # anti-freeze guards: confirm the runtime can execute a kernel for this arch,
     # then confirm the model fits in VRAM -- both BEFORE the big allocation. an
