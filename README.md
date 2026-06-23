@@ -11,10 +11,19 @@ The edit touches modules that write back into the residual stream: token embeddi
 
 ## Downloads
 
-- [Qwen3.6 27B Apostate](https://huggingface.co/heterodoxin/qwen3.6-27b-apostate) — bf16 weights
-- [Qwen3.6 27B Apostate GGUF](https://huggingface.co/heterodoxin/qwen3.6-27b-apostate-gguf) — Q5_K_M
-- [Gemma 4 E4B Apostate](https://huggingface.co/heterodoxin/gemma-4-e4b-it-apostate)
-- [Qwen2.5 7B Instruct Apostate](https://huggingface.co/heterodoxin/qwen2.5-7b-instruct-apostate)
+All under [huggingface.co/heterodoxin](https://huggingface.co/heterodoxin), baked bf16 Transformers checkpoints (drop-in for the base model).
+
+| model | base | arch |
+|---|---|---|
+| [qwen3.6-27b-apostate](https://huggingface.co/heterodoxin/qwen3.6-27b-apostate) ([GGUF Q5_K_M](https://huggingface.co/heterodoxin/qwen3.6-27b-apostate-gguf)) | Qwen3.6-27B | MoE |
+| [gemma-4-12b-it-apostate](https://huggingface.co/heterodoxin/gemma-4-12b-it-apostate) | Gemma-4-12B | post-norm |
+| [gemma-4-e4b-it-apostate](https://huggingface.co/heterodoxin/gemma-4-e4b-it-apostate) | Gemma-4-E4B | post-norm |
+| [granite-3.3-8b-instruct-apostate](https://huggingface.co/heterodoxin/granite-3.3-8b-instruct-apostate) | Granite-3.3-8B | dense (scaled) |
+| [falcon3-10b-instruct-apostate](https://huggingface.co/heterodoxin/falcon3-10b-instruct-apostate) | Falcon3-10B | dense |
+| [vibethinker-3b-apostate](https://huggingface.co/heterodoxin/vibethinker-3b-apostate) | VibeThinker-3B | dense |
+| [fastcontext-1.0-4b-sft-apostate](https://huggingface.co/heterodoxin/fastcontext-1.0-4b-sft-apostate) | FastContext-1.0-4B | dense |
+| [qwen3-8b-apostate](https://huggingface.co/heterodoxin/qwen3-8b-apostate) | Qwen3-8B | dense |
+| [qwen2.5-7b-instruct-apostate](https://huggingface.co/heterodoxin/qwen2.5-7b-instruct-apostate) | Qwen2.5-7B | dense |
 
 ## Current Numbers
 
@@ -35,6 +44,13 @@ The edit touches modules that write back into the residual stream: token embeddi
 
 The Qwen2.5 comparison against Heretic `1.3.0` is same-budget, not Heretic's 200-trial default. Apostate exported a baked checkpoint; Heretic exported a PEFT LoRA adapter.
 
+**Gemma-4-12B** — post-norm reader-side path with the contrastive co-vector, R9700 (gfx1201), 4-bit NF4, KL capped at 0.15.
+
+| model | refusal | complied | kl |
+|---|---:|---:|---:|
+| base | 95.8% | 4.2% | 0.000 |
+| apostate | 13.3% | 86.7% | 0.144 |
+
 ## Method
 
 Apostate collects harmful and harmless activations from the base model. It forms a low-rank basis from the harmful-minus-harmless mean and treats that basis as the first refusal axis. When `multi_refusal=true`, it also searches for independent refusal axes from harmful clusters, harmful clusters against nearest harmless clusters, high-residual harmful tails, and residual SVD axes. Each new axis has to survive harmful/harmless separation and harmful-coverage filters before it is fused into the subspace. The optimizer can still choose rank 1 when extra axes cost too much KL.
@@ -46,6 +62,10 @@ Balanced mode targets low refusal first, then pulls KL back down with global alp
 The projection itself is oblique, not symmetric. A plain `I - R R^T` removal shifts the harmless residual mean along the refusal direction, and that mean shift is the dominant source of KL. Apostate instead removes `R` along a co-vector `U = R` minus its harmless-mean component, so the projector `E = I - Rbake U^T` still zeroes `R` (`E R = 0`) but leaves the harmless mean untouched (`E mu = mu`). The mean-shift KL term collapses while harmful inputs are still fully ablated. It is weight-only with no bias, so it bakes into bias-free checkpoints like Qwen2.5, and because it is a fixed linear map it composes correctly across MoE router gates. `oblique_strength` interpolates between symmetric (`0`) and full mean-preservation (`1`); the co-vector is clamped when `R` aligns too closely with the harmless mean.
 
 `--oblique-predictive` goes one step further. Instead of the fixed mean-orthogonal co-vector it fits a per-layer ridge predictor `W` of the harmless `R`-projection from the rest of the activation and removes along `D = R - W`. The harmless `R`-projection is largely predictable from the other features, so `D·x` is near zero on harmless inputs and the harmless *variance* along `R` is preserved, not just the mean; the harmful refusal excursion is out-of-distribution for `W` and is still removed in full (`E R = 0`). This lowers the bf16 edit KL below the mean co-vector. The advantage is largest in full precision — NF4 requantization narrows it back toward the plain oblique — so it is most useful when the checkpoint is served in bf16.
+
+The predictor is **contrastive** by default (`oblique_contrast=1`). `W` is fit to reproduce the harmless `R`-projection while being explicitly penalized for firing on the harmful set: `W = (AᵀA + γ·CᵀC + λI)⁻¹ Aᵀb`, with `A` the harmless and `C` the harmful activations, both orthogonalized to `R`. This keeps the harmless-*specific* variance along `R` but drops the variance shared with the harmful set — the component that, on architectures with residual/embedding scaling multipliers (e.g. Granite's `embedding_multiplier`/`residual_multiplier`/`logits_scaling`), smuggles refusal back in under plain mean-preserving oblique. It took Granite-3.3-8B from a stuck ~69% to ~5% refusal and improved Qwen on both refusal and KL, so it is the default for both the writer (oblique) and reader paths.
+
+Models that store MoE experts as **packed 3D tensors** (`qwen3.5-moe`, `granitemoehybrid`, `diffusion_gemma`) are not quantizable by bitsandbytes, which only replaces `nn.Linear`. Apostate quantizes those experts expert-by-expert to NF4 and routes the experts forward through a Triton WMMA dequant-matmul, so a 30–50B packed-MoE fits a single 34GB card; the VRAM preflight accounts for this and refuses cleanly when a model genuinely will not fit.
 
 The main optimization target combines classifier-judged refusal rate, a weak-response guard, harmless-token KL, penalty above `kl_target`, penalty above `max_kl`, and cheap capability drift. The weak-response guard is used during optimization so short answers, deflections, safety lectures, and generic overviews do not count as solved harmful prompts. Public benchmark refusal scoring uses `protectai/distilroberta-base-rejection-v1` by default and reports weak/noncompliance rates separately. Keyword refusal scoring remains available with `--judge keyword`.
 
@@ -108,11 +128,13 @@ Custom data specs use `repo:split:col`, `repo@config:split:col`, or several sour
 
 ## Model Coverage
 
-Model support is detected from module layout. Current coverage includes Llama 2/3, Qwen2/2.5/3, Mistral, Mixtral, DeepSeek, Gemma/Gemma2/Gemma 4 text decoders including `google/gemma-4-E4B`, Phi-3, GPT-NeoX, Pythia, OPT-style decoder stacks, and MPT-style block stacks.
+Model support is detected from module layout. Current coverage includes Llama 2/3, Qwen2/2.5/3/3.5(-MoE), Mistral, Mixtral, DeepSeek, Gemma/Gemma2/Gemma 4 text decoders including `google/gemma-4-E4B` and `gemma-4-12B`, Granite 3 and `granitemoehybrid` (Mamba-2 hybrid MoE), Phi-3/Phi-4, GPT-NeoX, Pythia, OPT-style decoder stacks, and MPT-style block stacks. Non-CausalLM archs (multimodal / block-diffusion such as `diffusion_gemma`) load through the appropriate `AutoModel*` class. Packed-MoE experts are NF4-quantized so 30–50B MoEs fit a 34GB card.
 
 Multimodal wrapper models are supported for the text path when Transformers exposes a causal language decoder inside the model object. Image and audio pipelines are not edited yet.
 
 Gemma 2/3/4 use a post-norm sandwich, so editing writer outputs gets renormalized away. Apostate detects this and switches to reader-side ablation: it projects the per-layer refusal direction out of the inputs of the modules that read the residual, mainly MLP gate/up paths and the per-layer input gate. Attention q/k/v is skipped because it added attention drift without reliable refusal gain. The edit still bakes cleanly into a standalone checkpoint. Gemma 4 E4B goes from about 85% refusal to roughly 5-15% this way, coherent and complying, at a higher KL than dense pre-norm models.
+
+The reader edit uses the same contrastive co-vector as the writer path: `x' = x − a·(x·D)·R` removes refusal along `R` while re-injecting the harmless-predictable component, instead of the plain `x − a·(x·R)·R`. Per-layer strength is chosen at the refusal/KL knee (`min(refusal + w·kl)` under the budget) rather than the strongest setting under budget, which overshoots. With both, Gemma-4-12B goes from ~88% to **13% refusal at KL 0.14** (versus ~29%/0.47 for the plain reader). For packed-MoE post-norm models the experts are NF4-quantized and the co-vector is applied to the residual feeding them.
 
 ## Requirements
 
