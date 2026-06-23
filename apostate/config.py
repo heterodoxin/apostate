@@ -160,6 +160,10 @@ class ApostateConfig:
     reader_strengths: tuple = (2.0, 3.0, 4.0, 5.0, 6.0, 7.0)
     reader_guard_rank: int = 3   # corrective directions the reader guard may add
     reader_margin_target: float = -1.0   # sweep stops once comply tokens win by this margin
+    # reader strength pick = min(refusal + w*kl) among strengths under reader_max_kl, i.e. the
+    # knee -- not max-ablation-under-budget, which overshoots (gemma: contrastive reader gives
+    # 25%/0.126 at strength 3 but the greedy pick drove to 7 -> 0.44 kl). higher w favors low kl.
+    reader_strength_kl_weight: float = 1.0
 
     save_dtype: str = "bfloat16"
     bake: bool = True
@@ -193,7 +197,7 @@ class ApostateConfig:
 
         # Large model auto-scaling: loosen search budget and raise rank ceiling.
         # 27B-72B models have more distributed refusal circuits than 7B-14B.
-        _large_tags = ("27b", "28b", "32b", "34b", "40b", "70b", "72b", "65b", "123b")
+        _large_tags = ("27b", "28b", "32b", "34b", "35b", "40b", "70b", "72b", "65b", "123b")
         if any(t in model_l for t in _large_tags):
             if self.max_rank == 3:
                 self.max_rank = 6
@@ -233,8 +237,8 @@ class ApostateConfig:
         # Auto-enable 4-bit for models too large to fit in bf16.
         # 20B+ can't fit 40GB+ of weights on typical single-GPU VRAM; 4-bit halves that.
         # 7B-14B fit natively in bf16 and run ~8x faster that way, so leave them alone.
-        _large_4bit_tags = ("20b", "22b", "24b", "27b", "28b", "30b", "32b", "34b",
-                            "40b", "65b", "70b", "72b", "123b", "235b")
+        _large_4bit_tags = ("20b", "22b", "24b", "26b", "27b", "28b", "30b", "32b", "34b",
+                            "35b", "40b", "65b", "70b", "72b", "123b", "235b")
         if not self.load_in_4bit and any(t in model_l for t in _large_4bit_tags):
             self.load_in_4bit = True
 

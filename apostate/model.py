@@ -164,7 +164,25 @@ class ModelBundle:
     num_layers: int
     hidden_size: int
 
+    def is_block_diffusion(self) -> bool:
+        # encoder-decoder block-diffusion (diffusion_gemma): the prompt is encoded, then a
+        # canvas is denoised by the decoder. model(input_ids) runs the ENCODER, so that is the
+        # stack apostate edits (clean prompt residuals; the decoder only ever sees a random
+        # canvas on a bare forward). see apostate-diffusion-gemma notes.
+        if config_value(self.model.config, "model_type") == "diffusion_gemma":
+            return True
+        return type(self.model).__name__ == "DiffusionGemmaForBlockDiffusion"
+
+    def _diffusion_encoder_stack(self):
+        if not self.is_block_diffusion():
+            return None
+        enc = _path_get(self.model, ("model", "encoder", "language_model"))
+        return _as_decoder(enc)
+
     def _decoder(self):
+        diff = self._diffusion_encoder_stack()
+        if diff is not None:
+            return diff
         m = self.model
         seen = set()
         for path in _DECODER_PATHS:
@@ -511,6 +529,35 @@ class ModelBundle:
         )
 
 
+# Auto-class preference order. AutoModelForCausalLM only maps decoder-only LMs; multimodal
+# and block-diffusion archs (e.g. diffusion_gemma) live in the image-text-to-text or base
+# mappings. We resolve the loader from the config's model_type so an unknown-but-loadable
+# arch loads rather than being skipped.
+_AUTO_LOADER_ORDER = (
+    ("AutoModelForCausalLM", "MODEL_FOR_CAUSAL_LM_MAPPING_NAMES"),
+    ("AutoModelForImageTextToText", "MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES"),
+    ("AutoModelForSeq2SeqLM", "MODEL_FOR_SEQ_TO_SEQ_CAUSAL_LM_MAPPING_NAMES"),
+)
+
+
+def _resolve_model_loader(model_id: str, trust_remote_code: bool):
+    """Pick the AutoModel* class that can load this model_id (see _AUTO_LOADER_ORDER)."""
+    import transformers as tf
+    from transformers import AutoConfig, AutoModel
+    from transformers.models.auto import modeling_auto as ma
+
+    cfg = AutoConfig.from_pretrained(model_id, trust_remote_code=trust_remote_code)
+    model_type = getattr(cfg, "model_type", None)
+    auto_map = getattr(cfg, "auto_map", None) or {}
+    if "AutoModelForCausalLM" in auto_map:  # remote-code models advertise their own loader
+        return tf.AutoModelForCausalLM
+    for cls_name, map_name in _AUTO_LOADER_ORDER:
+        mapping = getattr(ma, map_name, {})
+        if model_type in mapping and hasattr(tf, cls_name):
+            return getattr(tf, cls_name)
+    return AutoModel
+
+
 def load_model(cfg: ApostateConfig) -> ModelBundle:
     torch.manual_seed(cfg.seed)
 
@@ -607,7 +654,10 @@ def load_model(cfg: ApostateConfig) -> ModelBundle:
         kwargs["torch_dtype"] = compute_dtype
         kwargs["device_map"] = {"": cfg.device}
 
-    model = AutoModelForCausalLM.from_pretrained(cfg.model, **kwargs)
+    model_loader = _resolve_model_loader(cfg.model, trust_remote_code=True)
+    if model_loader is not AutoModelForCausalLM:
+        _log(f"loading via {model_loader.__name__} (model_type not in CausalLM mapping)")
+    model = model_loader.from_pretrained(cfg.model, **kwargs)
     model.eval()
     model.requires_grad_(False)
 

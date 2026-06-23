@@ -27,7 +27,7 @@ from .activations import (
     collect_ple_embed_activations,
 )
 from .directions import refusal_subspace, preservation_subspace, gram_schmidt_remove, separation, causal_layer_scores, causal_layer_scores_fast
-from .projectors import ProjectionController
+from .projectors import ProjectionController, predictive_covector
 from .guard import run_guard, run_reader_guard
 from .evaluate import (
     generate,
@@ -1328,6 +1328,10 @@ def _direction_kwargs(cfg):
 # post-norm models: per-layer reader-side directions + a calibrated global strength.
 def _reader_profile(bundle, controller, ah, al, cfg, preserve_lookup, eval_harmful, eval_harmless, log):
     nl = bundle.num_layers
+    predictive = bool(getattr(cfg, "oblique_predictive", False))
+    contrast = float(getattr(cfg, "oblique_contrast", 0.0))
+    ridge = float(getattr(cfg, "predictive_ridge", 1e-2))
+    preserve = float(getattr(cfg, "oblique_preserve", 1.0))
     for l in range(nl):
         Rl, _ = refusal_subspace(
             ah[l], al[l], rank=max(1, min(cfg.max_rank, cfg.refusal_rank)),
@@ -1335,7 +1339,15 @@ def _reader_profile(bundle, controller, ah, al, cfg, preserve_lookup, eval_harmf
             orthogonalize=cfg.orthogonalize_direction,
             **_direction_kwargs(cfg),
         )
-        controller.set_reader_layer_subspace(l, gram_schmidt_remove(Rl, preserve_lookup(l)))
+        Rl = gram_schmidt_remove(Rl, preserve_lookup(l))
+        # contrastive reader co-vector: remove refusal along Rl but re-inject the harmless-
+        # predictable component (suppressed on harmful), so KL stays low while we ablate harder.
+        # this brings the granite/qwen oblique win to the post-norm reader path (gemma).
+        Dl = None
+        if predictive:
+            Dl, _ = predictive_covector(Rl, al[l], ridge=ridge, preserve=preserve,
+                                        harmful=ah[l], contrast=contrast)
+        controller.set_reader_layer_subspace(l, Rl, D=Dl)
     if cfg.causal_targeting:
         log("scoring per-layer causal importance (reader) ...")
         # floor 0 concentrates strength on layers that actually carry refusal; this keeps
@@ -1355,25 +1367,33 @@ def _reader_profile(bundle, controller, ah, al, cfg, preserve_lookup, eval_harmf
 
     controller.enable()
     # rank strengths by real generated refusal (the logit margin is unreliable on post-norm
-    # models) and pick the strongest that stays under the kl budget.
-    best = None  # (g, refusal, kl, feasible)
+    # models) and pick the best refusal/KL tradeoff under the budget -- the knee, NOT max
+    # ablation under budget (that overshoots: gemma's contrastive reader gives 25%/0.126 at
+    # strength 3 but the greedy pick drove to 7 -> 0.44 kl for only 9pts more refusal removed).
+    w = float(getattr(cfg, "reader_strength_kl_weight", 1.0))
+    best = None      # best feasible by tradeoff score: (g, ref, kl, score)
+    fallback = None  # gentlest (lowest-kl) tried, used only if nothing is feasible
     for g in cfg.reader_strengths:
         apply(g)
         with controller.active():
             ref = refusal_rate(bundle, hset, cfg.opt_gen_tokens, cfg.batch_size)
         kl = kl_harmless(bundle, controller, lset, cfg.batch_size, positions=cfg.kl_positions)
         log(f"  reader strength {g}: refusal={ref:.3f} kl={kl:.3f}")
-        feasible = kl <= cfg.reader_max_kl
-        if best is None or (feasible and (ref < best[1] - 1e-6 or not best[3])):
-            best = (g, ref, kl, feasible)
-        if ref <= cfg.target_refusal and feasible:
-            break
-        if best is not None and best[3] and not feasible:
-            break  # kl over budget; higher strengths only raise it further
-    apply(best[0])
+        if fallback is None or kl < fallback[2]:
+            fallback = (g, ref, kl)
+        if kl <= cfg.reader_max_kl:
+            score = ref + w * kl
+            if best is None or score < best[3] - 1e-6:
+                best = (g, ref, kl, score)
+            if ref <= cfg.target_refusal:
+                break
+        elif best is not None:
+            break  # past the KL ceiling and we already have a feasible pick; higher only worse
+    chosen = best if best is not None else fallback
+    apply(chosen[0])
     with controller.active():  # one real refusal number for the report
         ref = refusal_rate(bundle, eval_harmful[: cfg.opt_eval_n], cfg.opt_gen_tokens, cfg.batch_size)
-    return {"strength": best[0], "refusal": ref, "kl": best[2], "causal": causal}
+    return {"strength": chosen[0], "refusal": ref, "kl": chosen[2], "causal": causal}
 
 
 def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
@@ -1450,6 +1470,12 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
     head_ref_est = None
     reader_est = None  # (refusal, kl) estimate to skip the redundant validation pass
     head_sweep_profile = _head_sweep_enabled(bundle, cfg)
+    # post-norm (reader-side) models always take the reader path below, which needs the
+    # per-layer activations. head-sweep would skip that collection AND never run (reader_mode
+    # wins the if/elif), so disable it here. fixes gemma-4 (no PLE but vocab_size_per_layer_input
+    # -> head_sweep_enabled True -> ah/al left None -> reader profile crash).
+    if bundle.uses_post_norm():
+        head_sweep_profile = False
     head_sweep_attrs = None
     ah = al = None
     ple_ah = ple_al = None

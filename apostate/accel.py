@@ -157,20 +157,47 @@ def _bytes_per_param(load_in_4bit: bool, compute_dtype: str) -> float:
 
 def estimate_param_count(model_id: str, trust_remote_code: bool = True) -> Optional[int]:
     # Param count via meta-device build — no real memory or GPU touch. Returns None on failure.
+    n, _ = estimate_weight_footprint(model_id, load_in_4bit=False, compute_dtype="bfloat16",
+                                     trust_remote_code=trust_remote_code)
+    return n
+
+
+def estimate_weight_footprint(model_id: str, *, load_in_4bit: bool, compute_dtype: str,
+                              trust_remote_code: bool = True):
+    """(n_params, weight_bytes) via a meta-device build. Returns (None, None) on failure.
+
+    4-bit only shrinks what bitsandbytes actually quantizes -- 2D nn.Linear weights (~0.6 B/param
+    incl. quant state). Everything else stays at compute_dtype: embeddings, norms, biases, Mamba
+    conv/ssm params, and crucially PACKED 3D MoE expert tensors (granitemoehybrid etc.), which bnb
+    cannot quantize. Estimating the whole param count at the 4-bit rate badly under-counts those
+    models (granite-4.0-h-small: 27.2B of 32.6B params are packed experts -> ~54GB stays bf16),
+    which sailed past the old preflight and then OOM-crashed mid-load after a 65GB download.
+    """
     try:
+        import torch.nn as nn
         from accelerate import init_empty_weights
         from transformers import AutoConfig, AutoModelForCausalLM
     except Exception:
-        return None
+        return None, None
     try:
         hf = AutoConfig.from_pretrained(model_id, trust_remote_code=trust_remote_code)
         with init_empty_weights():
             m = AutoModelForCausalLM.from_config(hf, trust_remote_code=trust_remote_code)
+    except Exception:
+        return None, None
+    dtype_b = {"float16": 2.0, "bfloat16": 2.0, "float32": 4.0}.get(compute_dtype, 2.0)
+    if not load_in_4bit:
         n = sum(p.numel() for p in m.parameters())
         del m
-        return int(n)
-    except Exception:
-        return None
+        return int(n), float(n) * dtype_b
+    quant_ids = {id(mod.weight) for mod in m.modules() if isinstance(mod, nn.Linear)}
+    n_params = 0
+    weight_bytes = 0.0
+    for p in m.parameters():
+        n_params += p.numel()
+        weight_bytes += p.numel() * (0.6 if id(p) in quant_ids else dtype_b)
+    del m
+    return int(n_params), float(weight_bytes)
 
 
 def preflight_vram(
@@ -189,9 +216,13 @@ def preflight_vram(
         return
     strict = os.environ.get("APOSTATE_STRICT_VRAM", "").lower() in ("1", "true", "yes")
 
+    # weight_bytes accounts for what 4-bit actually shrinks (2D Linear only); packed MoE
+    # experts / mamba / embeddings stay at compute_dtype. n_params passed in is just a count.
+    _n, weight_bytes = estimate_weight_footprint(
+        model_id, load_in_4bit=load_in_4bit, compute_dtype=compute_dtype)
     if n_params is None:
-        n_params = estimate_param_count(model_id)
-    if n_params is None:
+        n_params = _n
+    if n_params is None or weight_bytes is None:
         msg = ("could not estimate model size for the VRAM preflight "
                "(meta-device build failed). loading without a memory guard.")
         if strict:
@@ -208,14 +239,13 @@ def preflight_vram(
         log("warning: " + msg + " loading without a memory guard.")
         return
 
-    bpp = _bytes_per_param(load_in_4bit, compute_dtype)
-    weights = n_params * bpp
+    weights = weight_bytes
     overhead = weights * 0.15                      # loader copies / temporary buffers
     headroom = max(1.5e9, batch_size * 5e7)        # activations + kv cache, scales a bit
     need = weights + overhead + headroom
 
     g = 1e9
-    log(f"vram preflight: model ~{n_params/1e9:.2f}B params, "
+    log(f"vram preflight: model ~{n_params/1e9:.2f}B params, weights ~{weights/g:.1f} GB, "
         f"need ~{need/g:.1f} GB ({'4bit' if load_in_4bit else compute_dtype}), "
         f"free {free/g:.1f}/{total/g:.1f} GB on {device_name()}")
     if need > free:

@@ -287,11 +287,16 @@ class ProjectionController:
                 a = e["alpha"].get(mod_id, 0.0)
                 if a == 0.0:
                     continue
-                R = self._reader_R(e, layer)  # per-layer direction (falls back to single R)
+                R = self._reader_R(e, layer)  # removal direction (refusal R)
                 if R is None or R.shape[0] != x.shape[-1]:
                     continue
+                D = self._reader_D(e, layer)  # detector co-vector (contrastive); falls back to R
                 Rd = R.to(dtype=x.dtype, device=x.device)
-                contrib = (e["sign"] * a) * ((x @ Rd) @ Rd.t())
+                Dd = D.to(dtype=x.dtype, device=x.device) if D is not None else Rd
+                # detect along D, remove along R: x - a (x@D) R^T. with the contrastive co-vector
+                # D = R - W, x@D is ~0 on harmless (W reconstructs the harmless R-projection) and
+                # large on harmful -> refusal removed along R, harmless preserved -> lower KL.
+                contrib = (e["sign"] * a) * ((x @ Dd) @ Rd.t())
                 delta = contrib if delta is None else delta + contrib
             if delta is None:
                 return None
@@ -304,6 +309,12 @@ class ProjectionController:
         if rl is not None and layer is not None and layer < len(rl) and rl[layer] is not None:
             return rl[layer]
         return edit["R"]
+
+    def _reader_D(self, edit: dict, layer):
+        dl = edit.get("D_layers")
+        if dl is not None and layer is not None and layer < len(dl) and dl[layer] is not None:
+            return dl[layer]
+        return None  # caller falls back to R (plain orthogonal removal)
 
     def add_edit(self, name: str, sign: float, default_alpha: float = 0.0, kind: str = "hidden"):
         alpha = {id(m): default_alpha for m in self._modules_for_kind(kind)}
@@ -397,15 +408,26 @@ class ProjectionController:
         e["_cast"] = None
         self._refresh_oblique(e)
 
-    def set_reader_layer_subspace(self, layer_idx: int, R: torch.Tensor, name: str = "primary"):
-        # per-layer refusal direction for the reader edit (post-norm models need this)
+    def set_reader_layer_subspace(self, layer_idx: int, R: torch.Tensor, name: str = "primary",
+                                  D: torch.Tensor = None):
+        # per-layer refusal direction for the reader edit (post-norm models need this).
+        # R is the removal direction (refusal); D is the detector co-vector. the reader does
+        # x - a(x@D)R: with the contrastive co-vector D = R - W (see predictive_covector), x@D is
+        # ~0 on harmless prompts (W reconstructs the harmless R-projection) and large on harmful,
+        # so refusal is removed along R while harmless variance is preserved -> lower KL, the way
+        # the oblique writer path does. D defaults to R (plain orthogonal removal) when not given.
         e = self._edit(name)
         rl = e.get("R_layers")
         if rl is None:
             rl = [None] * len(self._reader_modules)
             e["R_layers"] = rl
+        dl = e.get("D_layers")
+        if dl is None:
+            dl = [None] * len(self._reader_modules)
+            e["D_layers"] = dl
         Rd = R.to(self.device).float()
         rl[layer_idx] = Rd
+        dl[layer_idx] = D.to(self.device).float() if D is not None else None
         if e["R"] is None:
             e["R"] = Rd  # representative so export() doesn't skip the edit
 
@@ -741,10 +763,13 @@ class ProjectionController:
                 head_alpha = 0.0
                 rl = e.get("R_layers")
                 if rl is not None:
+                    dl = e.get("D_layers")
                     out_edits.append({
                         "name": e["name"], "kind": "reader", "sign": e["sign"],
                         "R": e["R"].detach().cpu(),
                         "R_layers": [(r.detach().cpu() if r is not None else None) for r in rl],
+                        "D_layers": [(d.detach().cpu() if d is not None else None) for d in dl]
+                        if dl is not None else None,
                         "embed_alpha": 0.0, "head_alpha": 0.0, "layer_alphas": layer_alphas,
                     })
                     continue

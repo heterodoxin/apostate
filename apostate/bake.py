@@ -46,12 +46,14 @@ def _edit_out(mod, R: torch.Tensor, coeff: float, U: torch.Tensor = None):
         mod.bias.data = _edit_vec(mod.bias.data, R, coeff, U)
 
 
-def _edit_in(mod, R: torch.Tensor, coeff: float):
-    # project R out of `mod`'s input (reader side); input axis flips for Conv1D.
+def _edit_in(mod, R: torch.Tensor, coeff: float, U: torch.Tensor = None):
+    # input-side fold: W + coeff*(W @ (U or R)) @ R.t(). symmetric removal when U is None.
+    # the contrastive reader passes R=detector(D), U=removal(refusal R) so the baked weight
+    # matches the pre-hook x - a(x@D)R (detect along D, remove along R). Conv1D flips the axis.
     if _is_conv1d(mod):
-        mod.weight.data = _edit_linear(mod.weight.data, R, coeff)
+        mod.weight.data = _edit_linear(mod.weight.data, R, coeff, U)
     else:
-        mod.weight.data = _edit_embed(mod.weight.data, R, coeff)
+        mod.weight.data = _edit_embed(mod.weight.data, R, coeff, U)
 
 
 def _edit_head(W: torch.Tensor, R: torch.Tensor, coeff: float, U: torch.Tensor = None) -> torch.Tensor:
@@ -104,8 +106,10 @@ def bake(cfg: ApostateConfig, export: dict, tokenizer=None, drop_layers=None) ->
         R = e["R"].float()
         sign = float(e["sign"])
         if e.get("kind") == "reader":
-            # post-norm models: project the (per-layer) direction out of each reader's input columns
+            # post-norm models: project the (per-layer) direction out of each reader's input columns.
+            # D_layers (contrastive co-vector) is the removal direction; falls back to RL.
             R_layers = e.get("R_layers")
+            D_layers = e.get("D_layers")
             for L, layer in enumerate(layers):
                 a = float(e["layer_alphas"][L])
                 if a == 0:
@@ -113,9 +117,17 @@ def bake(cfg: ApostateConfig, export: dict, tokenizer=None, drop_layers=None) ->
                 RL = R
                 if R_layers is not None and L < len(R_layers) and R_layers[L] is not None:
                     RL = R_layers[L].float()
+                DL = None
+                if D_layers is not None and L < len(D_layers) and D_layers[L] is not None:
+                    DL = D_layers[L].float()
                 for mod in bundle.reader_modules(layer):
                     if isinstance(getattr(mod, "weight", None), torch.Tensor):
-                        _edit_in(mod, RL, sign * a)
+                        # detect along D, remove along R (matches the reader pre-hook). DL absent
+                        # -> symmetric removal along R. _edit_in(R=detector, U=removal).
+                        if DL is not None:
+                            _edit_in(mod, DL, sign * a, RL)
+                        else:
+                            _edit_in(mod, RL, sign * a)
             continue
         if e.get("kind") == "ple_gate":
             for L, layer in enumerate(layers):

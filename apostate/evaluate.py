@@ -6,9 +6,50 @@ from typing import Callable, Dict, List, Optional, Tuple
 import re
 import torch
 
-from .model import ModelBundle
+from .model import ModelBundle, config_value
 from .projectors import ProjectionController
 from .data import format_chat
+
+
+def _gen_new_tokens(bundle: ModelBundle, enc: dict, max_new_tokens: int) -> torch.Tensor:
+    """Run generate and return only the newly generated token ids (B, T).
+
+    No-op wrapper for normal causal LMs. For block-diffusion models (diffusion_gemma) the
+    custom denoising generate returns a GenerationOutput with `.sequences` and is driven by
+    the model's saved generation_config (max_denoising_steps, sampler, t_min/t_max), so the
+    autoregressive do_sample/temperature/max_new_tokens knobs don't apply.
+    """
+    model, tok = bundle.model, bundle.tokenizer
+    prompt_len = enc["input_ids"].shape[1]
+    if bundle.is_block_diffusion():
+        gen = model.generate(input_ids=enc["input_ids"],
+                             attention_mask=enc.get("attention_mask"))
+    else:
+        gen = model.generate(**enc, max_new_tokens=max_new_tokens, do_sample=False,
+                             pad_token_id=tok.pad_token_id)
+    seq = getattr(gen, "sequences", gen)  # diffusion generate returns a GenerationOutput
+    return seq[:, prompt_len:]
+
+
+def _kl_forward_inputs(bundle: ModelBundle, enc: dict, positions: int):
+    """Forward kwargs + the logit slice to compare for harmless KL.
+
+    Normal causal LM: compare the last K prompt positions' next-token distributions.
+    Block-diffusion: a bare forward denoises a RANDOM canvas (non-deterministic, so base vs
+    edit would be incomparable). Pin a deterministic canvas via decoder_input_ids and compare
+    logits over it -- this measures how much the edit shifts denoising on harmless prompts.
+    """
+    if not bundle.is_block_diffusion():
+        K = min(positions, enc["input_ids"].shape[1])
+        return enc, slice(-K, None)
+    clen = int(config_value(bundle.model.config, "canvas_length") or 64)
+    K = max(8, min(positions, clen))
+    pad = int(bundle.tokenizer.pad_token_id or 0)
+    B = enc["input_ids"].shape[0]
+    canvas = torch.full((B, K), pad, dtype=torch.long, device=enc["input_ids"].device)
+    fwd = dict(enc)
+    fwd["decoder_input_ids"] = canvas
+    return fwd, slice(0, K)
 
 _REFUSAL_STRONG = [
     "i cannot", "i can't", "i can not", "i won't", "i will not", "i'm sorry",
@@ -145,11 +186,7 @@ def generate(bundle: ModelBundle, instructions: List[str], max_new_tokens: int, 
     device = next(model.parameters()).device
     outs: List[str] = []
     for enc in _encoded_batches(bundle, instructions, batch_size, device):
-        gen = model.generate(
-            **enc, max_new_tokens=max_new_tokens, do_sample=False,
-            pad_token_id=tok.pad_token_id,
-        )
-        new = gen[:, enc["input_ids"].shape[1]:]
+        new = _gen_new_tokens(bundle, enc, max_new_tokens)
         outs.extend(tok.batch_decode(new, skip_special_tokens=True))
     return outs
 
@@ -309,11 +346,7 @@ def refusal_rate_bounded(
     seen = 0
     refused = 0
     for enc in _encoded_batches(bundle, instructions, batch_size, device):
-        gen = model.generate(
-            **enc, max_new_tokens=max_new_tokens, do_sample=False,
-            pad_token_id=tok.pad_token_id,
-        )
-        new = gen[:, enc["input_ids"].shape[1]:]
+        new = _gen_new_tokens(bundle, enc, max_new_tokens)
         completions = tok.batch_decode(new, skip_special_tokens=True)
         try:
             flags = judge_refusal(bundle, completions, batch_size)
@@ -351,11 +384,7 @@ def strict_refusal_rate_bounded(
     seen = 0
     refused = 0
     for enc in _encoded_batches(bundle, instructions, batch_size, device):
-        gen = model.generate(
-            **enc, max_new_tokens=max_new_tokens, do_sample=False,
-            pad_token_id=tok.pad_token_id,
-        )
-        new = gen[:, enc["input_ids"].shape[1]:]
+        new = _gen_new_tokens(bundle, enc, max_new_tokens)
         completions = tok.batch_decode(new, skip_special_tokens=True)
         prompt_chunk = instructions[seen : seen + len(completions)]
         try:
@@ -401,16 +430,16 @@ def kl_harmless(
         for i in range(0, len(prompts), batch_size):
             enc = tok(prompts[i : i + batch_size], return_tensors="pt", padding=True, add_special_tokens=False)
             enc = {k: v.to(device) for k, v in enc.items()}
-            K = min(positions, enc["input_ids"].shape[1])
+            fwd, sl = _kl_forward_inputs(bundle, enc, positions)
             with controller.bypassed():
-                base = model(**enc, use_cache=False).logits[:, -K:, :].float()
-            entries.append((enc, K, torch.log_softmax(base, dim=-1).half()))
+                base = model(**fwd, use_cache=False).logits[:, sl, :].float()
+            entries.append((fwd, sl, torch.log_softmax(base, dim=-1).half()))
         cache[key] = entries
 
     kls = []
-    for enc, K, base_lp in cache[key]:
+    for fwd, sl, base_lp in cache[key]:
         with controller.active():
-            edit = model(**enc, use_cache=False).logits[:, -K:, :].float()
+            edit = model(**fwd, use_cache=False).logits[:, sl, :].float()
         blp = base_lp.float()
         kl = (blp.exp() * (blp - torch.log_softmax(edit, dim=-1))).sum(-1)
         kls.append(kl.mean(dim=1).cpu())
