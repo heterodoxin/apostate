@@ -246,18 +246,33 @@ def bake(cfg: ApostateConfig, export: dict, tokenizer=None, drop_layers=None) ->
     tok = tokenizer or AutoTokenizer.from_pretrained(cfg.model, trust_remote_code=True)
     tok.save_pretrained(cfg.output_dir)
 
-    # Copy extra processor configs that save_pretrained skips (vision/video preprocessors).
-    # name_or_path resolves to the HF cache dir for hub models or the local path for local ones.
+    # Copy extra files save_pretrained skips: the SentencePiece tokenizer.model (Gemma 1/2/3/3n
+    # etc. need it; fast-tokenizer save_pretrained writes only tokenizer.json), plus vision/video
+    # processor configs. Resolve from the local dir if present, else the HF cache/hub -- for hub
+    # models tok.name_or_path is the repo id (not a path), so the local check alone always missed.
     _extra = [
+        "tokenizer.model",
         "preprocessor_config.json",
         "video_preprocessor_config.json",
         "processor_config.json",
     ]
     src_dir = Path(tok.name_or_path)
     for fname in _extra:
+        dst = Path(cfg.output_dir) / fname
+        if dst.exists():
+            continue  # save_pretrained already wrote it
         src_file = src_dir / fname
-        if src_file.exists():
-            shutil.copy2(src_file, Path(cfg.output_dir) / fname)
+        if not src_file.exists():
+            try:  # hub model: fetch from the HF cache (downloads only if not already cached)
+                from transformers.utils import cached_file
+                resolved = cached_file(
+                    cfg.model, fname, _raise_exceptions_for_missing_entries=False,
+                    _raise_exceptions_for_connection_errors=False)
+                src_file = Path(resolved) if resolved else None
+            except Exception:
+                src_file = None
+        if src_file and src_file.exists():
+            shutil.copy2(src_file, dst)
             print(f"[bake] copied {fname}", flush=True)
 
     print("[bake] done", flush=True)
