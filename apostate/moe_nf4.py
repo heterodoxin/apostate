@@ -87,10 +87,40 @@ def _nf4(mod, name: str, idx: int):
     return q, qs
 
 
+def quantize_linears_4bit(model: nn.Module, device: str = "cuda",
+                          skip: tuple = ("lm_head",), log=_log) -> int:
+    """Replace non-expert nn.Linear with bnb Linear4bit (4-bit on `device`) to free headroom.
+
+    Used alongside quantize_packed_experts so packed-MoE models drop from ~30GB (experts NF4 but
+    everything else bf16) to ~17GB. lm_head/embeddings stay full precision (small, quality). The
+    ROCm Linear4bit.forward is the patched triton NF4 matmul (see triton_nf4.patch_bnb_linear4bit).
+    """
+    import bitsandbytes as bnb
+    count = 0
+    for parent in list(model.modules()):
+        for cname, child in list(parent.named_children()):
+            if not isinstance(child, nn.Linear) or isinstance(child, bnb.nn.Linear4bit):
+                continue
+            if any(s in cname for s in skip):
+                continue
+            new = bnb.nn.Linear4bit(
+                child.in_features, child.out_features, bias=child.bias is not None,
+                compute_dtype=torch.bfloat16, quant_type="nf4", compress_statistics=True)
+            new.weight = bnb.nn.Params4bit(
+                child.weight.data, requires_grad=False, quant_type="nf4", compress_statistics=True)
+            if child.bias is not None:
+                new.bias = nn.Parameter(child.bias.data, requires_grad=False)
+            setattr(parent, cname, new.to(device))  # .to(cuda) triggers 4-bit quantization
+            count += 1
+    if count:
+        log(f"4-bit quantized {count} non-expert Linear layers")
+    return count
+
+
 # ---- per-arch patched forwards -------------------------------------------------------------
 # Each replaces the bf16 `F.linear(x, self.<name>[e])` with nf4_matmul(x, *self._nf4(name, e)).
 
-def _qwen3_5_moe_experts_forward(self, hidden_states, top_k_index, top_k_weights):
+def _packed_gateup_down_forward(self, hidden_states, top_k_index, top_k_weights):
     final = torch.zeros_like(hidden_states)
     with torch.no_grad():
         mask = torch.nn.functional.one_hot(top_k_index, num_classes=self.num_experts).permute(2, 1, 0)
@@ -111,8 +141,10 @@ def _qwen3_5_moe_experts_forward(self, hidden_states, top_k_index, top_k_weights
     return final
 
 
+# qwen3_5_moe and diffusion_gemma use a byte-identical experts forward (gate_up -> act -> down).
 _FORWARDS = {
-    "Qwen3_5MoeExperts": _qwen3_5_moe_experts_forward,
+    "Qwen3_5MoeExperts": _packed_gateup_down_forward,
+    "DiffusionGemmaTextExperts": _packed_gateup_down_forward,
 }
 
 
@@ -123,3 +155,21 @@ def _patch_forward(cls):
             f"packed-expert NF4 forward not implemented for {cls.__name__}. "
             f"add it to apostate.moe_nf4._FORWARDS")
     cls.forward = fn
+
+
+def has_packed_experts(model_id: str, trust_remote_code: bool = True) -> bool:
+    """Meta-probe whether this model stores experts as packed 3D Parameters (bnb can't 4-bit
+    those; moe_nf4 handles them). Uses the same loader resolver as the real load."""
+    try:
+        from accelerate import init_empty_weights
+        from .model import _resolve_model_loader
+        loader = _resolve_model_loader(model_id, trust_remote_code)
+        from transformers import AutoConfig
+        cfg = AutoConfig.from_pretrained(model_id, trust_remote_code=trust_remote_code)
+        with init_empty_weights():
+            m = loader.from_config(cfg, trust_remote_code=trust_remote_code)
+        found = any(packed_expert_params(mod) for mod in m.modules())
+        del m
+        return found
+    except Exception:
+        return False

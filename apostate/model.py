@@ -173,14 +173,19 @@ class ModelBundle:
             return True
         return type(self.model).__name__ == "DiffusionGemmaForBlockDiffusion"
 
-    def _diffusion_encoder_stack(self):
+    def _diffusion_edit_stack(self):
         if not self.is_block_diffusion():
             return None
-        enc = _path_get(self.model, ("model", "encoder", "language_model"))
-        return _as_decoder(enc)
+        # edit the DECODER (where refusal is emitted: lm_head reads its residual), analogous to a
+        # normal decoder-only LM. model(input_ids) runs encoder + a random-canvas decoder pass, so
+        # the decoder residuals during activation collection still separate harmful/harmless via
+        # cross-attention to the prompt. (editing only the encoder needs huge strength/KL -- the
+        # decoder emits refusal somewhat independently.)
+        dec = _path_get(self.model, ("model", "decoder"))
+        return _as_decoder(dec)
 
     def _decoder(self):
-        diff = self._diffusion_encoder_stack()
+        diff = self._diffusion_edit_stack()
         if diff is not None:
             return diff
         m = self.model
@@ -201,6 +206,19 @@ class ModelBundle:
     def layers(self) -> List[torch.nn.Module]:
         dec = self._decoder()
         return list(getattr(dec, "layers"))
+
+    def direction_layers(self) -> List[torch.nn.Module]:
+        # Layers to HOOK for refusal-direction extraction. Same as layers() for normal models.
+        # For block-diffusion the edit stack is the DECODER (emission) but the prompt's refusal
+        # is cleanest in the ENCODER -- and model(input_ids) runs the encoder -- so collect there.
+        # encoder and decoder are paired stacks (same depth/hidden), so direction[l] pairs with
+        # the decoder edit at layer l. Contrastive co-vector and everything else is unchanged.
+        if self.is_block_diffusion():
+            enc = _path_get(self.model, ("model", "encoder", "language_model"))
+            dec = _as_decoder(enc)
+            if dec is not None and hasattr(dec, "layers"):
+                return list(dec.layers)
+        return self.layers()
 
     def _hidden(self) -> Optional[int]:
         h = config_value(self.model.config, "hidden_size")
@@ -465,6 +483,13 @@ class ModelBundle:
         gate = getattr(layer, "per_layer_input_gate", None)
         if isinstance(gate, torch.nn.Module):
             out.append(gate)
+        # NF4-quantized packed experts (moe_nf4): their weights aren't editable nn.Linear, but a
+        # pre-hook on the experts module edits the hidden_states feeding them -- routing the reader
+        # co-vector into the expert path, where packed-MoE refusal actually lives. The experts
+        # forward is forward(hidden_states, top_k_index, top_k_weights), so args[0] is the residual.
+        for mod in layer.modules():
+            if hasattr(mod, "_nf4_experts"):
+                out.append(mod)
         out = [m for m in out if isinstance(m, torch.nn.Module)]
         if not out:
             # name-agnostic fallback: linear-likes that read the residual (input width == hidden),
@@ -567,6 +592,18 @@ def load_model(cfg: ApostateConfig) -> ModelBundle:
     accel.require_gpu(cfg.device)  # backend-aware error (steers AMD users to the ROCm wheel)
     backend = accel.gpu_backend()
 
+    # Optional hard VRAM cap (APOSTATE_VRAM_FRACTION=0.0-1.0). On a card that also drives the
+    # display, capping the process below 100% leaves headroom so the compositor/other GPU apps
+    # don't get starved (which shows up as system lag). Workload must fit under the cap or it OOMs.
+    import os as _os
+    _frac = _os.environ.get("APOSTATE_VRAM_FRACTION")
+    if _frac and cfg.device == "cuda":
+        try:
+            torch.cuda.set_per_process_memory_fraction(float(_frac))
+            _log(f"VRAM capped at {float(_frac)*100:.0f}% of the card (leaves headroom for the display)")
+        except Exception as e:
+            _log(f"could not set VRAM fraction ({_frac}): {e}")
+
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
 
@@ -657,7 +694,55 @@ def load_model(cfg: ApostateConfig) -> ModelBundle:
     model_loader = _resolve_model_loader(cfg.model, trust_remote_code=True)
     if model_loader is not AutoModelForCausalLM:
         _log(f"loading via {model_loader.__name__} (model_type not in CausalLM mapping)")
-    model = model_loader.from_pretrained(cfg.model, **kwargs)
+
+    from . import moe_nf4
+    packed_moe = use_4bit and offload_gb <= 0 and moe_nf4.has_packed_experts(cfg.model)
+    if packed_moe:
+        # bitsandbytes can't 4-bit packed 3D MoE experts -> they'd load as bf16 and OOM. Load on
+        # CPU (bf16), NF4-quantize the packed experts onto the GPU, 4-bit the rest, move it up.
+        _log("packed-MoE detected: loading on CPU (bf16), NF4-quantizing experts to GPU ...")
+        model = model_loader.from_pretrained(
+            cfg.model, torch_dtype=compute_dtype, low_cpu_mem_usage=True,
+            device_map={"": "cpu"}, trust_remote_code=True)
+        # text-only ablation: drop the vision tower + embedder FIRST, before any GPU quantization,
+        # so their (multi-GB) Linears are never 4-bit-quantized or moved to the GPU. The encoder
+        # forward only touches them when pixel_values is given (never for text prompts), so this is
+        # safe and frees several GB -- important on a card that also drives the display.
+        enc = _path_get(model, ("model", "encoder"))
+        if enc is not None:
+            for _vn in ("vision_tower", "embed_vision"):
+                if getattr(enc, _vn, None) is not None:
+                    setattr(enc, _vn, None)
+                    _log(f"dropped {_vn} (text-only; frees VRAM)")
+        moe_nf4.quantize_packed_experts(model, device=cfg.device, log=_log)
+        moe_nf4.quantize_linears_4bit(model, device=cfg.device, log=_log)
+        try:
+            model.to(cfg.device)
+        except torch.cuda.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            model.to(cfg.device)
+        # release the bf16 transients the per-expert/linear quantization left in the caching
+        # allocator -- otherwise PyTorch sits at the ~26GB quant peak (reserved, not freed) and
+        # starves the display even though steady-state is ~20GB. empty_cache drops it back.
+        torch.cuda.empty_cache()
+        # diffusion denoising generate is very slow at 48 steps x 256 canvas; cap it for eval.
+        if config_value(model.config, "model_type") == "diffusion_gemma":
+            gc = getattr(model, "generation_config", None)
+            if gc is not None and getattr(gc, "max_denoising_steps", None):
+                gc.max_denoising_steps = min(gc.max_denoising_steps, 8)
+            set_config_value(model.config, "canvas_length",
+                             min(int(config_value(model.config, "canvas_length") or 256), 32))
+            # DiffusionGemma's decoder rejects use_cache (it always caches), but apostate's
+            # activation/KL forwards pass use_cache=False. Strip it on this model's forward.
+            # generate() has its own path (self.model/_denoising_step) and is unaffected.
+            _orig_forward = model.forward
+            def _forward_strip_use_cache(*a, _f=_orig_forward, **kw):
+                kw.pop("use_cache", None)
+                return _f(*a, **kw)
+            model.forward = _forward_strip_use_cache
+            _log("diffusion fast-eval: max_denoising_steps<=8, canvas_length<=64; use_cache stripped")
+    else:
+        model = model_loader.from_pretrained(cfg.model, **kwargs)
     model.eval()
     model.requires_grad_(False)
 

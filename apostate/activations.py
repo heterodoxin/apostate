@@ -151,7 +151,7 @@ def collect_activations(
             per_layer[layer].append(t[:, -1, :].detach().to(torch.float16).cpu())
         return hook
 
-    for layer, mod in enumerate(bundle.layers()):
+    for layer, mod in enumerate(bundle.direction_layers()):
         handles.append(mod.register_forward_hook(make_hook(layer)))
 
     try:
@@ -186,7 +186,7 @@ def collect_layer_activations(
         t = _out_tensor(out)
         chunks.append(t[:, -1, :].detach().float().cpu())
 
-    handle = bundle.layers()[layer_idx].register_forward_hook(hook)
+    handle = bundle.direction_layers()[layer_idx].register_forward_hook(hook)
     try:
         for enc in batches:
             model(**enc, use_cache=False)

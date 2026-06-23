@@ -191,6 +191,10 @@ def estimate_weight_footprint(model_id: str, *, load_in_4bit: bool, compute_dtyp
         del m
         return int(n), float(n) * dtype_b
     quant_ids = {id(mod.weight) for mod in m.modules() if isinstance(mod, nn.Linear)}
+    # 3D packed MoE expert tensors are NF4-quantized by apostate.moe_nf4 (bnb skips them), so
+    # count them at the 4-bit rate too -- otherwise the preflight over-estimates packed MoEs
+    # (granite-4/SIQ/diffusion) and wrongly refuses what moe_nf4 makes fit.
+    quant_ids |= {id(p) for p in m.parameters() if p.dim() == 3}
     n_params = 0
     weight_bytes = 0.0
     for p in m.parameters():
