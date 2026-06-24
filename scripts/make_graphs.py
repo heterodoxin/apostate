@@ -74,18 +74,20 @@ print(f"wrote {ASSETS}/refusal_before_after.png and refusal_kl.png")
 # apostate / heretic: refusal %, harmless KL (nats), ablation wall (s)
 # fresh same-budget run: 16 trials, seed 0, AMD R9700 (gfx1201, ROCm). heretic = its best-refusal
 # Pareto point at 16 trials.
-metrics = ["Refusal (%)", "Harmless KL (nats)", "Ablation wall (s)"]
+metrics = ["Refusal (%)  ↓ lower better", "Harmless KL (nats)  ↓ lower better",
+           "Ablation wall (s)  ↓ lower better"]
 apo = [2.9, 0.095, 249.9]
 her = [15.0, 0.150, 420.0]
-ORANGE = "#f59e0b"
-fig, axes = plt.subplots(1, 3, figsize=(10, 4))
+GREEN, GRAY = "#16a34a", "#9ca3af"
+fig, axes = plt.subplots(1, 3, figsize=(10, 4.4))
 for ax, m, a, h in zip(axes, metrics, apo, her):
-    ax.bar(["Apostate", "Heretic"], [a, h], color=[PURPLE, ORANGE])
-    ax.set_title(m, fontsize=11)
-    for i, v in enumerate([a, h]):
-        ax.text(i, v, f"{v:g}", ha="center", va="bottom", fontsize=9)
-    ax.set_ylim(0, max(a, h) * 1.18); ax.grid(axis="y", alpha=0.3)
-fig.suptitle("Apostate vs Heretic 1.4.0 — Qwen2.5-7B, same 16-trial budget (lower = better on each)",
-             fontsize=12)
+    ax.bar(["Apostate", "Heretic"], [a, h], color=[GREEN, GRAY])
+    ax.set_title(m, fontsize=10)
+    ax.text(0, a, f"{a:g}  ✓", ha="center", va="bottom", fontsize=10, color=GREEN, fontweight="bold")
+    ax.text(1, h, f"{h:g}", ha="center", va="bottom", fontsize=9, color="#6b7280")
+    ax.set_ylim(0, max(a, h) * 1.22); ax.grid(axis="y", alpha=0.3)
+fig.suptitle("Apostate (green ✓) vs Heretic 1.4.0 — Qwen2.5-7B, same 16-trial budget\n"
+             "shorter bar = better on every metric; Apostate wins all three",
+             fontsize=11)
 fig.tight_layout(); fig.savefig(ASSETS / "vs_heretic.png", dpi=130); plt.close(fig)
 print(f"wrote {ASSETS}/vs_heretic.png")
