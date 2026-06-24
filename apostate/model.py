@@ -107,6 +107,16 @@ def _reads_residual(m, hidden) -> bool:
     return isinstance(m, _LINEAR_LIKE) and _io_features(m)[0] == hidden
 
 
+def _has_packed_reader(mod) -> bool:
+    # MoE experts module with an input-reading packed 3D weight (gate/up) -- the bf16 (bake) form
+    # of the NF4-quantized experts. carries refusal on the reader path, so it must be baked.
+    for name in ("gate_up_proj", "gate_proj", "w1"):
+        p = getattr(mod, name, None)
+        if isinstance(p, torch.nn.Parameter) and p.dim() == 3:
+            return True
+    return False
+
+
 def _config_sections(config):
     yield config
     for name in _CONFIG_SECTIONS:
@@ -488,7 +498,7 @@ class ModelBundle:
         # co-vector into the expert path, where packed-MoE refusal actually lives. The experts
         # forward is forward(hidden_states, top_k_index, top_k_weights), so args[0] is the residual.
         for mod in layer.modules():
-            if hasattr(mod, "_nf4_experts"):
+            if hasattr(mod, "_nf4_experts") or _has_packed_reader(mod):
                 out.append(mod)
         out = [m for m in out if isinstance(m, torch.nn.Module)]
         if not out:

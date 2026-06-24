@@ -78,6 +78,29 @@ def _edit_writer(mod, R: torch.Tensor, coeff: float, U: torch.Tensor = None):
     _edit_out(mod, R, coeff, U)
 
 
+def _packed_reader_param(mod):
+    # the experts' input-reading packed weight (gate/up), distinct from down_proj (the writer).
+    for name in ("gate_up_proj", "gate_proj", "w1"):
+        p = getattr(mod, name, None)
+        if isinstance(p, torch.nn.Parameter) and p.dim() == 3:
+            return p
+    return None
+
+
+def _edit_reader(mod, R: torch.Tensor, coeff: float, U: torch.Tensor = None) -> bool:
+    """Input-side reader fold. Plain Linear -> _edit_in. Packed 3D MoE experts -> per-expert
+    gate_up_proj slices (each a fixed linear op, so the fold composes under the router gates),
+    so the abliteration bakes into packed-MoE experts that aren't editable nn.Linears."""
+    if isinstance(getattr(mod, "weight", None), torch.Tensor):
+        _edit_in(mod, R, coeff, U)
+        return True
+    p = _packed_reader_param(mod)
+    if p is not None:
+        p.data = torch.stack([_edit_embed(p.data[i], R, coeff, U) for i in range(p.shape[0])], dim=0)
+        return True
+    return False
+
+
 @torch.no_grad()
 def bake(cfg: ApostateConfig, export: dict, tokenizer=None, drop_layers=None) -> str:
     edits = export.get("edits", [])
@@ -121,13 +144,12 @@ def bake(cfg: ApostateConfig, export: dict, tokenizer=None, drop_layers=None) ->
                 if D_layers is not None and L < len(D_layers) and D_layers[L] is not None:
                     DL = D_layers[L].float()
                 for mod in bundle.reader_modules(layer):
-                    if isinstance(getattr(mod, "weight", None), torch.Tensor):
-                        # detect along D, remove along R (matches the reader pre-hook). DL absent
-                        # -> symmetric removal along R. _edit_in(R=detector, U=removal).
-                        if DL is not None:
-                            _edit_in(mod, DL, sign * a, RL)
-                        else:
-                            _edit_in(mod, RL, sign * a)
+                    # detect along D, remove along R (matches the reader pre-hook); DL absent ->
+                    # symmetric removal along R. handles plain Linears AND packed MoE experts.
+                    if DL is not None:
+                        _edit_reader(mod, DL, sign * a, RL)
+                    else:
+                        _edit_reader(mod, RL, sign * a)
             continue
         if e.get("kind") == "ple_gate":
             for L, layer in enumerate(layers):
