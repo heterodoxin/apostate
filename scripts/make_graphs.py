@@ -72,9 +72,11 @@ print(f"wrote {ASSETS}/refusal_before_after.png and refusal_kl.png")
 
 # --- Graph 3: Apostate vs Heretic on Qwen2.5-7B (real same-budget numbers from the README) ---
 # apostate / heretic: refusal %, harmless KL (nats), ablation wall (s)
+# fresh same-budget run: 16 trials, seed 0, AMD R9700 (gfx1201, ROCm). heretic = its best-refusal
+# Pareto point at 16 trials.
 metrics = ["Refusal (%)", "Harmless KL (nats)", "Ablation wall (s)"]
-apo = [4.2, 0.143, 306.8]
-her = [8.3, 0.099, 1166.7]
+apo = [2.9, 0.095, 249.9]
+her = [15.0, 0.150, 420.0]
 ORANGE = "#f59e0b"
 fig, axes = plt.subplots(1, 3, figsize=(10, 4))
 for ax, m, a, h in zip(axes, metrics, apo, her):
@@ -83,7 +85,7 @@ for ax, m, a, h in zip(axes, metrics, apo, her):
     for i, v in enumerate([a, h]):
         ax.text(i, v, f"{v:g}", ha="center", va="bottom", fontsize=9)
     ax.set_ylim(0, max(a, h) * 1.18); ax.grid(axis="y", alpha=0.3)
-fig.suptitle("Apostate vs Heretic 1.3.0 — Qwen2.5-7B, same budget (lower = better on each)",
+fig.suptitle("Apostate vs Heretic 1.4.0 — Qwen2.5-7B, same 16-trial budget (lower = better on each)",
              fontsize=12)
 fig.tight_layout(); fig.savefig(ASSETS / "vs_heretic.png", dpi=130); plt.close(fig)
 print(f"wrote {ASSETS}/vs_heretic.png")

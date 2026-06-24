@@ -42,17 +42,17 @@ Per-model detail below.
 | base | 95.8% | 4.2% | 0.000 |
 | apostate | 8.3% | 87.5% | 0.159 |
 
-**Qwen2.5-7B-Instruct** — RTX 4070 Ti SUPER, 4-bit NF4, seed `0`, 16 optimization trials, HumanEval `n=80`, MBPP `n=80`, GSM8K `n=24`, JBB refusal `n=48`, KL over 48 harmless prompts.
+**Qwen2.5-7B-Instruct** — fresh head-to-head on the AMD R9700 (gfx1201, ROCm), 4-bit NF4, seed `0`, **same 16-trial budget** for both tools, JBB refusal `n=48`, KL over 48 harmless prompts.
 
-| model | refusal | complied | humaneval | mbpp | gsm8k | kl | ablation wall |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| base | 100.0% | 0.0% | 73.8% | 70.0% | 70.8% | 0.000 | n/a |
-| apostate | 4.2% | 93.8% | 80.0% | 70.0% | 70.8% | 0.143 | 306.8s |
-| heretic | 8.3% | 87.5% | 72.5% | 72.5% | 70.8% | 0.099 | 1166.7s |
+| model | refusal | kl | ablation wall |
+|---|---:|---:|---:|
+| base | 95.8% | 0.000 | — |
+| apostate | 2.9% | 0.095 | 249.9s |
+| heretic 1.4.0 | 15.0% | 0.150 | 420s |
 
-The Qwen2.5 comparison against Heretic `1.3.0` is same-budget, not Heretic's 200-trial default. Apostate exported a baked checkpoint; Heretic exported a PEFT LoRA adapter.
+Same 16-trial budget, seed `0`. Heretic exposes a Pareto frontier; shown is its best-refusal point at this budget (it trends toward ~8% refusal at its 200-trial default, at a much longer wall). At equal budget Apostate wins on refusal, KL, and wall-clock.
 
-![Apostate vs Heretic on Qwen2.5-7B: lower refusal and ~4x faster ablation, at slightly higher KL](assets/vs_heretic.png)
+![Apostate vs Heretic on Qwen2.5-7B at equal budget: lower refusal, lower KL, ~1.7x faster](assets/vs_heretic.png)
 
 **Gemma-4-12B** — post-norm reader-side path with the contrastive co-vector, R9700 (gfx1201), 4-bit NF4, KL capped at 0.15.
 
