@@ -27,6 +27,14 @@ All under [huggingface.co/heterodoxin](https://huggingface.co/heterodoxin), bake
 
 ## Current Numbers
 
+Across the published roster, Apostate takes models from near-total refusal to single-digit / low refusal, while keeping the change to harmless behavior (KL) small:
+
+![Refusal rate, base vs Apostate, across the roster](assets/refusal_before_after.png)
+
+![Refusal rate after edit vs harmless KL — every model lands in the low-refusal, low-KL corner](assets/refusal_kl.png)
+
+Per-model detail below.
+
 **Qwen3.6-27B** — AMD Radeon RX 9700 (gfx1201, ROCm 7.1.1), 4-bit NF4, JBB refusal `n=48`, KL over 48 harmless prompts.
 
 | model | refusal | complied | kl |
@@ -43,6 +51,8 @@ All under [huggingface.co/heterodoxin](https://huggingface.co/heterodoxin), bake
 | heretic | 8.3% | 87.5% | 72.5% | 72.5% | 70.8% | 0.099 | 1166.7s |
 
 The Qwen2.5 comparison against Heretic `1.3.0` is same-budget, not Heretic's 200-trial default. Apostate exported a baked checkpoint; Heretic exported a PEFT LoRA adapter.
+
+![Apostate vs Heretic on Qwen2.5-7B: lower refusal and ~4x faster ablation, at slightly higher KL](assets/vs_heretic.png)
 
 **Gemma-4-12B** — post-norm reader-side path with the contrastive co-vector, R9700 (gfx1201), 4-bit NF4, KL capped at 0.15.
 
