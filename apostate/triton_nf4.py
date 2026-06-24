@@ -17,6 +17,30 @@ import triton
 import triton.language as tl
 import torch.nn.functional as F
 
+
+def _install_do_bench_guard():
+    # ROCm (gfx1201) timer occasionally measures estimate_ms=0 for a very fast kernel, and triton's
+    # do_bench then divides by it -> ZeroDivisionError that crashes the whole forward mid-autotune.
+    # Treat a glitched config as worst (inf) so a working config is chosen instead of crashing.
+    import triton.testing as _tt
+    if getattr(_tt.do_bench, "_rocm_guarded", False):
+        return
+    _orig = _tt.do_bench
+    def _guarded(*args, **kwargs):
+        try:
+            return _orig(*args, **kwargs)
+        except ZeroDivisionError:
+            return float("inf")
+    _guarded._rocm_guarded = True
+    _tt.do_bench = _guarded
+    try:
+        import triton.runtime.autotuner as _at
+        _at.do_bench = _guarded
+    except Exception:
+        pass
+
+_install_do_bench_guard()
+
 # ---------------------------------------------------------------------------
 # Double-quantized absmax dequantization (uint8 → float32)
 # ---------------------------------------------------------------------------
