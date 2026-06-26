@@ -117,6 +117,104 @@ def quantize_linears_4bit(model: nn.Module, device: str = "cuda",
     return count
 
 
+def load_packed_moe_streaming(model_loader, model_id: str, device: str, compute_dtype,
+                              skip_substrings=("vision_tower", "embed_vision"), log=_log):
+    """Load a packed-MoE checkpoint with a CPU-RAM peak of ~one tensor (not the whole bf16 model).
+
+    Builds the skeleton on `meta` (params only -- buffers stay real so RoPE inv_freq is computed),
+    then reads the safetensors key-by-key: each packed 3D expert is NF4-quantized straight to
+    `device` with its bf16 freed immediately, every other weight is placed on `device`. A 50GB+
+    model thus loads on a box with <30GB free RAM (e.g. when the display/other apps hold the rest).
+    The returned model is GPU-ready: experts NF4, Linears 4-bit, and any tied encoder mirror wired
+    to the decoder's quantized leaves (so load_model skips quantize_*/`.to` for the streamed path)."""
+    import glob
+    import os
+    from accelerate import init_empty_weights
+    from accelerate.utils import set_module_tensor_to_device
+    from safetensors import safe_open
+    from huggingface_hub import snapshot_download
+    from transformers import AutoConfig
+
+    path = snapshot_download(model_id)
+    config = AutoConfig.from_pretrained(path, trust_remote_code=True)
+    with init_empty_weights(include_buffers=False):
+        model = model_loader.from_config(config, trust_remote_code=True)
+
+    expert_at = {}  # checkpoint key -> (module, short param name)
+    for mname, mod in model.named_modules():
+        for sn in packed_expert_params(mod):
+            expert_at[f"{mname}.{sn}" if mname else sn] = (mod, sn)
+
+    stores, patched, n_exp, n_w = {}, set(), 0, 0
+    shards = sorted(glob.glob(os.path.join(path, "*.safetensors")))
+    for shard in shards:
+        with safe_open(shard, framework="pt", device="cpu") as f:
+            for key in f.keys():
+                if any(s in key for s in skip_substrings):
+                    continue
+                if key in expert_at:
+                    mod, sn = expert_at[key]
+                    t = f.get_tensor(key)
+                    stores.setdefault(id(mod), (mod, {}))[1][sn] = _quantize_slices(t, device)
+                    setattr(mod, sn + "_nf4_shape", tuple(t.shape))
+                    mod._parameters.pop(sn, None)
+                    del t
+                    n_exp += 1
+                    cls = type(mod)
+                    if cls not in patched:
+                        _patch_forward(cls)
+                        patched.add(cls)
+                else:
+                    t = f.get_tensor(key)
+                    if t.is_floating_point():
+                        t = t.to(compute_dtype)
+                    set_module_tensor_to_device(model, key, device, value=t)
+                    del t
+                    n_w += 1
+    for mod, store in stores.values():
+        mod._nf4_experts = store
+
+    # 4-bit the Linears, then re-tie the encoder's tied mirror onto the decoder's quantized leaves.
+    def _has(p):
+        try:
+            model.get_submodule(p)
+            return True
+        except AttributeError:
+            return False
+
+    n_tied = 0
+    if _has("model.decoder") and _has("model.encoder.language_model"):
+        quantize_linears_4bit(model.get_submodule("model.decoder"), device=device, log=log)
+        for dname, dmod in list(model.named_modules()):
+            if not dname.startswith("model.decoder"):
+                continue
+            if getattr(dmod, "_nf4_experts", None) is None and not any(
+                    p is not None for p in dmod._parameters.values()):
+                continue  # container with no direct weight to share
+            parent_name, _, leaf = dname.replace(
+                "model.decoder", "model.encoder.language_model", 1).rpartition(".")
+            if _has(parent_name) and hasattr(model.get_submodule(parent_name), leaf):
+                setattr(model.get_submodule(parent_name), leaf, dmod)
+                n_tied += 1
+        lm = getattr(model, "lm_head", None)
+        if lm is not None and getattr(lm, "weight", None) is not None and lm.weight.is_meta:
+            lm.weight = model.get_submodule("model.decoder.embed_tokens").weight
+    else:
+        quantize_linears_4bit(model, device=device, log=log)
+        try:
+            model.tie_weights()
+        except Exception as e:
+            log(f"tie_weights after streaming load: {e}")
+
+    meta = [n for n, p in model.named_parameters()
+            if p.is_meta and not any(s in n for s in skip_substrings)]
+    if meta:
+        log(f"WARNING: {len(meta)} non-vision params still on meta after streaming, e.g. {meta[:4]}")
+    log(f"streaming packed-MoE load: {n_exp} experts NF4 + {n_w} weights on {device}, "
+        f"{n_tied} encoder leaves tied to decoder; patched {[c.__name__ for c in patched]}")
+    return model
+
+
 # ---- per-arch patched forwards -------------------------------------------------------------
 # Each replaces the bf16 `F.linear(x, self.<name>[e])` with nf4_matmul(x, *self._nf4(name, e)).
 

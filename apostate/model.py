@@ -186,13 +186,27 @@ class ModelBundle:
     def _diffusion_edit_stack(self):
         if not self.is_block_diffusion():
             return None
-        # edit the DECODER (where refusal is emitted: lm_head reads its residual), analogous to a
-        # normal decoder-only LM. model(input_ids) runs encoder + a random-canvas decoder pass, so
-        # the decoder residuals during activation collection still separate harmful/harmless via
-        # cross-attention to the prompt. (editing only the encoder needs huge strength/KL -- the
-        # decoder emits refusal somewhat independently.)
-        dec = _path_get(self.model, ("model", "decoder"))
-        return _as_decoder(dec)
+        # edit/extract on the ENCODER (the KV source): the decoder reads the prompt only via the
+        # read-only encoder KV cache, re-read every decoder layer, so cleaning the encoder cleans
+        # the KV before the decoder ever sees it. reader_modules ALSO pairs in the matching decoder
+        # layer's readers so the decoder's intrinsic refusal is removed too (both-stacks).
+        enc = _as_decoder(_path_get(self.model, ("model", "encoder", "language_model")))
+        if enc is not None:
+            return enc
+        return _as_decoder(_path_get(self.model, ("model", "encoder")))
+
+    def _diffusion_decoder_layers(self):
+        dec = _as_decoder(_path_get(self.model, ("model", "decoder")))
+        return list(dec.layers) if dec is not None and hasattr(dec, "layers") else []
+
+    def _paired_decoder_layer(self, enc_layer):
+        # given an encoder (edit-stack) layer, return the matching decoder layer (same index/depth).
+        enc_layers = self.layers()
+        dec_layers = self._diffusion_decoder_layers()
+        for i, L in enumerate(enc_layers):
+            if L is enc_layer and i < len(dec_layers):
+                return dec_layers[i]
+        return None
 
     def _decoder(self):
         diff = self._diffusion_edit_stack()
@@ -218,16 +232,9 @@ class ModelBundle:
         return list(getattr(dec, "layers"))
 
     def direction_layers(self) -> List[torch.nn.Module]:
-        # Layers to HOOK for refusal-direction extraction. Same as layers() for normal models.
-        # For block-diffusion the edit stack is the DECODER (emission) but the prompt's refusal
-        # is cleanest in the ENCODER -- and model(input_ids) runs the encoder -- so collect there.
-        # encoder and decoder are paired stacks (same depth/hidden), so direction[l] pairs with
-        # the decoder edit at layer l. Contrastive co-vector and everything else is unchanged.
-        if self.is_block_diffusion():
-            enc = _path_get(self.model, ("model", "encoder", "language_model"))
-            dec = _as_decoder(enc)
-            if dec is not None and hasattr(dec, "layers"):
-                return list(dec.layers)
+        # Extract the refusal direction from the edit stack. For block-diffusion that is the ENCODER
+        # (the clean KV source; model(input_ids) runs it). Shared weights make the encoder-extracted
+        # direction valid for the paired decoder readers too (see reader_modules / _diffusion_edit_stack).
         return self.layers()
 
     def _hidden(self) -> Optional[int]:
@@ -485,7 +492,7 @@ class ModelBundle:
             out.extend(self._mlp_readers(mlp))
         return out
 
-    def reader_modules(self, layer: torch.nn.Module) -> List[torch.nn.Module]:
+    def _collect_readers(self, layer: torch.nn.Module) -> List[torch.nn.Module]:
         # the readers that carry the refusal feature: mlp gate/up plus the per-layer gate.
         # attention q/k/v are excluded on purpose -- ablating them perturbs attention
         # patterns (and shared-kv layers) for no refusal gain; refusal lives in the mlp path.
@@ -493,14 +500,22 @@ class ModelBundle:
         gate = getattr(layer, "per_layer_input_gate", None)
         if isinstance(gate, torch.nn.Module):
             out.append(gate)
-        # NF4-quantized packed experts (moe_nf4): their weights aren't editable nn.Linear, but a
-        # pre-hook on the experts module edits the hidden_states feeding them -- routing the reader
-        # co-vector into the expert path, where packed-MoE refusal actually lives. The experts
-        # forward is forward(hidden_states, top_k_index, top_k_weights), so args[0] is the residual.
+        # NF4-quantized packed experts (moe_nf4): a pre-hook on the experts module edits the
+        # hidden_states feeding them -- routing the reader co-vector into the expert path.
         for mod in layer.modules():
             if hasattr(mod, "_nf4_experts") or _has_packed_reader(mod):
                 out.append(mod)
-        out = [m for m in out if isinstance(m, torch.nn.Module)]
+        return [m for m in out if isinstance(m, torch.nn.Module)]
+
+    def reader_modules(self, layer: torch.nn.Module) -> List[torch.nn.Module]:
+        # block-diffusion: ALSO edit the paired decoder layer's readers. the encoder edit cleans the
+        # KV; once it's clean the decoder edit removes its intrinsic refusal (shared weights, so the
+        # encoder-extracted direction is valid for both stacks). non-diffusion: just this layer.
+        out = self._collect_readers(layer)
+        if self.is_block_diffusion():
+            dec_layer = self._paired_decoder_layer(layer)
+            if dec_layer is not None:
+                out = out + self._collect_readers(dec_layer)
         if not out:
             # name-agnostic fallback: linear-likes that read the residual (input width == hidden),
             # minus the writers (an o_proj can share the hidden width when heads*head_dim == hidden)
@@ -591,6 +606,19 @@ def _resolve_model_loader(model_id: str, trust_remote_code: bool):
         if model_type in mapping and hasattr(tf, cls_name):
             return getattr(tf, cls_name)
     return AutoModel
+
+
+def _safetensors_size_gb(model_id: str) -> float:
+    """On-disk bf16 size of a (cached) model's .safetensors, in GB; 0 if not locally available.
+    Used to decide whether the bf16 staging would OOM and we should stream the load instead."""
+    try:
+        import glob
+        import os
+        from huggingface_hub import snapshot_download
+        d = snapshot_download(model_id, allow_patterns=["*.safetensors"], local_files_only=True)
+        return sum(os.path.getsize(f) for f in glob.glob(os.path.join(d, "*.safetensors"))) / 1e9
+    except Exception:
+        return 0.0
 
 
 def load_model(cfg: ApostateConfig) -> ModelBundle:
@@ -708,12 +736,26 @@ def load_model(cfg: ApostateConfig) -> ModelBundle:
     from . import moe_nf4
     packed_moe = use_4bit and offload_gb <= 0 and moe_nf4.has_packed_experts(cfg.model)
     if packed_moe:
-        # bitsandbytes can't 4-bit packed 3D MoE experts -> they'd load as bf16 and OOM. Load on
-        # CPU (bf16), NF4-quantize the packed experts onto the GPU, 4-bit the rest, move it up.
-        _log("packed-MoE detected: loading on CPU (bf16), NF4-quantizing experts to GPU ...")
-        model = model_loader.from_pretrained(
-            cfg.model, torch_dtype=compute_dtype, low_cpu_mem_usage=True,
-            device_map={"": "cpu"}, trust_remote_code=True)
+        # bitsandbytes can't 4-bit packed 3D MoE experts -> they'd load as bf16 and OOM. Normally
+        # we stage the whole bf16 on CPU, NF4-quantize the experts onto the GPU, 4-bit the rest, and
+        # move it up. But if the bf16 model won't fit free CPU RAM (big MoE + the display/other apps
+        # holding memory), stage it on CPU and the OOM-killer takes us out -> stream instead: read
+        # the checkpoint key-by-key, quantizing each expert straight to GPU (CPU peak ~one tensor).
+        import psutil as _psutil
+        avail_gb = _psutil.virtual_memory().available / 1e9
+        model_gb = _safetensors_size_gb(cfg.model)
+        split = model_gb > 0 and model_gb > avail_gb * 0.85
+        if split:
+            # bf16 won't fit CPU RAM; stream the checkpoint key-by-key, NF4-quantizing experts to GPU.
+            _log(f"packed-MoE: {model_gb:.0f}GB bf16 won't fit {avail_gb:.0f}GB free RAM -> "
+                 f"streaming load (NF4-quantize experts to GPU as the checkpoint is read)")
+            model = moe_nf4.load_packed_moe_streaming(
+                model_loader, cfg.model, cfg.device, compute_dtype, log=_log)
+        else:
+            _log("packed-MoE detected: loading on CPU (bf16), NF4-quantizing experts to GPU ...")
+            model = model_loader.from_pretrained(
+                cfg.model, torch_dtype=compute_dtype, low_cpu_mem_usage=True,
+                device_map={"": "cpu"}, trust_remote_code=True)
         # text-only ablation: drop the vision tower + embedder FIRST, before any GPU quantization,
         # so their (multi-GB) Linears are never 4-bit-quantized or moved to the GPU. The encoder
         # forward only touches them when pixel_values is given (never for text prompts), so this is
@@ -724,13 +766,15 @@ def load_model(cfg: ApostateConfig) -> ModelBundle:
                 if getattr(enc, _vn, None) is not None:
                     setattr(enc, _vn, None)
                     _log(f"dropped {_vn} (text-only; frees VRAM)")
-        moe_nf4.quantize_packed_experts(model, device=cfg.device, log=_log)
-        moe_nf4.quantize_linears_4bit(model, device=cfg.device, log=_log)
-        try:
-            model.to(cfg.device)
-        except torch.cuda.OutOfMemoryError:
-            torch.cuda.empty_cache()
-            model.to(cfg.device)
+        if not split:
+            # the streamed path already quantized and placed everything; only CPU-staging needs this.
+            moe_nf4.quantize_packed_experts(model, device=cfg.device, log=_log)
+            moe_nf4.quantize_linears_4bit(model, device=cfg.device, log=_log)
+            try:
+                model.to(cfg.device)
+            except torch.cuda.OutOfMemoryError:
+                torch.cuda.empty_cache()
+                model.to(cfg.device)
         # release the bf16 transients the per-expert/linear quantization left in the caching
         # allocator -- otherwise PyTorch sits at the ~26GB quant peak (reserved, not freed) and
         # starves the display even though steady-state is ~20GB. empty_cache drops it back.
@@ -739,7 +783,7 @@ def load_model(cfg: ApostateConfig) -> ModelBundle:
         if config_value(model.config, "model_type") == "diffusion_gemma":
             gc = getattr(model, "generation_config", None)
             if gc is not None and getattr(gc, "max_denoising_steps", None):
-                gc.max_denoising_steps = min(gc.max_denoising_steps, 8)
+                gc.max_denoising_steps = min(gc.max_denoising_steps, int(cfg.eval_denoising_steps))
             set_config_value(model.config, "canvas_length",
                              min(int(config_value(model.config, "canvas_length") or 256), 32))
             # DiffusionGemma's decoder rejects use_cache (it always caches), but apostate's
@@ -750,7 +794,7 @@ def load_model(cfg: ApostateConfig) -> ModelBundle:
                 kw.pop("use_cache", None)
                 return _f(*a, **kw)
             model.forward = _forward_strip_use_cache
-            _log("diffusion fast-eval: max_denoising_steps<=8, canvas_length<=64; use_cache stripped")
+            _log(f"diffusion fast-eval: max_denoising_steps<={cfg.eval_denoising_steps}, canvas_length<=32; use_cache stripped")
     else:
         model = model_loader.from_pretrained(cfg.model, **kwargs)
     model.eval()

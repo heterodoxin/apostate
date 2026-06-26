@@ -36,6 +36,7 @@ from .evaluate import (
     strict_refusal_rate as refusal_rate,
     strict_refusal_rate_bounded as refusal_rate_bounded,
     kl_harmless,
+    diffusion_refusal_proxy,
 )
 from .optimize import optimize_profile, _head_token_subspace, _has_optuna
 from .bake import bake
@@ -1366,19 +1367,23 @@ def _reader_profile(bundle, controller, ah, al, cfg, preserve_lookup, eval_harmf
             controller.set_layer_alpha(l, g * causal[l])
 
     controller.enable()
-    # rank strengths by real generated refusal (the logit margin is unreliable on post-norm
-    # models) and pick the best refusal/KL tradeoff under the budget -- the knee, NOT max
-    # ablation under budget (that overshoots: gemma's contrastive reader gives 25%/0.126 at
-    # strength 3 but the greedy pick drove to 7 -> 0.44 kl for only 9pts more refusal removed).
+    # pick the knee (best refusal/KL, not max ablation); on diffusion rank by the fast encoder proxy.
+    L_dir = max(0, min(nl - 1, int(nl * cfg.direction_layer_frac)))
+    fast = bool(getattr(cfg, "reader_fast_proxy", False)) and bundle.is_block_diffusion()
+    if fast:
+        log(f"reader fast-proxy: ranking strengths by encoder-residual refusal projection "
+            f"@ layer {L_dir} (one forward/strength, not an 8-step generate)")
     w = float(getattr(cfg, "reader_strength_kl_weight", 1.0))
     best = None      # best feasible by tradeoff score: (g, ref, kl, score)
     fallback = None  # gentlest (lowest-kl) tried, used only if nothing is feasible
     for g in cfg.reader_strengths:
         apply(g)
-        with controller.active():
-            ref = refusal_rate(bundle, hset, cfg.opt_gen_tokens, cfg.batch_size)
+        ref = diffusion_refusal_proxy(bundle, controller, hset, L_dir, cfg.batch_size) if fast else None
+        if ref is None:  # proxy disabled or unavailable -> real generated refusal
+            with controller.active():
+                ref = refusal_rate(bundle, hset, cfg.opt_gen_tokens, cfg.batch_size)
         kl = kl_harmless(bundle, controller, lset, cfg.batch_size, positions=cfg.kl_positions)
-        log(f"  reader strength {g}: refusal={ref:.3f} kl={kl:.3f}")
+        log(f"  reader strength {g}: {'proxy' if fast else 'refusal'}={ref:.3f} kl={kl:.3f}")
         if fallback is None or kl < fallback[2]:
             fallback = (g, ref, kl)
         if kl <= cfg.reader_max_kl:
@@ -1419,6 +1424,9 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
     arch = f"MoE ({nw} writers/layer)" if bundle.is_moe() else "dense"
     _log(f"{bundle.num_layers} layers, hidden={bundle.hidden_size}, {arch}, direction layer={L_dir}")
     mark("load_model")
+    if bundle.uses_post_norm() and not cfg.fit_response_activations:
+        cfg.fit_response_activations = True  # response-decision direction disentangles refusal from topic -> low KL post-norm
+        _log("post-norm: response-based directions on (refusal-decision contrast, not harmful-topic)")
 
     harmful = _cached_prompts(cfg, "harmful_fit", cfg.harmful_path, cfg.n_harmful + cfg.n_eval, cfg.seed)
     harmless = _cached_prompts(cfg, "harmless_fit", cfg.harmless_path, cfg.n_harmless, cfg.seed)
@@ -1455,6 +1463,8 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
 
     controller = ProjectionController(bundle)
     controller.disable()
+    # let kl_harmless persist the diffusion base reference (a full generate per batch) to disk.
+    controller._kl_disk = (_activation_cache_dir(cfg), cfg.model, cfg.resume)
 
     if cfg.baseline_eval_n and cfg.baseline_eval_n > 0:
         base_eval = test_harmful[: max(1, min(len(test_harmful), cfg.baseline_eval_n))]

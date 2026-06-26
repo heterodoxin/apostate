@@ -116,6 +116,7 @@ class ApostateConfig:
     opt_capability_math_n: int = 8
     opt_eval_n: int = 32
     opt_gen_tokens: int = 32
+    eval_denoising_steps: int = 8  # block-diffusion: denoising steps per eval generate (lower=faster)
     opt_objective: str = "generation"
     opt_rerank_k: int = 5
     opt_guard: bool = True
@@ -157,7 +158,9 @@ class ApostateConfig:
     # post-norm models (reader-side ablation) need more kl headroom to decensor
     reader_max_kl: float = 0.55
     reader_kl_target: float = 0.3
-    reader_strengths: tuple = (2.0, 3.0, 4.0, 5.0, 6.0, 7.0)
+    reader_strengths: tuple = (2.0, 2.5, 2.75, 3.0, 4.0, 5.0)
+    # block-diffusion: rank strengths by the encoder-residual proxy (one forward, ~75x faster).
+    reader_fast_proxy: bool = True
     reader_guard_rank: int = 3   # corrective directions the reader guard may add
     reader_margin_target: float = -1.0   # sweep stops once comply tokens win by this margin
     # reader strength pick = min(refusal + w*kl) among strengths under reader_max_kl, i.e. the

@@ -102,6 +102,8 @@ class ProjectionController:
         self.add_edit("primary", sign=-1.0, default_alpha=1.0,
                       kind="reader" if self.reader_mode else "hidden")
         self.add_edit("head_token", sign=-1.0, default_alpha=0.0)
+        if self.reader_mode:  # also scrub refusal from each layer's residual output (per-layer R)
+            self.add_edit("residual", sign=-1.0, default_alpha=0.0, kind="residual")
         if any(self._ple_writers):
             self.add_edit("ple", sign=-1.0, default_alpha=0.0, kind="ple_gate")
         if self._ple_embed is not None:
@@ -148,6 +150,9 @@ class ProjectionController:
                 for m in mods:
                     self._module_layer[id(m)] = li
                     self._ensure_pre_hook(m)
+            for li, layer in enumerate(self._residual_layers):  # layer-output hook for the residual edit
+                self._module_layer[id(layer)] = li
+                self._ensure_hook(layer)
 
     def _ensure_hook(self, module: torch.nn.Module):
         mid = id(module)
@@ -244,19 +249,29 @@ class ProjectionController:
                 return out
             t = out[0] if isinstance(out, tuple) else out
             delta = None
+            layer = self._module_layer.get(mod_id)
             for e in self.edits:
                 if e.get("kind") == "reader":  # reader edits run on inputs, via pre-hooks
-                    continue
-                R = e["R"]
-                if R is None:
                     continue
                 a = e["alpha"].get(mod_id, 0.0)
                 if a == 0.0:
                     continue
-                if R.shape[0] != t.shape[-1]:
-                    continue
-                left, right = self._project_pair(e, t.dtype, t.device, mod_id)
-                term = (t @ right) @ left.t()
+                rlay = e.get("R_layers")  # residual edit carries a per-layer direction (post-norm)
+                if rlay is not None and layer is not None and layer < len(rlay) and rlay[layer] is not None:
+                    Rp = rlay[layer]
+                    if Rp.shape[0] != t.shape[-1]:
+                        continue
+                    Rd = Rp.to(dtype=t.dtype, device=t.device)
+                    dlay = e.get("D_layers")  # contrastive co-vector: detect along D, remove along R
+                    Dp = dlay[layer] if (dlay is not None and layer < len(dlay)) else None
+                    Dd = Dp.to(dtype=t.dtype, device=t.device) if Dp is not None else Rd
+                    term = (t @ Dd) @ Rd.t()
+                else:
+                    R = e["R"]
+                    if R is None or R.shape[0] != t.shape[-1]:
+                        continue
+                    left, right = self._project_pair(e, t.dtype, t.device, mod_id)
+                    term = (t @ right) @ left.t()
                 contrib = (e["sign"] * a) * term
                 delta = contrib if delta is None else delta + contrib
             if delta is None:
@@ -435,6 +450,26 @@ class ProjectionController:
         rl = self._edit(name).get("R_layers")
         r = rl[layer_idx] if rl is not None else None
         return r.detach().cpu() if r is not None else None
+
+    def set_residual_layer_subspace(self, layer_idx: int, R: torch.Tensor, D: torch.Tensor = None,
+                                    name: str = "residual"):
+        # per-layer refusal direction for the residual edit: scrubbed from each layer's output
+        # (norm-agnostic, unlike writer-weight edits that post-norm renormalizes away). D is the
+        # contrastive co-vector (detect along D ~0 on harmless, remove along R) -> low KL.
+        e = self._edit(name)
+        rl = e.get("R_layers")
+        if rl is None:
+            rl = [None] * len(self._residual_layers)
+            e["R_layers"] = rl
+        dl = e.get("D_layers")
+        if dl is None:
+            dl = [None] * len(self._residual_layers)
+            e["D_layers"] = dl
+        Rd = R.to(self.device).float()
+        rl[layer_idx] = Rd
+        dl[layer_idx] = D.to(self.device).float() if D is not None else None
+        if e["R"] is None:
+            e["R"] = Rd  # representative so export() doesn't skip the edit
 
     def _layer_targets(self, edit: dict, layer_idx: int):
         # reader edits act on the layer's readers; everything else on its writers
