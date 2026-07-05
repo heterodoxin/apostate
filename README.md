@@ -31,6 +31,25 @@ python -m pip install transformers accelerate datasets safetensors optuna bitsan
 
 The TUI is pure Python (Textual), so there is no Node dependency.
 
+### AMD / ROCm
+
+`apostate setup` detects an AMD GPU (it looks for `/dev/kfd`) and offers the ROCm path, which installs a ROCm build of Torch that bundles its own ROCm runtime. To install by hand instead:
+
+```bash
+python -m pip install --index-url https://download.pytorch.org/whl/rocm6.4 torch torchvision torchaudio
+python -m pip install transformers accelerate datasets safetensors optuna textual
+```
+
+RDNA4 cards (Radeon RX 9000 series, R9700, `gfx1201`) need ROCm 6.4 or newer. If `apostate doctor` reports the GPU cannot run a kernel, the Torch wheel's bundled runtime is too old for your card: install the system ROCm stack from AMD and retry.
+
+- Linux install guide: https://rocm.docs.amd.com/projects/install-on-linux/en/latest/
+- Packaged installer: `amdgpu-install --usecase=rocm` (RDNA4 needs ROCm 6.4+; use a newer Torch wheel index such as `rocm6.4` to match).
+- Verify with `rocminfo` (it should list your `gfx` target), then run `apostate doctor`.
+
+bitsandbytes 4-bit is CUDA-first, so on ROCm apostate runs bf16 by default; a 24GB+ card handles models up to about 14B comfortably. For ROCm 4-bit, install a ROCm build of bitsandbytes manually.
+
+Always run `apostate doctor` after install. It executes a real GPU kernel and catches an RDNA4/gfx12xx-on-old-ROCm mismatch before any large model load.
+
 ## Why it's better
 
 Abliteration itself is not new. The popular tool for it is **Heretic**, and Apostate beats it head-to-head. Same model, same 16-trial budget, same seed:

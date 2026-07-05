@@ -97,6 +97,12 @@ def main(argv=None) -> int:
         print("  note: skipping bitsandbytes (4-bit is experimental on ROCm). bf16 is the\n"
               "        recommended path; a 24GB+ card runs <=14B models in bf16 comfortably.\n"
               "        for ROCm 4-bit later: install a ROCm build of bitsandbytes manually.")
+        print("  system ROCm: the Torch wheel bundles its own runtime, so most cards need no\n"
+              "        system install. RDNA4 (gfx1201 / RX 9000 / R9700) needs ROCm 6.4+. if\n"
+              "        `apostate doctor` says the GPU can't run a kernel, the bundled runtime is\n"
+              "        too old for your card; install the system stack and retry:\n"
+              "          https://rocm.docs.amd.com/projects/install-on-linux/en/latest/\n"
+              "          (or: amdgpu-install --usecase=rocm) then verify with `rocminfo`.")
 
     if _ask(f"[1/3] install torch ({backend}) + deps ({' '.join(deps)})? [Y/n] ") not in ("n", "no"):
         if not _install_torch(backend):
