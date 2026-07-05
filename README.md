@@ -96,6 +96,17 @@ Across the published roster, Apostate takes models from near-total refusal to si
 | base | 95.8% | 4.2% | 0.000 |
 | apostate | 13.3% | 86.7% | 0.144 |
 
+**Gemma-4-E4B** (post-norm, multimodal): R9700, 4-bit NF4.
+
+| model | refusal | complied | kl |
+|---|---:|---:|---:|
+| base | 95.8% | 4.2% | 0.000 |
+| apostate | 36.0% | 64.0% | 0.119 |
+
+This checkpoint also ships **TICV** (Topic-Invariant Co-Vectors), a light second edit that strips residual *soft deflection*: engaging non-answers that dodge the request ("bomb is a broad term, which kind?") instead of complying. Scored by a strict deflection-catching judge on JailbreakBench, TICV cuts refusal from 42.2% to 29.7% for just **+0.013 KL**, and it generalizes across architectures: on Qwen3-8B it cuts 67.2% to 48.4% at +0.038 KL.
+
+![TICV removes residual soft-deflection at near-zero KL, on gemma-4-E4B and Qwen3-8B](assets/ticv_deflection.png)
+
 ---
 
 # For researchers
@@ -170,7 +181,7 @@ Model support is detected from module layout. Current coverage includes Llama 2/
 
 Multimodal wrapper models are supported for the text path when Transformers exposes a causal language decoder inside the model object. Image and audio pipelines are not edited yet.
 
-Gemma 2/3/4 use a post-norm sandwich, so editing writer outputs gets renormalized away. Apostate detects this and switches to reader-side ablation: it projects the per-layer refusal direction out of the inputs of the modules that read the residual, mainly MLP gate/up paths and the per-layer input gate. Attention q/k/v is skipped because it added attention drift without reliable refusal gain. The edit still bakes cleanly into a standalone checkpoint. Gemma 4 E4B goes from about 85% refusal to roughly 5-15% this way, coherent and complying, at a higher KL than dense pre-norm models.
+Gemma 2/3/4 use a post-norm sandwich, so editing writer outputs gets renormalized away. Apostate detects this and switches to reader-side ablation: it projects the per-layer refusal direction out of the inputs of the modules that read the residual, mainly MLP gate/up paths and the per-layer input gate. Attention q/k/v is skipped because it added attention drift without reliable refusal gain. The edit still bakes cleanly into a standalone checkpoint. Gemma 4 E4B goes from about 96% to 36% refusal this way, coherent and complying, at a higher KL than dense pre-norm models; a light TICV pass (see Results) then strips residual soft-deflection at near-zero added KL.
 
 The reader edit uses the same contrastive co-vector as the writer path: `x' = x − a·(x·D)·R` removes refusal along `R` while re-injecting the harmless-predictable component, instead of the plain `x − a·(x·R)·R`. Per-layer strength is chosen at the refusal/KL knee (`min(refusal + w·kl)` under the budget) rather than the strongest setting under budget, which overshoots. With both, Gemma-4-12B goes from ~88% to **13% refusal at KL 0.14** (versus ~29%/0.47 for the plain reader). For packed-MoE post-norm models the experts are NF4-quantized and the co-vector is applied to the residual feeding them.
 
