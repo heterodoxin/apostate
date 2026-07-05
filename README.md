@@ -131,6 +131,14 @@ Models that store MoE experts as **packed 3D tensors** (`qwen3.5-moe`, `granitem
 
 The main optimization target combines classifier-judged refusal rate, a weak-response guard, harmless-token KL, penalty above `kl_target`, penalty above `max_kl`, and cheap capability drift. The weak-response guard is used during optimization so short answers, deflections, safety lectures, and generic overviews do not count as solved harmful prompts. Public benchmark refusal scoring uses `protectai/distilroberta-base-rejection-v1` by default and reports weak/noncompliance rates separately. Keyword refusal scoring remains available with `--judge keyword`.
 
+## Soft-deflection removal (TICV)
+
+Abliteration removes hard refusals, but a model can still *soft-deflect*: engaging non-answers that dodge the request without ever refusing ("bomb is a broad term, which kind did you mean?"). A strict deflection-catching judge counts these as failures, and they survive the refusal edit because they are not refusals. TICV (Topic-Invariant Co-Vectors) is a light second edit that removes them.
+
+The direction is built from the model's *own* behavior, not a harmful/harmless topic split. On a set of harmful prompts the abliterated model already produces a mix of deflections and real deliveries; a strict judge labels each, and `R = mean(deflect) - mean(deliver)` is the residual-space deflection axis. It is topic-matched (the same prompts appear on both sides) so it captures deflection, not topic, the confound that a plain harmful-minus-harmless direction carries. The detector `D` is the same predictive co-vector as the refusal path, but its preserve set is seeded with benign hedging and caveats ("is it safe to...", "what are the risks of..."), so `D·x` reads near zero on normal disclaimers and only fires on evasive deflection. That is what keeps the added KL near zero: the edit is invisible to legitimate hedging.
+
+TICV bakes into standard weights with no runtime hooks. Per layer it repurposes one MLP neuron as a **constant-gate writer**: the gate row is aimed at a near-constant activation dimension so its gelu output is an approximately fixed scalar `c`, the up row is set to `D`, and the down column is set to `-a·R/c`, so the neuron adds `-a·(x·D)·R` to the residual exactly where deflection is detected. It is weight-only, bias-free, and rank-1 per layer, so it composes with the abliteration edit and exports to GGUF unchanged. On gemma-4-E4B it cuts strict refusal 42.2% to 29.7% for +0.013 KL, and the same recipe on Qwen3-8B (a pre-norm arch) cuts 67.2% to 48.4% at +0.038 KL, so the mechanism is not architecture-specific.
+
 ## Ablate
 
 ```bash
