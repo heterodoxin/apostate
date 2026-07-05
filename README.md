@@ -180,4 +180,8 @@ Use Python 3.10+, CUDA Torch, Transformers, Accelerate, Datasets, Safetensors, O
 
 ## Acknowledgements
 
-Thanks to **MelodicRecognition7** for detailed setup feedback: the missing `accelerate` dependency note, how to point at a local model, and TUI / quantization edge cases.
+Thanks to the people who have helped make Apostate better:
+
+- **dreamfast** for benchmarking Apostate (the head-to-head numbers above) and adding Docker support.
+- **erm14254** for the packed-MoE expert compatibility shim.
+- **MelodicRecognition7** for detailed setup feedback: the missing `accelerate` dependency note, how to point at a local model, and the TUI / quantization edge cases.
