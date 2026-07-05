@@ -32,7 +32,7 @@ class ApostateConfig:
     n_harmless: int = 600
     n_eval: int = 128  # final test/validation reporting set; was 300 (the 68-min phase). model quality unaffected.
     max_new_tokens: int = 32
-    batch_size: int = 24  # small models can push higher (--batch-size) but 24 is safe for the 27B roster on 34GB
+    batch_size: int = 24  # sentinel default; with_defaults auto-scales this to detected VRAM (or force with --batch-size)
     baseline_eval_n: int = 24
     head_sweep: bool = True
     head_sweep_min: float = 3.5
@@ -244,12 +244,32 @@ class ApostateConfig:
                             "35b", "40b", "65b", "70b", "72b", "123b", "235b")
         if not self.load_in_4bit and any(t in model_l for t in _large_4bit_tags):
             self.load_in_4bit = True
+        # VRAM-driven fallback: if bf16 weights won't fit the DETECTED card, switch to 4-bit even
+        # for models the name tags missed (e.g. a 13B on an 8GB card, or any model on a small GPU).
+        if not self.load_in_4bit and self.device in ("auto", "cuda"):
+            try:
+                from . import accel
+                _dev = accel.resolve_device(self.device)
+                _vram = accel.total_vram_gb(_dev)
+                _n, _wb = accel.estimate_weight_footprint(
+                    self.model, load_in_4bit=False, compute_dtype=self.compute_dtype)
+                if _vram and _wb and _wb / 1e9 > _vram * 0.9:
+                    self.load_in_4bit = True
+            except Exception:
+                pass
 
-        if "gemma-4" in model_l or "gemma4" in model_l:
-            # gemma 4 e4b is big; trim the batch so 4-bit fits a 16gb card. rank stays
-            # at the default 1 (reader-side ablation, see model.uses_post_norm).
-            if self.batch_size == 24:
-                self.batch_size = 12
+        # VRAM-aware batch: scale the eval/gen batch to the detected card and model footprint,
+        # replacing per-card hardcoding (the old gemma->12 assumed a 16GB card). Only when the
+        # user did not pass --batch-size (still the 24 default).
+        if self.batch_size == 24 and self.device in ("auto", "cuda"):
+            try:
+                from . import accel
+                _dev = accel.resolve_device(self.device)
+                self.batch_size = accel.auto_batch_size(
+                    self.model, load_in_4bit=self.load_in_4bit,
+                    compute_dtype=self.compute_dtype, device=_dev, log=lambda *_a: None)
+            except Exception:
+                pass
         here = os.path.dirname(__file__)
         data = os.path.join(os.path.dirname(here), "data")
         refusal_cal = os.path.join(data, "refusal_calibration.txt")

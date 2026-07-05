@@ -272,6 +272,42 @@ def maybe_preflight(device: str, **kw) -> None:
     preflight_vram(device, **kw)
 
 
+def total_vram_gb(device: str = "cuda") -> Optional[float]:
+    # detected total VRAM of the first GPU in GB, or None if there is no readable GPU.
+    if device != "cuda":
+        return None
+    try:
+        return torch.cuda.mem_get_info()[1] / 1e9
+    except Exception:
+        try:
+            return torch.cuda.get_device_properties(0).total_memory / 1e9
+        except Exception:
+            return None
+
+
+def auto_batch_size(model_id: str, *, load_in_4bit: bool, compute_dtype: str = "bfloat16",
+                    device: str = "cuda", default: int = 24, cap: int = 64,
+                    weight_bytes: Optional[float] = None, log=print) -> int:
+    # Pick the eval/generation batch from detected VRAM minus estimated weights, so the same
+    # code runs narrow on a 16GB card and wide on an 80GB one instead of a value hardcoded to
+    # one machine. Falls back to `default` when VRAM or the model footprint can't be measured.
+    # The 0.7 GB/sample slope fits the measured anchors (16GB gemma -> ~12, 34GB/27B -> ~21).
+    vram = total_vram_gb(device)
+    if not vram:
+        return default
+    if weight_bytes is None:
+        _n, weight_bytes = estimate_weight_footprint(
+            model_id, load_in_4bit=load_in_4bit, compute_dtype=compute_dtype)
+    if not weight_bytes:
+        return default
+    weights_gb = weight_bytes / 1e9
+    avail = vram * 0.85 - weights_gb        # leave 15% for loader buffers, display, fragmentation
+    batch = max(4, min(cap, int(avail / 0.7)))
+    log(f"auto batch-size {batch} (vram {vram:.0f}GB, weights ~{weights_gb:.1f}GB "
+        f"{'4bit' if load_in_4bit else compute_dtype})")
+    return batch
+
+
 def gpu_smoke_test(device: str, log=print) -> bool:
     # Runs a tiny GPU op to confirm the runtime executes kernels for this arch before any large load.
     # On RDNA4 with old ROCm, kernels can hang rather than raise — cheaper to discover that on 8 bytes.
