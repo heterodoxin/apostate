@@ -239,7 +239,9 @@ class Apostate(App):
 
     def _do_ablate(self, model: Optional[str]) -> None:
         if model:
-            out = model.split("/")[-1].split("\\")[-1] + "-apostate"
+            # strip trailing slashes so a local dir like /path/to/ yields the folder name, not an empty out
+            name = model.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1] or "model"
+            out = name + "-apostate"
             self.run_cli(["ablate", "--model", model, "--out", out])
 
     def _pick_base(self, model: Optional[str]) -> None:

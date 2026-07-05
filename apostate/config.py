@@ -30,9 +30,9 @@ class ApostateConfig:
     preserve_path: Optional[str] = None
     n_harmful: int = 600
     n_harmless: int = 600
-    n_eval: int = 300
+    n_eval: int = 128  # final test/validation reporting set; was 300 (the 68-min phase). model quality unaffected.
     max_new_tokens: int = 32
-    batch_size: int = 24
+    batch_size: int = 24  # small models can push higher (--batch-size) but 24 is safe for the 27B roster on 34GB
     baseline_eval_n: int = 24
     head_sweep: bool = True
     head_sweep_min: float = 3.5

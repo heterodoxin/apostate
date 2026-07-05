@@ -493,6 +493,8 @@ def kl_harmless(
     batch_size: int = 16,
     positions: int = 16,
 ) -> float:
+    # one fixed, larger held-out harmless set for every phase, so KL is stable (not per-phase noise).
+    instructions = getattr(controller, "_kl_eval", None) or instructions
     model = bundle.model
     cache = getattr(controller, "_kl_cache", None)
     if cache is None:

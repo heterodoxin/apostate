@@ -980,8 +980,8 @@ def _repair_alphas(bundle, controller, cfg, eval_harmful, eval_harmless, start_r
         probe_n = max(1, cfg.repair_probe_candidates)
         exact_n = max(1, cfg.repair_rerank_k)
         if cfg.target_refusal <= 0.0 and best_ref > 0.0:
-            probe_n = max(probe_n, 36)
-            exact_n = max(exact_n, 12)
+            probe_n = max(probe_n, 24)  # cheap margin-proxy candidates (no generation)
+            exact_n = max(exact_n, 5)   # full-256-gen reranks: the repair's main cost -- proxy already ranked them
         candidates.sort(reverse=True)
         candidates = candidates[:probe_n]
         _log(
@@ -1027,7 +1027,7 @@ def _repair_alphas(bundle, controller, cfg, eval_harmful, eval_harmless, start_r
             if ref_gain < min_ref_gain and kl_gain < min_kl_gain and score_gain < min_score_gain:
                 skipped += 1
                 continue
-            if trial_score < best_score - 1e-4:
+            if trial_score < best_score - 1e-4 and trial_kl <= getattr(cfg, "_kl_ceiling", cfg.max_kl):
                 if accepted is None or trial_score < accepted[0]:
                     accepted = (trial_score, trial_ref, trial_kl, item, scale, _alpha_state(controller))
 
@@ -1463,6 +1463,7 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
 
     controller = ProjectionController(bundle)
     controller.disable()
+    controller._kl_eval = test_harmless + eval_harmless  # one fixed held-out harmless set for all KL (was per-phase slices -> 5x noise)
     # let kl_harmless persist the diffusion base reference (a full generate per batch) to disk.
     controller._kl_disk = (_activation_cache_dir(cfg), cfg.model, cfg.resume)
 
@@ -1597,7 +1598,7 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
     if reader_mode:
         # gemma2/3/4-style post-norm: writer edits get renormalized away, so ablate
         # reader-side with per-layer directions, and give kl extra headroom.
-        cfg.max_kl = max(cfg.max_kl, cfg.reader_max_kl)
+        cfg._kl_ceiling = cfg.max_kl  # real bake/refine budget -- kept; the reader SWEEP gets headroom via reader_max_kl (in _reader_profile)
         cfg.kl_target = max(cfg.kl_target, cfg.reader_kl_target)
         _log("post-norm architecture: per-layer reader-side ablation")
         rinfo = _reader_profile(bundle, controller, ah, al, cfg, preserve_lookup,

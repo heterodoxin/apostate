@@ -645,8 +645,30 @@ def load_model(cfg: ApostateConfig) -> ModelBundle:
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
 
+    # clearer than transformers' "Repo id must be in the form ..." when a local --model path is a
+    # file or a folder without config.json. point --model at the model directory, not a file.
+    import os as _os
+    if _os.path.exists(cfg.model):
+        if _os.path.isfile(cfg.model):
+            raise ValueError(f"--model must be the model directory, not a file: {cfg.model}. "
+                             "Point it at the folder that contains config.json.")
+        if not _os.path.exists(_os.path.join(cfg.model, "config.json")):
+            raise ValueError(f"no config.json in {cfg.model}; point --model at the model directory.")
+
     # decide quantization up front so the VRAM preflight reflects what we'll load.
     use_4bit = bool(cfg.load_in_4bit) and cfg.device == "cuda"
+    if use_4bit:
+        # a model that ships its own quantization (e.g. FP8) can't also load 4-bit via bitsandbytes;
+        # a second quant config errors, so detect it and load the model as-is.
+        try:
+            from transformers import AutoConfig as _AC
+            _pq = getattr(_AC.from_pretrained(cfg.model, trust_remote_code=True), "quantization_config", None)
+        except Exception:
+            _pq = None
+        if _pq:
+            _qm = _pq.get("quant_method") if isinstance(_pq, dict) else getattr(_pq, "quant_method", None)
+            _log(f"model already quantized ({_qm or 'native'}); skipping bitsandbytes 4-bit, loading as-is")
+            use_4bit = False
     if use_4bit:
         ok, why = accel.bitsandbytes_status()
         if not ok:

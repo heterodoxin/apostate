@@ -102,6 +102,9 @@ def run_reader_guard(
 ) -> List[dict]:
     # per-layer analog of run_guard for post-norm models: on the edited model,
     # find the residual refusal that survived and add a corrective direction per layer.
+    gn = max(24, getattr(cfg, "guard_eval_n", 24))  # guard scores a small subset; final test_metrics validates on the full set
+    harmful, harmless = harmful[:gn], harmless[:gn]
+    eval_harmful, eval_harmless = eval_harmful[:gn], eval_harmless[:gn]
     nl = bundle.num_layers
     cap = max(cfg.max_rank, cfg.reader_guard_rank)
     history: List[dict] = []
@@ -144,8 +147,8 @@ def run_reader_guard(
 
         new_m = score()
         new_kl = kl_harmless(bundle, controller, eval_harmless, cfg.batch_size, positions=cfg.kl_positions)
-        # only keep a corrective step that actually lowers refusal, within budget
-        if new_m < m - 1e-3 and new_kl <= cfg.reader_max_kl:
+        # only keep a corrective step that actually lowers refusal, within the REAL budget (not the raised search headroom)
+        if new_m < m - 1e-3 and new_kl <= getattr(cfg, "_kl_ceiling", cfg.max_kl):
             m, kl = new_m, new_kl
         else:
             controller.set_alpha_state(prev_state)
