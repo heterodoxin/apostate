@@ -19,6 +19,7 @@ apostate            interactive menu (default)
 apostate setup      install python deps, check gpu
 apostate doctor     verify the GPU can run a kernel before any big load (cuda/rocm)
 apostate ablate --model M --out D   remove refusals (--resume reuses activation cache)
+apostate ticv   --model D --out D2  bake soft-deflection removal (TICV) into an abliterated checkpoint
 apostate finetune --model M --out D [--data path.jsonl] [--steps N]  QLoRA finetune (train alias)
 apostate test   --model D --base M  benchmark (--suite humaneval,mbpp,gsm8k,refusal,all)
 apostate talk   --model D [--backend vllm]   chat
@@ -98,6 +99,8 @@ def main(argv=None) -> int:
         run_module(["-m", "apostate.benchcode", "--model", out, "--base", model], label)
         return 0
 
+    if cmd == "ticv":
+        return run_module(["-m", "apostate.ticv", *args], f"apostate ticv {' '.join(args)}".strip())
     if cmd == "test":
         return run_module(["-m", "apostate.benchcode", *args], f"apostate test {' '.join(args)}".strip())
     if cmd == "talk":
