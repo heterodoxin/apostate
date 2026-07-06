@@ -43,8 +43,12 @@ from .bake import bake
 from .reports import write_model_card, write_run_report
 
 
+_LOG_T0 = time.time()
+
+
 def _log(msg: str):
-    print(f"[apostate] {msg}", flush=True)
+    # elapsed prefix makes every run self-profiling: gaps between phase markers = phase durations.
+    print(f"[apostate +{time.time() - _LOG_T0:5.0f}s] {msg}", flush=True)
 
 
 def _prompt_hash(instructions) -> str:
