@@ -158,6 +158,34 @@ def _encoded_batches(bundle, instructions, batch_size, device):
     return cache[key]
 
 
+def _logits_kwarg(bundle) -> Optional[str]:
+    # Which "compute only the last N positions" kwarg this model.forward supports, cached.
+    # Lets a 262k-vocab lm_head skip logits for positions we slice off anyway (big saving, same result).
+    kw = getattr(bundle, "_logits_kw", "unset")
+    if kw == "unset":
+        import inspect
+        try:
+            params = inspect.signature(bundle.model.forward).parameters
+        except (TypeError, ValueError):
+            params = {}
+        kw = "logits_to_keep" if "logits_to_keep" in params else (
+            "num_logits_to_keep" if "num_logits_to_keep" in params else None)
+        setattr(bundle, "_logits_kw", kw)
+    return kw
+
+
+def _kl_logits(bundle, fwd, sl):
+    # Logits for only the positions KL needs. Causal slices are slice(-K, None); ask the model for
+    # the last K rows so the huge lm_head runs on K positions, not the whole sequence. Diffusion
+    # (0..clen canvas slice) and unsupported models fall back to full-then-slice, identical output.
+    model = bundle.model
+    kw = _logits_kwarg(bundle)
+    if kw and not bundle.is_block_diffusion() and isinstance(sl, slice) \
+            and sl.stop is None and (sl.start or 0) < 0:
+        return model(**fwd, use_cache=False, **{kw: -sl.start}).logits.float()
+    return model(**fwd, use_cache=False).logits[:, sl, :].float()
+
+
 @torch.inference_mode()
 def refusal_logit_margin(
     bundle: ModelBundle,
@@ -168,10 +196,12 @@ def refusal_logit_margin(
     model = bundle.model
     device = next(model.parameters()).device
     refusal_ids, comply_ids = _margin_id_tensors(tok, device)
+    kw = _logits_kwarg(bundle)
+    keep = {kw: 1} if (kw and not bundle.is_block_diffusion()) else {}
 
     margins = []
     for enc in _encoded_batches(bundle, instructions, batch_size, device):
-        logits = model(**enc, use_cache=False).logits[:, -1, :].float()
+        logits = model(**enc, use_cache=False, **keep).logits[:, -1, :].float()
         lp = torch.log_softmax(logits, dim=-1)
         r = torch.logsumexp(lp[:, refusal_ids], dim=-1)
         c = torch.logsumexp(lp[:, comply_ids], dim=-1)
@@ -547,7 +577,7 @@ def kl_harmless(
                 else:
                     fwd, sl = _kl_forward_inputs(bundle, enc, positions)
                 with controller.bypassed():
-                    base = model(**fwd, use_cache=False).logits[:, sl, :].float()
+                    base = _kl_logits(bundle, fwd, sl)
                 blp = torch.log_softmax(base, dim=-1).half().cpu()
                 entries.append((fwd, sl, blp))
                 if dpath is not None:
@@ -565,7 +595,7 @@ def kl_harmless(
     kls = []
     for fwd, sl, base_lp in cache[key]:
         with controller.active():
-            edit = model(**fwd, use_cache=False).logits[:, sl, :].float()
+            edit = _kl_logits(bundle, fwd, sl)
         blp = base_lp.to(edit.device).float()
         kl = (blp.exp() * (blp - torch.log_softmax(edit, dim=-1))).sum(-1)
         kls.append(kl.mean(dim=1).cpu())
