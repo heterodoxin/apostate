@@ -55,3 +55,4 @@ test_*.py
 
 # built installer
 *.exe
+/qwen_*.py
