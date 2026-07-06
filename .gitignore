@@ -37,5 +37,21 @@ test_*.py
 .vscode/
 .idea/
 
+# secrets
+*_secret_key
+*.key
+*.pem
+
+# scratch experiment scripts and output dirs (not part of the package)
+/ticv_*.py
+/deflect*.py
+/*_run.py
+/pw_*.py
+/abl_int.py
+/probe_validity.py
+/huihui_kl.py
+/gentle.py
+/apostate-out/
+
 # built installer
 *.exe
