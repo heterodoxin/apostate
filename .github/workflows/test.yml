@@ -1,0 +1,89 @@
+name: Tests
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          pip install -e .
+          pip install pytest pytest-cov httpx
+
+      - name: Run tests
+        run: |
+          pytest tests/ -v --cov=apostate --cov-report=xml
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+        with:
+          file: ./coverage.xml
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install linting deps
+        run: pip install ruff
+
+      - name: Lint
+        run: |
+          ruff check apostate/
+
+  unit-tests:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install apostate
+        run: pip install -e .
+
+      - name: Run config tests
+        run: pytest tests/test_config.py -v
+
+      - name: Run activation tests
+        run: pytest tests/test_activations.py -v
+
+      - name: Run model loading tests
+        if: matrix.os == 'ubuntu-latest'
+        run: pytest tests/test_model_loading.py -v
+
+      - name: Run regression tests
+        if: matrix.os == 'ubuntu-latest'
+        run: pytest tests/test_regression.py -v
