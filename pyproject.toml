@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "apostate"
 version = "1.0.0"
-description = "Decensor LLMs via rank-1 subspace ablation"
+description = "Build fixed-weight KCRN checkpoints for authorized model research"
 requires-python = ">=3.10"
 dependencies = ["textual>=0.80"]
 
@@ -20,3 +20,7 @@ packages = ["apostate"]
 
 [tool.setuptools.package-data]
 apostate = ["*.sh"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

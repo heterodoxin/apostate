@@ -26,6 +26,16 @@ def _masked_mean(t: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
     return (t * m).sum(dim=1) / m.sum(dim=1).clamp_min(1.0)
 
 
+def _last_token_rows(t: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
+    if t.dim() < 3:
+        return t
+    if mask is None:
+        return t[:, -1, :]
+    positions = torch.arange(mask.shape[1], device=t.device).expand_as(mask)
+    last = (positions * mask.to(positions.dtype)).argmax(dim=1)
+    return t[torch.arange(t.shape[0], device=t.device), last, :]
+
+
 # cap prompt length during activation collection; prevents outlier-length prompts from padding
 # an entire batch to thousands of tokens and making O(n²) attention cost blow up.
 _ACT_MAX_LEN = 768
@@ -118,7 +128,9 @@ def _hidden_state_collect(model, batches, num_layers):
         out = model(**enc, output_hidden_states=True, use_cache=False)
         hs = out.hidden_states
         for layer in range(num_layers):
-            per_layer[layer].append(hs[layer + 1][:, -1, :].detach().float().cpu())
+            per_layer[layer].append(
+                _last_token_rows(hs[layer + 1], enc.get("attention_mask")).detach().float().cpu()
+            )
     return torch.stack([torch.cat(chunks, dim=0) for chunks in per_layer], dim=0)
 
 
@@ -126,7 +138,11 @@ def _hidden_state_collect_layer(model, batches, layer_idx):
     chunks: List[torch.Tensor] = []
     for enc in batches:
         out = model(**enc, output_hidden_states=True, use_cache=False)
-        chunks.append(out.hidden_states[layer_idx + 1][:, -1, :].detach().float().cpu())
+        chunks.append(
+            _last_token_rows(
+                out.hidden_states[layer_idx + 1], enc.get("attention_mask")
+            ).detach().float().cpu()
+        )
     return torch.cat(chunks, dim=0)
 
 
@@ -144,11 +160,14 @@ def collect_activations(
     batches = _prompt_batches(bundle, tok, prompts, batch_size, device)
     per_layer: List[List[torch.Tensor]] = [[] for _ in range(bundle.num_layers)]
     handles = []
+    current_mask: List[torch.Tensor | None] = [None]
 
     def make_hook(layer: int):
         def hook(_mod, _inp, out):
             t = _out_tensor(out)
-            per_layer[layer].append(t[:, -1, :].detach().to(torch.float16).cpu())
+            per_layer[layer].append(
+                _last_token_rows(t, current_mask[0]).detach().to(torch.float16).cpu()
+            )
         return hook
 
     for layer, mod in enumerate(bundle.direction_layers()):
@@ -156,6 +175,7 @@ def collect_activations(
 
     try:
         for enc in batches:
+            current_mask[0] = enc.get("attention_mask")
             model(**enc, use_cache=False)
     finally:
         for h in handles:

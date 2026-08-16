@@ -4,14 +4,106 @@ from __future__ import annotations
 
 import os
 import shutil
+from typing import Optional
+
 import torch
 from pathlib import Path
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer
 
 from .config import ApostateConfig
-from .model import ModelBundle, model_metadata, set_config_value, _is_conv1d
+from .model import ModelBundle, _is_conv1d, _resolve_model_loader, model_metadata, set_config_value
 
 _DTYPES = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}
+
+
+def _post_bake_preservation_metrics(
+    actual_delta: torch.Tensor,
+    ideal_delta: torch.Tensor,
+    preserve_basis: Optional[torch.Tensor],
+) -> dict:
+    """Measure benign-nullspace leakage after the writer is cast to its storage dtype."""
+
+    if preserve_basis is None:
+        return {}
+    basis = preserve_basis.to(device=actual_delta.device, dtype=torch.float32)
+    if basis.ndim != 2 or basis.shape[0] != actual_delta.shape[-1]:
+        raise ValueError(
+            "KCRN preserve basis must have shape [writer_input_width, benign_rank]"
+        )
+    if basis.shape[1] == 0:
+        return {
+            "post_bake_preservation_error": 0.0,
+            "post_bake_preservation_relative": 0.0,
+            "ideal_preservation_error": 0.0,
+            "serialization_residual": 0.0,
+        }
+    actual_leak = actual_delta @ basis
+    ideal_leak = ideal_delta @ basis
+    actual_norm = torch.linalg.norm(actual_delta).clamp_min(1e-8)
+    ideal_norm = torch.linalg.norm(ideal_delta).clamp_min(1e-8)
+    serialization_residual = torch.linalg.norm(actual_delta - ideal_delta) / ideal_norm
+    return {
+        "post_bake_preservation_error": float(torch.linalg.norm(actual_leak).item()),
+        "post_bake_preservation_relative": float(
+            (torch.linalg.norm(actual_leak) / actual_norm).item()
+        ),
+        "ideal_preservation_error": float(torch.linalg.norm(ideal_leak).item()),
+        "serialization_residual": float(serialization_residual.item()),
+    }
+
+
+def _edit_kcrn_writer(
+    module,
+    left: torch.Tensor,
+    right: torch.Tensor,
+    preserve_basis: Optional[torch.Tensor] = None,
+) -> dict:
+    """Add a factorized KCRN update to a Linear, Conv1D, or packed expert writer."""
+
+    weight = getattr(module, "weight", None)
+    if isinstance(weight, torch.Tensor) and weight.ndim == 2:
+        if getattr(weight, "quant_state", None) is not None or not weight.is_floating_point():
+            raise TypeError("KCRN requires a floating-point writer weight")
+        left = left.to(device=weight.device, dtype=torch.float32)
+        right = right.to(device=weight.device, dtype=torch.float32)
+        ideal_delta = left @ right
+        before = weight.data.float()
+        delta = ideal_delta
+        if _is_conv1d(module):
+            delta = delta.T
+        after = (before + delta).to(weight.dtype).float()
+        weight.data = after.to(weight.dtype)
+        actual_delta = after - before
+        if _is_conv1d(module):
+            actual_delta = actual_delta.T
+        return _post_bake_preservation_metrics(actual_delta, ideal_delta, preserve_basis)
+    packed = getattr(module, "down_proj", None)
+    if isinstance(packed, torch.Tensor) and packed.ndim == 3:
+        if not packed.is_floating_point():
+            raise TypeError("KCRN requires floating-point packed expert weights")
+        left = left.to(device=packed.device, dtype=torch.float32)
+        right = right.to(device=packed.device, dtype=torch.float32)
+        ideal_delta = left @ right
+        before = packed.data.float()
+        after = (before + ideal_delta.unsqueeze(0)).to(packed.dtype).float()
+        packed.data = after.to(packed.dtype)
+        actual_delta = after - before
+        return _post_bake_preservation_metrics(actual_delta, ideal_delta.unsqueeze(0), preserve_basis)
+    raise TypeError(f"unsupported KCRN writer type: {type(module).__name__}")
+
+
+def _kcrn_writer(bundle, edit: dict):
+    """Resolve one exported KCRN writer from its layer and writer index."""
+
+    layer_index = int(edit["layer"])
+    writer_index = int(edit["writer_index"])
+    layers = bundle.layers()
+    if not 0 <= layer_index < len(layers):
+        raise IndexError(f"KCRN layer index out of range: {layer_index}")
+    writers = bundle.layer_writers(layers[layer_index])
+    if not 0 <= writer_index < len(writers):
+        raise IndexError(f"KCRN writer index out of range: {writer_index} at layer {layer_index}")
+    return writers[writer_index]
 
 
 # R is the left/removal basis; U is the right co-vector (oblique mean-preserving edit).
@@ -102,17 +194,27 @@ def _edit_reader(mod, R: torch.Tensor, coeff: float, U: torch.Tensor = None) -> 
 
 
 @torch.no_grad()
-def bake(cfg: ApostateConfig, export: dict, tokenizer=None, drop_layers=None) -> str:
+def bake(
+    cfg: ApostateConfig,
+    export: dict,
+    tokenizer=None,
+    drop_layers=None,
+    model=None,
+    preserve_bases: Optional[dict[tuple[int, int], torch.Tensor]] = None,
+    post_bake_metrics: Optional[dict[str, dict]] = None,
+) -> str:
     edits = export.get("edits", [])
     if not edits:
         raise ValueError("Nothing to bake: no edits.")
     save_dtype = _DTYPES[cfg.save_dtype]
 
-    print("[bake] loading model for editing...", flush=True)
-    model = AutoModelForCausalLM.from_pretrained(
-        cfg.model, torch_dtype=save_dtype, low_cpu_mem_usage=True,
-        device_map={"": "cpu"}, trust_remote_code=True,
-    )
+    if model is None:
+        print("[bake] loading model for editing...", flush=True)
+        loader = _resolve_model_loader(cfg.model, trust_remote_code=True)
+        model = loader.from_pretrained(
+            cfg.model, torch_dtype=save_dtype, low_cpu_mem_usage=True,
+            device_map={"": "cpu"}, trust_remote_code=True,
+        )
 
     if getattr(model.config, "tie_word_embeddings", False) and hasattr(model, "lm_head"):
         model.lm_head.weight = torch.nn.Parameter(model.lm_head.weight.data.clone())
@@ -126,6 +228,23 @@ def bake(cfg: ApostateConfig, export: dict, tokenizer=None, drop_layers=None) ->
 
     print("[bake] applying edits...", flush=True)
     for e in edits:
+        if e.get("kind") == "kcrn":
+            layer_index = int(e["layer"])
+            writer_index = int(e["writer_index"])
+            key = (layer_index, writer_index)
+            metrics = _edit_kcrn_writer(
+                _kcrn_writer(bundle, e),
+                e["left"],
+                e["right"],
+                None if preserve_bases is None else preserve_bases.get(key),
+            )
+            if post_bake_metrics is not None and metrics:
+                post_bake_metrics[f"{layer_index}:{writer_index}"] = {
+                    "layer": layer_index,
+                    "writer_index": writer_index,
+                    **metrics,
+                }
+            continue
         R = e["R"].float()
         sign = float(e["sign"])
         if e.get("kind") == "reader":

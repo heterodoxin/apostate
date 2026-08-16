@@ -4,6 +4,14 @@ node_modules/
 # python
 __pycache__/
 *.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+*.egg-info/
+build/
+dist/
+.venv/
 
 # model outputs / checkpoints
 out/
@@ -30,6 +38,8 @@ _*/
 
 # tests
 test_*.py
+!tests/
+!tests/test_*.py
 
 # env / editor
 .env

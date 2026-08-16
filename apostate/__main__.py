@@ -18,7 +18,8 @@ HELP = """\
 apostate            interactive menu (default)
 apostate setup      install python deps, check gpu
 apostate doctor     verify the GPU can run a kernel before any big load (cuda/rocm)
-apostate ablate --model M --out D   remove refusals (--resume reuses activation cache)
+apostate ablate --model M --out D   build a legacy fixed-weight checkpoint
+apostate kcrn   --model M --out D   build a projected fixed-weight KCRN checkpoint
 apostate ticv   --model D --out D2  bake soft-deflection removal (TICV) into an abliterated checkpoint
 apostate finetune --model M --out D [--data path.jsonl] [--steps N]  QLoRA finetune (train alias)
 apostate test   --model D --base M  benchmark (--suite humaneval,mbpp,gsm8k,refusal,all)
@@ -74,15 +75,16 @@ def main(argv=None) -> int:
     if cmd == "doctor":
         return run_module(["-m", "apostate.doctor", *args], "apostate doctor")
 
-    if cmd in ("ablate", "boost"):
+    if cmd in ("ablate", "boost", "kcrn"):
         model = _flag(args, "--model", DEFAULT_MODEL)
         out = _flag(args, "--out", _flag(args, "--output-dir", "out"))
         rest = _strip(args, ["--model", "--out", "--output-dir"])
-        label = "apostate ablate --model " + shlex.quote(model) + " --out " + shlex.quote(out)
+        label = "apostate " + cmd + " --model " + shlex.quote(model) + " --out " + shlex.quote(out)
         if rest:
             label += " " + " ".join(shlex.quote(x) for x in rest)
+        method = "kcrn" if cmd == "kcrn" else "legacy"
         return run_module(
-            ["-m", "apostate.cli", "--optimize", "--model", model, "--output-dir", out, *rest],
+            ["-m", "apostate.cli", "--method", method, "--optimize", "--model", model, "--output-dir", out, *rest],
             label)
 
     if cmd == "turbo":
@@ -92,7 +94,7 @@ def main(argv=None) -> int:
         print("step 1: finetune")
         run_module(["-m", "apostate.finetune", "--model", model, "--out", out + "_ft"], label)
         print("step 2: abliterate")
-        run_module(["-m", "apostate.cli", "--optimize", "--model", out + "_ft", "--output-dir", out], label)
+        run_module(["-m", "apostate.cli", "--method", "legacy", "--optimize", "--model", out + "_ft", "--output-dir", out], label)
         print("step 3: cleanup")
         shutil.rmtree(out + "_ft", ignore_errors=True)
         print("step 4: verify")

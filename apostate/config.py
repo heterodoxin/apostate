@@ -7,6 +7,7 @@ import json
 
 @dataclass
 class ApostateConfig:
+    method: str = "kcrn"
     model: str = "Qwen/Qwen3-8B"
     output_dir: str = "apostate-out"
     profile: str = "balanced"
@@ -171,6 +172,46 @@ class ApostateConfig:
     save_dtype: str = "bfloat16"
     bake: bool = True
 
+    kcrn_edits: Optional[str] = None
+    kcrn_force: bool = False
+    kcrn_compute_dtype: str = "float16"
+    kcrn_save_dtype: str = "float16"
+    kcrn_fit_n: int = 0
+    kcrn_harmful_fit_n: int = 0
+    kcrn_benign_fit_n: int = 2048
+    kcrn_eval_n: int = 0
+    kcrn_calibration_eval_n: int = 96
+    kcrn_pilot_n: int = 64
+    kcrn_eval_generation: bool = True
+    kcrn_layers: str = "all"
+    kcrn_writers: str = "all"
+    kcrn_target_writers: int = 0
+    kcrn_key_rank: int = 16
+    kcrn_harmful_rank: int = 16
+    kcrn_preserve_rank: int = 128
+    kcrn_refusal_rank: int = 1
+    kcrn_refusal_source: str = "activation"
+    kcrn_refusal_response_n: int = 128
+    kcrn_refusal_response_tokens: int = 32
+    kcrn_refusal_multi: bool = True
+    kcrn_refusal_clusters: int = 0
+    kcrn_refusal_min_norm_frac: float = 0.08
+    kcrn_refusal_min_separation: float = 0.05
+    kcrn_refusal_min_coverage: float = 0.05
+    kcrn_strength: float = 4.0
+    kcrn_ridge: float = 1e-6
+    kcrn_solver: str = "projected"
+    kcrn_benign_basis_mode: str = "raw"
+    kcrn_benign_explained_variance: float = 1.0
+    kcrn_basis_tolerance: float = 1e-7
+    kcrn_max_key_samples: int = 512
+    kcrn_min_projected_energy: float = 1e-4
+    kcrn_max_relative_update: float = 10.0
+    kcrn_all_positions: bool = True
+    kcrn_kl_max_length: int = 768
+    kcrn_max_delta_norm: float = 8.0
+    kcrn_max_condition: float = 1000.0
+
     def with_defaults(self) -> "ApostateConfig":
         import os
         default_harmful_test = (
@@ -178,6 +219,8 @@ class ApostateConfig:
             "JailbreakBench/JBB-Behaviors@behaviors:harmful:Goal"
         )
         prof = (self.profile or "").lower()
+        if (self.kcrn_solver or "").strip().lower() == "projected" and self.kcrn_benign_basis_mode == "legacy":
+            self.kcrn_benign_basis_mode = "raw"
         if prof == "balanced":
             self.refine_deescalate = True
             if self.target_refusal <= 0.0 and self.opt_eval_n == 32:
@@ -294,4 +337,7 @@ class ApostateConfig:
     @classmethod
     def from_json(cls, path: str) -> "ApostateConfig":
         with open(path, "r", encoding="utf-8") as f:
-            return cls(**json.load(f))
+            values = json.load(f)
+        if "method" not in values:
+            values["method"] = "legacy"
+        return cls(**values)
