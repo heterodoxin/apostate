@@ -76,6 +76,28 @@ def test_projected_solver_reports_stable_metrics_for_nonorthogonal_benign_keys()
     assert torch.linalg.norm(orthonormal_basis(benign).T @ (harmful - orthonormal_basis(benign) @ (orthonormal_basis(benign).T @ harmful))) < 1e-8
 
 
+def test_projected_solver_fast_path_matches_stable_basis_solve():
+    torch.manual_seed(421)
+    W = torch.randn(8, 13, dtype=torch.float64)
+    R = torch.linalg.qr(torch.randn(8, 2, dtype=torch.float64), mode="reduced").Q
+    harmful = torch.linalg.qr(torch.randn(13, 3, dtype=torch.float64), mode="reduced").Q
+    benign = torch.linalg.qr(torch.randn(13, 4, dtype=torch.float64), mode="reduced").Q
+
+    stable = key_conditional_nulling_projected(W, R, harmful, benign, ridge=1e-6)
+    fast = key_conditional_nulling_projected(
+        W,
+        R,
+        harmful,
+        benign,
+        ridge=1e-6,
+        preserve_basis_orthonormal=True,
+        diagnostics_spectrum=False,
+    )
+
+    assert torch.allclose(fast.delta, stable.delta, atol=1e-8, rtol=1e-8)
+    assert fast.diagnostics["regularized_eigenvalues"] == []
+
+
 def test_projected_solver_reduces_to_normal_solver_without_benign_basis():
     torch.manual_seed(44)
     W = torch.randn(7, 11, dtype=torch.float64)
@@ -435,6 +457,47 @@ def test_reload_kl_matches_cached_full_position_logits(tmp_path):
     assert math.isclose(actual, expected, rel_tol=1e-5, abs_tol=1e-6)
 
 
+def test_reload_kl_can_score_only_recent_positions(tmp_path):
+    class Tokenizer:
+        def apply_chat_template(self, messages, **_kwargs):
+            return messages[0]["content"]
+
+        def __call__(self, prompts, **_kwargs):
+            del prompts
+            return {
+                "input_ids": torch.tensor([[0, 1, 2], [1, 2, 0]]),
+                "attention_mask": torch.tensor([[1, 1, 1], [1, 1, 0]]),
+            }
+
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.eye(3))
+
+        def forward(self, input_ids, attention_mask=None, use_cache=False):
+            del attention_mask, use_cache
+            values = torch.nn.functional.one_hot(input_ids, num_classes=3).float()
+            return SimpleNamespace(logits=values @ self.weight.T)
+
+    base = Model()
+    edited = Model()
+    edited.weight.data[0, 0] += 0.75
+    bundle_base = SimpleNamespace(model=base, tokenizer=Tokenizer())
+    bundle_edited = SimpleNamespace(model=edited, tokenizer=Tokenizer())
+    instructions = ["one", "two"]
+
+    paths = _cache_full_position_logits(bundle_base, instructions, 2, tmp_path, 16)
+    actual = _full_position_kl(bundle_edited, instructions, 2, paths, 16, positions=1)
+    encoded = bundle_base.tokenizer(instructions)
+    expected = masked_kl_from_logits(
+        base(**encoded).logits[:, -1:, :],
+        edited(**encoded).logits[:, -1:, :],
+        encoded["attention_mask"][:, -1:].bool(),
+    )
+
+    assert math.isclose(actual, expected, rel_tol=1e-5, abs_tol=1e-6)
+
+
 def test_reload_kl_caches_hidden_states_for_causal_lm_models(tmp_path):
     class Tokenizer:
         def apply_chat_template(self, messages, **_kwargs):
@@ -624,11 +687,17 @@ def test_aggressive_profile_expands_kcrn_update_budget():
     cfg = ApostateConfig(profile="aggressive")
     cfg.with_defaults()
 
-    assert cfg.kcrn_strength == 4.0
+    assert cfg.profile == "aggressive-kcrn"
+    assert cfg.kcrn_layers == "auto"
+    assert cfg.kcrn_writers == "auto"
+    assert cfg.kcrn_strength == 8.0
     assert cfg.kcrn_preserve_rank == 64
     assert cfg.kcrn_refusal_rank == 1
     assert cfg.kcrn_max_delta_norm == 12.0
     assert cfg.kcrn_max_relative_update == 16.0
+    assert cfg.kcrn_aggressive_strengths == "1,2,4,6,8"
+    assert cfg.kcrn_aggressive_max_steps == 24
+    assert cfg.kcrn_aggressive_target_delivery == 0.90
 
 
 def test_aggressive_kcrn_is_the_canonical_profile_name():
@@ -637,6 +706,7 @@ def test_aggressive_kcrn_is_the_canonical_profile_name():
     cfg = ApostateConfig(profile="aggressive-kcrn")
     cfg.with_defaults()
 
+    assert cfg.profile == "aggressive-kcrn"
     assert cfg.kcrn_preserve_rank == 64
     assert cfg.kcrn_max_delta_norm == 12.0
     assert cfg.kcrn_max_relative_update == 16.0
@@ -660,6 +730,57 @@ def test_aggressive_profile_preserves_explicit_kcrn_values():
     assert cfg.kcrn_refusal_rank == 3
     assert cfg.kcrn_max_delta_norm == 7.0
     assert cfg.kcrn_max_relative_update == 9.0
+
+
+def test_aggressive_profile_preserves_explicit_layer_and_writer_selection():
+    from apostate.config import ApostateConfig
+
+    cfg = ApostateConfig(
+        profile="aggressive-kcrn",
+        kcrn_layers="20-24",
+        kcrn_writers="1,3",
+    )
+    cfg.with_defaults()
+
+    assert cfg.kcrn_layers == "20-24"
+    assert cfg.kcrn_writers == "1,3"
+
+
+def test_aggressive_profile_requires_projected_solver():
+    from apostate.config import ApostateConfig
+
+    with pytest.raises(ValueError, match="projected"):
+        ApostateConfig(profile="aggressive-kcrn", kcrn_solver="original").with_defaults()
+
+
+def test_aggressive_profile_rejects_invalid_strength_grid():
+    from apostate.config import ApostateConfig
+
+    with pytest.raises(ValueError, match="strength"):
+        ApostateConfig(profile="aggressive-kcrn", kcrn_aggressive_strengths="0,2").with_defaults()
+
+
+def test_aggressive_prompt_sets_use_disjoint_external_tuning_slice(monkeypatch):
+    import apostate.kcrn_runner as runner
+
+    def fake_resolve(spec, count, seed):
+        del seed
+        if spec == "fit":
+            return [f"fit-{i}" for i in range(count)]
+        return [f"external-{i}" for i in range(count)]
+
+    monkeypatch.setattr(runner, "resolve_prompts", fake_resolve)
+
+    fit, tuning, holdout = runner._resolve_aggressive_prompt_sets(
+        "fit", "external", calibration_n=3, tuning_n=2, holdout_n=3, seed=4
+    )
+
+    assert fit == ["fit-0", "fit-1", "fit-2"]
+    assert tuning == ["external-0", "external-1"]
+    assert holdout == ["external-2", "external-3", "external-4"]
+    assert set(tuning).isdisjoint(holdout)
+    assert set(fit).isdisjoint(tuning)
+    assert set(fit).isdisjoint(holdout)
 
 
 def test_runner_exposes_activation_collection_for_fitting():

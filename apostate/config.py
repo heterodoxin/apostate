@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 import json
+import math
 
 
 @dataclass
@@ -211,6 +212,19 @@ class ApostateConfig:
     kcrn_kl_max_length: int = 768
     kcrn_max_delta_norm: float = 8.0
     kcrn_max_condition: float = 1000.0
+    kcrn_aggressive_strengths: str = "1,2,4,6,8"
+    kcrn_aggressive_max_steps: int = 24
+    kcrn_aggressive_candidate_limit: int = 96
+    kcrn_aggressive_probe_candidates: int = 8
+    kcrn_aggressive_tune_n: int = 96
+    kcrn_aggressive_scoring_harmful_n: int = 24
+    kcrn_aggressive_calibration_n: int = 24
+    kcrn_aggressive_calibration_positions: int = 8
+    kcrn_aggressive_calibration_kl_budget: float = 0.02
+    kcrn_aggressive_heldout_kl_max: float = 0.02
+    kcrn_aggressive_max_cumulative_relative_update: float = 24.0
+    kcrn_aggressive_min_margin_improvement: float = 0.01
+    kcrn_aggressive_target_delivery: float = 0.90
 
     def with_defaults(self) -> "ApostateConfig":
         import os
@@ -228,8 +242,46 @@ class ApostateConfig:
             if self.target_refusal <= 0.0 and self.repair_eval_n == 96:
                 self.repair_eval_n = 96
         elif prof in {"aggressive", "aggressive-kcrn", "aggressive kcrn"} and (self.method or "kcrn").strip().lower() == "kcrn":
+            from .aggressive_kcrn import parse_strength_grid
+
+            self.profile = "aggressive-kcrn"
+            if (self.kcrn_solver or "").strip().lower() != "projected":
+                raise ValueError("aggressive-kcrn requires --kcrn-solver projected")
+            parse_strength_grid(self.kcrn_aggressive_strengths)
+            for name in (
+                "kcrn_aggressive_calibration_kl_budget",
+                "kcrn_aggressive_heldout_kl_max",
+                "kcrn_aggressive_max_cumulative_relative_update",
+                "kcrn_aggressive_min_margin_improvement",
+                "kcrn_aggressive_target_delivery",
+            ):
+                value = float(getattr(self, name))
+                if not math.isfinite(value) or value < 0.0:
+                    raise ValueError(f"{name} must be finite and non-negative")
+            if not 0 <= float(self.kcrn_aggressive_target_delivery) <= 1:
+                raise ValueError("kcrn_aggressive_target_delivery must be between 0 and 1")
+            if int(self.kcrn_aggressive_max_steps) < 0:
+                raise ValueError("kcrn_aggressive_max_steps must be non-negative")
+            if int(self.kcrn_aggressive_candidate_limit) < 1:
+                raise ValueError("kcrn_aggressive_candidate_limit must be positive")
+            if int(self.kcrn_aggressive_probe_candidates) < 1:
+                raise ValueError("kcrn_aggressive_probe_candidates must be positive")
+            if int(self.kcrn_aggressive_tune_n) < 1:
+                raise ValueError("kcrn_aggressive_tune_n must be positive")
+            if int(self.kcrn_aggressive_scoring_harmful_n) < 1:
+                raise ValueError("kcrn_aggressive_scoring_harmful_n must be positive")
+            if int(self.kcrn_aggressive_calibration_n) < 1:
+                raise ValueError("kcrn_aggressive_calibration_n must be positive")
+            if int(self.kcrn_aggressive_calibration_positions) < 1:
+                raise ValueError("kcrn_aggressive_calibration_positions must be positive")
+            if (self.kcrn_layers or "all").strip().lower() == "all":
+                self.kcrn_layers = "auto"
+            if (self.kcrn_writers or "all").strip().lower() == "all":
+                self.kcrn_writers = "auto"
             if self.kcrn_preserve_rank == 128:
                 self.kcrn_preserve_rank = 64
+            if self.kcrn_strength == 4.0:
+                self.kcrn_strength = 8.0
             if self.kcrn_max_delta_norm == 8.0:
                 self.kcrn_max_delta_norm = 12.0
             if self.kcrn_max_relative_update == 10.0:

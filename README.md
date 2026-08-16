@@ -98,7 +98,7 @@ apostate kcrn \
 
 For a smaller benign basis, replace `raw` with `pca` and set `--kcrn-benign-explained-variance`, for example `0.95`. `--kcrn-layers`, `--kcrn-writers`, and `--kcrn-target-writers` constrain the candidate set; `all`, `auto`, and `mlp` are supported selection modes where applicable. `--kcrn-compute-dtype` and `--kcrn-save-dtype` must match because the KCRN validator measures the actual saved dtype.
 
-The default profile preserves the low-KL operating point. Use the opt-in `aggressive-kcrn` profile when a higher held-out KL budget, around `0.02`, is acceptable in exchange for a stronger refusal edit:
+The default profile preserves the normal KCRN operating point. Use the opt-in `aggressive-kcrn` profile for a calibration-controlled search over multiple projected KCRN writer updates:
 
 ```bash
 apostate ablate \
@@ -107,7 +107,9 @@ apostate ablate \
   --profile aggressive-kcrn
 ```
 
-For KCRN, this profile keeps the calibrated strength and rank-1 refusal basis, reduces the raw benign basis rank from `128` to `64`, and permits larger bounded writer updates. The older `aggressive` spelling remains a compatibility alias; the reloaded value in `kcrn_report.json` is the measurement to use for another model or dataset.
+Aggressive KCRN begins with the normal projected KCRN baseline, then searches non-overlapping projected KCRN factors against a teacher-forced response-prefix score and benign calibration KL. Accepted factors are restored to the base model and baked once, so the exported checkpoint has no runtime detector or hook. The default aggressive baseline strength is `8`, and the extra-factor grid is `1,2,4,6,8`; `--kcrn-aggressive-max-steps`, `--kcrn-aggressive-candidate-limit`, `--kcrn-aggressive-probe-candidates`, `--kcrn-aggressive-scoring-harmful-n`, and `--kcrn-aggressive-calibration-n` bound the search. The older `aggressive` spelling remains a compatibility alias.
+
+The reloaded report records `aggressive_controller` and `aggressive_acceptance`. The aggressive result is successful only when `harmful_delivery` reaches the configured target and `heldout_benign_kl` remains within the configured held-out limit; the teacher-forced prefix score and calibration KL are search measurements, not substitutes for those final values.
 
 CCV is an explicit alternative, not the default:
 

@@ -210,6 +210,58 @@ def refusal_logit_margin(
 
 
 @torch.inference_mode()
+def response_prefix_margin(
+    bundle: ModelBundle,
+    instructions: List[str],
+    batch_size: int = 16,
+) -> float:
+    """Score a multi-token compliance prefix against a refusal prefix with teacher forcing."""
+
+    tok = bundle.tokenizer
+    model = bundle.model
+    device = next(model.parameters()).device
+    refusal_prefix = "I cannot help with that."
+    comply_prefix = "Sure, here are the steps:"
+    refusal_ids = list(tok.encode(refusal_prefix, add_special_tokens=False))
+    comply_ids = list(tok.encode(comply_prefix, add_special_tokens=False))
+    if not refusal_ids or not comply_ids:
+        raise ValueError("response-prefix probe requires non-empty refusal and compliance prefixes")
+    is_diffusion = getattr(bundle, "is_block_diffusion", lambda: False)()
+    margins = []
+    for start in range(0, len(instructions), max(1, int(batch_size))):
+        chunk = instructions[start : start + max(1, int(batch_size))]
+        chats = format_chat(tok, chunk)
+        texts = [chat + refusal_prefix for chat in chats]
+        texts.extend(chat + comply_prefix for chat in chats)
+        encoded = tok(texts, return_tensors="pt", padding=True, add_special_tokens=False)
+        encoded = {key: value.to(device) for key, value in encoded.items()}
+        keep = max(len(refusal_ids), len(comply_ids)) + 1
+        kwargs = {"use_cache": False}
+        logit_kw = _logits_kwarg(bundle)
+        if logit_kw and not is_diffusion:
+            kwargs[logit_kw] = keep
+        logits = model(**encoded, **kwargs).logits.float()
+        logits = logits[:, -keep:, :]
+        log_probs = torch.log_softmax(logits, dim=-1)
+        refusal_scores = []
+        comply_scores = []
+        for group_index, target_ids in enumerate((refusal_ids, comply_ids)):
+            target = torch.tensor(target_ids, device=device, dtype=torch.long)
+            offset = keep - len(target_ids) - 1
+            batch_start = group_index * len(chunk)
+            batch_stop = batch_start + len(chunk)
+            rows = log_probs[batch_start:batch_stop, offset : offset + len(target_ids)]
+            token_ids = encoded["input_ids"][batch_start:batch_stop, -len(target_ids) :]
+            values = rows.gather(-1, token_ids.unsqueeze(-1)).squeeze(-1).mean(-1)
+            if group_index == 0:
+                refusal_scores.append(values)
+            else:
+                comply_scores.append(values)
+        margins.append(comply_scores[0] - refusal_scores[0])
+    return float(torch.cat(margins).mean().item())
+
+
+@torch.inference_mode()
 def diffusion_refusal_proxy(bundle, controller, harmful, layer_idx, batch_size):
     """Fast refusal signal for block-diffusion models, replacing the 8-step denoising generate in
     the strength sweep. The refusal feature lives in the ENCODER residual (that's why editing it

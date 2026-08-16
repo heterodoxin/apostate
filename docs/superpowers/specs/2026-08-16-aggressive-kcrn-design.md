@@ -2,15 +2,15 @@
 
 ## Purpose
 
-Aggressive KCRN is a second fixed-weight KCRN variant for cases where normal KCRN does not remove enough harmful-prompt refusal. Normal KCRN remains unchanged and remains the default. The aggressive variant is accepted only when the reloaded checkpoint reaches at least 90% harmful delivery on the 96-prompt held-out set while held-out benign KL remains at or below 0.02.
+Aggressive KCRN is an opt-in fixed-weight KCRN variant that begins with the normal projected KCRN baseline and may add bounded non-overlapping projected writer updates. Normal KCRN remains the default. The aggressive result is accepted only when the reloaded checkpoint meets its configured harmful-delivery and held-out benign-KL thresholds.
 
 ## Compatibility
 
-The existing `kcrn` method and projected solve keep their current behavior. The canonical opt-in name is `aggressive-kcrn`; the existing `aggressive` profile spelling remains a compatibility alias. The report records the selected variant, all adaptive steps, calibration metrics, held-out metrics, and the final baked dtype. The exported model contains ordinary tensors only and has no router, hook, detector, or prompt-dependent runtime branch.
+The existing `kcrn` method and projected solve keep their normal behavior. The canonical opt-in name is `aggressive-kcrn`; the existing `aggressive` profile spelling remains a compatibility alias. The exported model contains ordinary tensors only and has no router, hook, detector, or prompt-dependent runtime branch.
 
 ## Architecture
 
-Aggressive KCRN reuses the projected KCRN update as its inner operation:
+Aggressive KCRN first calls the normal KCRN fitting path with the aggressive baseline settings. It then reuses the projected KCRN update for additional candidates:
 
 ```text
 K̃_h = K_h - Q_b(Q_bᵀK_h)
@@ -19,40 +19,24 @@ L   = -s R(Rᵀ(WK_h))
 ΔW  = LC
 ```
 
-The variant adds a calibration-only greedy controller around that operation. It builds a candidate pool from the existing writer discovery path, ranks candidates using harmful-versus-benign refusal signal, and evaluates bounded candidate updates against the current in-memory model state. After accepting an update, it recomputes the remaining refusal residual for later writers so later edits do not repeatedly target a stale base matrix.
-
-Each accepted step stores its layer, writer, strength, projected-key certificate, calibration refusal change, calibration benign KL change, and cumulative update norm. The final list of updates is composed and baked once into the standalone checkpoint.
+The controller temporarily applies the baseline and candidate factors to the in-memory model, measures calibration behavior, restores the untouched writers, and leaves final application to the existing one-time bake. Baseline and adaptive targets are disjoint.
 
 ## Adaptive selection
 
-Aggressive KCRN uses `auto` layer and writer discovery by default so candidates receive a nonzero measured selection score. Candidate ranking combines:
+Candidates come from the existing writer-discovery path and are bounded by projected harmful-key energy, condition number, delta norm, and relative update safeguards. Additional strengths are selected from a configurable finite grid, defaulting to `1, 2, 4, 6, 8`.
 
-- harmful refusal-signal reduction on the calibration tuning split;
-- the projected harmful-key energy certificate;
-- benign calibration KL cost;
-- condition number and relative update safeguards.
-
-Strength is selected from a configurable finite grid, defaulting to `1, 2, 4, 6, 8`. A candidate is accepted only when it improves the calibration refusal objective without exceeding the configured update and conditioning limits. Selection stops when no candidate improves the objective, the benign calibration KL budget is exhausted, or the maximum step count is reached. The default maximum is 24 steps.
-
-The refusal objective uses calibration-only harmful prompts and a disjoint calibration tuning subset. It may use the existing strict delivery judge or its deterministic refusal-logit proxy for candidate ranking, but it never reads the held-out harmful set. Benign calibration prompts are used for basis construction and calibration KL only. The held-out harmful and benign prompts remain untouched until final validation.
+The calibration objective is a teacher-forced response-prefix margin on an external harmful tuning split: the compliance prefix `Sure, here are the steps:` is compared with the refusal prefix `I cannot help with that.`. Benign calibration KL is measured on cached base outputs after each complete baseline-plus-candidate stack. The harmful final holdout and benign final holdout are excluded from selection.
 
 ## Safeguards
 
-The projected solver continues to skip candidates with insufficient projected harmful energy, excessive condition number, or excessive relative update norm. Aggressive KCRN adds cumulative relative-update and calibration-KL limits. A candidate or complete run that violates a safeguard is reported as skipped or failed rather than being silently clipped into an unverified result.
+The projected solver skips candidates with insufficient projected harmful energy, excessive condition number, or excessive relative update norm. The aggressive controller additionally limits cumulative relative update and calibration KL and records rejected candidates. A run that misses the final thresholds is reported as failed.
 
-The final validator reloads the saved checkpoint using the exact save dtype and loading path, computes calibration and held-out benign KL against cached base outputs, and measures harmful delivery with the strict content-delivery judge. A result below 90% delivery or above 0.02 held-out KL is not labeled successful and is not made the recommended aggressive checkpoint.
+The final validator reloads the saved checkpoint using the exact save dtype and loading path, computes calibration and held-out benign KL against cached base outputs, and measures harmful delivery with the strict content-delivery judge.
 
 ## Configuration and reporting
 
-The profile selects the variant while the method remains `kcrn`. Aggressive-specific controls expose the strength grid, maximum greedy steps, calibration KL budget, cumulative update limit, and target delivery. Normal KCRN ignores these controls. Reports include:
-
-- `variant` and canonical profile name;
-- candidate order and accepted-step records;
-- per-writer projected KCRN certificates;
-- calibration delivery/refusal objective and calibration KL;
-- reloaded held-out delivery and benign KL;
-- fixed-weight runtime status, bake dtype, and serialization preservation metrics.
+The profile selects the variant while the method remains `kcrn`. Aggressive-specific controls expose the baseline strength, extra-factor strength grid, maximum greedy steps, calibration KL budget, cumulative update limit, and target delivery. Reports include the variant, baseline and adaptive step counts, candidate order, accepted and rejected records, per-writer projected KCRN certificates, calibration metrics, reloaded held-out metrics, fixed-weight runtime status, and serialization preservation metrics.
 
 ## Tests and acceptance
 
-Focused fp32 tests cover greedy residual updates, preservation nulling, strength selection, deterministic candidate ordering, cumulative safeguards, and the unchanged normal path. Integration validation runs normal and aggressive KCRN on Qwen3-8B with identical prompt sources, disjoint splits, dtype, token budget, and reloaded checkpoint protocol. Aggressive KCRN is considered complete only if that validation meets both acceptance thresholds without enabling runtime hooks.
+Focused fp32 tests cover projected solver fast-path equivalence, greedy selection, preservation nulling, deterministic candidate ordering, cumulative safeguards, reversible writer application, prompt-split disjointness, response-prefix scoring, and the unchanged normal path. Integration validation runs aggressive KCRN on Qwen3-8B with disjoint prompt sources, fixed dtype, fixed-weight reload, and the final content-delivery judge.

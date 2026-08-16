@@ -207,6 +207,7 @@ def _certificate(
     target=None,
     projected_energy=None,
     condition_matrix=None,
+    include_spectrum: bool = True,
 ) -> dict:
     delta_kh = left @ (right @ Kh)
     base_refusal = R.T @ (W @ Kh)
@@ -231,9 +232,12 @@ def _certificate(
         condition = float(torch.linalg.cond(condition_source).item())
     except RuntimeError:
         condition = math.inf
-    try:
-        eigenvalues = torch.linalg.eigvalsh(condition_source).detach().float().cpu().tolist()
-    except RuntimeError:
+    if include_spectrum:
+        try:
+            eigenvalues = torch.linalg.eigvalsh(condition_source).detach().float().cpu().tolist()
+        except RuntimeError:
+            eigenvalues = []
+    else:
         eigenvalues = []
     return {
         "harmful_residual": float(torch.linalg.norm(harmful).item()),
@@ -322,6 +326,8 @@ def key_conditional_nulling_projected(
     max_relative_update: float = math.inf,
     svd_tolerance: float = 1e-7,
     explained_variance: float = 1.0,
+    preserve_basis_orthonormal: bool = False,
+    diagnostics_spectrum: bool = True,
 ) -> KCRNUpdate:
     """Solve KCRN in the numerically stable complement of the benign key span."""
 
@@ -338,11 +344,19 @@ def key_conditional_nulling_projected(
     if max_condition <= 0 or max_relative_update <= 0:
         raise ValueError("projected KCRN safeguards must be positive")
 
-    Kb = orthonormal_basis(
-        Kb_raw,
-        tolerance=svd_tolerance,
-        explained_variance=explained_variance,
-    )
+    if preserve_basis_orthonormal:
+        if Kb_raw.shape[1]:
+            gram = Kb_raw.T @ Kb_raw
+            identity = torch.eye(gram.shape[0], dtype=gram.dtype, device=gram.device)
+            if not torch.allclose(gram, identity, atol=max(1e-5, float(svd_tolerance) * 10), rtol=1e-4):
+                raise ValueError("preserve_basis_orthonormal=True requires orthonormal columns")
+        Kb = Kb_raw
+    else:
+        Kb = orthonormal_basis(
+            Kb_raw,
+            tolerance=svd_tolerance,
+            explained_variance=explained_variance,
+        )
 
     if Kb.shape[1]:
         projected = Kh - Kb @ (Kb.T @ Kh)
@@ -379,7 +393,10 @@ def key_conditional_nulling_projected(
             {
                 "projected_harmful_energy": projected_energy,
                 "condition": condition,
-                "regularized_eigenvalues": torch.linalg.eigvalsh(core).detach().float().cpu().tolist(),
+                "regularized_eigenvalues": (
+                    torch.linalg.eigvalsh(core).detach().float().cpu().tolist()
+                    if diagnostics_spectrum else []
+                ),
                 "preserve_rank": int(Kb.shape[1]),
             },
         )
@@ -396,6 +413,7 @@ def key_conditional_nulling_projected(
         target=target,
         projected_energy=projected_energy,
         condition_matrix=core,
+        include_spectrum=diagnostics_spectrum,
     )
     diagnostics.update({
         "strength": float(strength),
