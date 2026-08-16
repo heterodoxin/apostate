@@ -103,7 +103,7 @@ The default profile preserves the low-KL operating point. Use the opt-in `aggres
 ```bash
 apostate ablate \
   --model Qwen/Qwen3-8B \
-  --out qwen3-8b-aggressive-abliterated \
+  --out qwen3-8b-aggressive-kcrn-abliterated \
   --profile aggressive-kcrn
 ```
 
