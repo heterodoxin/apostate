@@ -2,7 +2,7 @@
 
 ## What is this project
 
-Apostate builds fixed-weight Transformers checkpoints that reduce refusal behavior with Key-Conditional Refusal Nulling (KCRN) by default or an explicitly selected predictive/contrastive co-vector (CCV) route, with no runtime router, hook, adapter, or prompt-dependent branch in the exported model.
+Apostate is a fixed-weight checkpoint builder whose primary path is projected Key-Conditional Refusal Nulling (KCRN), with an explicit predictive/contrastive co-vector (CCV) path for comparison and legacy compatibility.
 
 ## Install
 
@@ -18,17 +18,21 @@ apostate setup
 apostate doctor
 ```
 
+`requirements.txt` installs the backend-independent packages; `apostate setup` installs the matching CUDA or ROCm Torch packages before checking the selected GPU. AMD RDNA4 requires a ROCm 6.4 or newer Torch wheel, and CUDA installation adds the CUDA 4-bit dependency through the setup path.
+
 ## Why it's better
 
-KCRN fits each writer update against harmful and benign key bases and records projected-energy, fit, leakage, condition, and post-bake diagnostics; CCV fits a predictive co-vector in the existing optimized engine and is available as an explicit comparison path. Both paths bake ordinary matrix weights, while KCRN is the default because its held-out benign set is separated from basis construction, tuning, and checkpoint selection.
+KCRN solves a bounded low-rank writer update against separate harmful and benign key bases and reports projected energy, fit error, benign leakage, condition, relative update norm, and post-bake preservation; CCV fits a predictive co-vector in the existing optimized writer/reader engine. Both produce ordinary checkpoint weights, while KCRN is the default and has the stricter fixed-weight held-out validation path.
 
 ## Why should I care
 
-The exported directory is a normal Transformers checkpoint that can be loaded without Apostate at inference time, so deployment does not require a serving wrapper or runtime intervention. The report contains the calibration and held-out KL measurements, generation-delivery result, bake dtype, selected writers, and numerical certificates needed to inspect a checkpoint before use.
+The exported directory can be loaded by standard Transformers tooling without Apostate code, runtime hooks, routers, adapters, or prompt-dependent branches. KCRN reports fit sources, calibration and held-out KL measurements, generation settings, selected writers, solver diagnostics, and bake dtype, while CCV reports its optimized refusal and harmless-KL measurements.
 
 ## Advanced
 
-For writer matrix W, refusal basis R, harmful keys K_h, and benign keys K_b, projected KCRN constructs an orthonormal benign basis Q_b, projects K_h to K̃_h = K_h − Q_b(Q_bᵀK_h), forms G = K_hᵀK̃_h, solves (G + λI)C = K̃_hᵀ without an explicit inverse, and applies ΔW = −sR(RᵀWK_h)C. The resulting update is zero on the preserved benign subspace up to the configured ridge and bake precision. KCRN is the default CLI path:
+Projected KCRN uses a writer matrix `W`, refusal basis `R`, harmful key basis `K_h`, benign key basis `K_b`, strength `s`, and ridge `λ`. It constructs an orthonormal benign basis `Q_b`, computes `K̃_h = K_h − Q_b(Q_bᵀK_h)`, forms `G = K_hᵀK̃_h`, solves `(G + λI)C = K̃_hᵀ` with `torch.linalg.solve`, and applies `ΔW = −sR(RᵀWK_h)C`. The exported model performs only normal matrix multiplication; prompt-dependent fitting code is not required at runtime.
+
+The default command is KCRN:
 
 ```bash
 apostate kcrn \
@@ -53,12 +57,25 @@ apostate kcrn \
   --max-new-tokens 256
 ```
 
-CCV is opt-in and uses the predictive/contrastive co-vector already implemented by the legacy optimization engine:
+CCV is opt-in and uses the predictive co-vector implementation in the optimized engine:
 
 ```bash
 apostate ccv --model Qwen/Qwen3-8B --out qwen3-8b-ccv
 ```
 
-Both methods use disjoint calibration and held-out prompt sets and reload the exported checkpoint before measuring float32 KL(base||edited) over non-padding positions. The verified Qwen3-8B KCRN reference measured held-out benign KL 0.003659 and 64/96 delivery (66.7%) with a 256-token generation budget.
+`apostate ablate` remains the legacy compatibility command, while `python -m apostate.cli` and the interactive Ablate action select KCRN unless a method is explicitly supplied. The interactive action names its output `<model>-abliterated`.
 
-The interactive Ablate action invokes KCRN and appends `-abliterated` to the selected model name.
+KCRN creates disjoint harmful and benign calibration and held-out sets, excludes the held-out benign set from basis construction and tuning, caches the base model’s native-dtype hidden states, bakes the factors, reloads the exported checkpoint, and computes float32 `KL(base||edited)` over non-padding prompt positions. The verified Qwen3-8B KCRN reference measured held-out benign KL `0.003659` and `64/96` delivery (`66.7%`) in a separate 256-token generation validation.
+
+CCV computes a refusal direction from paired activations, predicts the refusal component from the orthogonal activation coordinates with a ridge solve, optionally adds a harmful contrast term, and uses the resulting co-vector for the fixed-weight writer or reader edit. Its parameters are exposed through `--oblique-predictive`, `--predictive-ridge`, `--oblique-preserve`, and `--oblique-contrast` when the CCV method is selected.
+
+The model loader resolves decoder layouts by module structure and supports dense, hybrid, packed-MoE, and multimodal text decoders when Transformers exposes a compatible language stack. Post-norm architectures use reader-side edits because writer outputs are renormalized; packed experts use the backend-specific quantization path when quantized loading is selected. CPU offload is available with `--cpu-offload-gb`, and `APOSTATE_VRAM_FRACTION` limits GPU allocation for systems where the display shares the card.
+
+The benchmark and chat commands operate on exported checkpoints:
+
+```bash
+apostate test --model qwen3-8b-kcrn --base Qwen/Qwen3-8B --suite refusal
+apostate talk --model qwen3-8b-kcrn --quant auto
+```
+
+Benchmark suites are `humaneval`, `mbpp`, `gsm8k`, `refusal`, and `all`; local model discovery uses `APOSTATE_MODEL_ROOTS` in addition to the standard cache and checkpoint locations.
