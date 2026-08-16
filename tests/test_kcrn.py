@@ -525,6 +525,23 @@ def test_cli_defaults_to_kcrn(monkeypatch):
     assert calls == ["kcrn"]
 
 
+def test_cli_dispatches_ccv_to_legacy_engine_with_predictive_oblique(monkeypatch):
+    import apostate.cli as cli
+
+    calls = []
+    monkeypatch.setattr(cli, "run_kcrn", lambda cfg, command=None: calls.append(("kcrn", cfg)))
+    monkeypatch.setattr(cli, "run_legacy", lambda cfg, command=None: calls.append(("legacy", cfg)))
+
+    cli.main(["--method", "ccv", "--model", "base", "--output-dir", "out"])
+
+    assert len(calls) == 1
+    route, cfg = calls[0]
+    assert route == "legacy"
+    assert cfg.method == "ccv"
+    assert cfg.oblique_ablation is True
+    assert cfg.oblique_predictive is True
+
+
 def test_cli_can_override_old_config_method(monkeypatch, tmp_path):
     import apostate.cli as cli
 
@@ -550,8 +567,10 @@ def test_subcommands_select_legacy_or_kcrn_engine(monkeypatch):
 
     assert main_module.main(["ablate", "--model", "base", "--out", "legacy-out", "--resume"]) == 0
     assert main_module.main(["kcrn", "--model", "base", "--out", "kcrn-out"]) == 0
+    assert main_module.main(["ccv", "--model", "base", "--out", "ccv-out"]) == 0
     assert calls[0][0][calls[0][0].index("--method") + 1] == "legacy"
     assert calls[1][0][calls[1][0].index("--method") + 1] == "kcrn"
+    assert calls[2][0][calls[2][0].index("--method") + 1] == "ccv"
 
 
 def test_kcrn_defaults_cover_all_writers_without_a_target_cap():

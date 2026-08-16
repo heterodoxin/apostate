@@ -15,6 +15,13 @@ from .engine import run as run_legacy
 from .kcrn_runner import run as run_kcrn
 
 
+def _run_ccv(cfg: ApostateConfig, command=None):
+    cfg.method = "ccv"
+    cfg.oblique_ablation = True
+    cfg.oblique_predictive = True
+    return run_legacy(cfg, command=command)
+
+
 def _add_config_args(parser: argparse.ArgumentParser):
     for f in dataclasses.fields(ApostateConfig):
         name = "--" + f.name.replace("_", "-")
@@ -55,10 +62,12 @@ def main(argv=None):
     method = (cfg.method or "kcrn").strip().lower()
     if method == "kcrn":
         run_kcrn(cfg, command=command)
+    elif method == "ccv":
+        _run_ccv(cfg, command=command)
     elif method in ("legacy", "engine"):
         run_legacy(cfg, command=command)
     else:
-        raise ValueError(f"unknown Apostate method {cfg.method!r}; use kcrn or legacy")
+        raise ValueError(f"unknown Apostate method {cfg.method!r}; use kcrn, ccv, or legacy")
 
 
 if __name__ == "__main__":

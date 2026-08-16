@@ -724,7 +724,11 @@ def load_model(cfg: ApostateConfig) -> ModelBundle:
         # GPU gets whatever free VRAM is available; the rest spills to cpu_offload_gb of RAM.
         try:
             free_vram, _ = torch.cuda.mem_get_info()
-            gpu_limit = f"{int(free_vram * 0.92 / 1e9)}GiB"
+            gpu_limit_gb = int(free_vram * 0.92 / 1e9)
+            if _frac:
+                total_vram = torch.cuda.get_device_properties(torch.device(cfg.device)).total_memory
+                gpu_limit_gb = min(gpu_limit_gb, int(total_vram * float(_frac) / (1024 ** 3)))
+            gpu_limit = f"{max(1, gpu_limit_gb)}GiB"
         except Exception:
             gpu_limit = "30GiB"
         kwargs["device_map"] = "auto"

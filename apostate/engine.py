@@ -1873,6 +1873,7 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
     mark("test_metrics")
 
     report = {
+        "method": getattr(cfg, "method", "legacy"),
         "model": cfg.model,
         "num_layers": bundle.num_layers,
         "hidden_size": bundle.hidden_size,

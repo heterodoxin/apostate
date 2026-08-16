@@ -19,6 +19,7 @@ apostate            interactive menu (default)
 apostate setup      install python deps, check gpu
 apostate doctor     verify the GPU can run a kernel before any big load (cuda/rocm)
 apostate ablate --model M --out D   build a legacy fixed-weight checkpoint
+apostate ccv   --model M --out D   build a predictive/contrastive co-vector checkpoint
 apostate kcrn   --model M --out D   build a projected fixed-weight KCRN checkpoint
 apostate ticv   --model D --out D2  bake soft-deflection removal (TICV) into an abliterated checkpoint
 apostate finetune --model M --out D [--data path.jsonl] [--steps N]  QLoRA finetune (train alias)
@@ -75,14 +76,14 @@ def main(argv=None) -> int:
     if cmd == "doctor":
         return run_module(["-m", "apostate.doctor", *args], "apostate doctor")
 
-    if cmd in ("ablate", "boost", "kcrn"):
+    if cmd in ("ablate", "boost", "ccv", "kcrn"):
         model = _flag(args, "--model", DEFAULT_MODEL)
         out = _flag(args, "--out", _flag(args, "--output-dir", "out"))
         rest = _strip(args, ["--model", "--out", "--output-dir"])
         label = "apostate " + cmd + " --model " + shlex.quote(model) + " --out " + shlex.quote(out)
         if rest:
             label += " " + " ".join(shlex.quote(x) for x in rest)
-        method = "kcrn" if cmd == "kcrn" else "legacy"
+        method = "kcrn" if cmd == "kcrn" else ("ccv" if cmd == "ccv" else "legacy")
         return run_module(
             ["-m", "apostate.cli", "--method", method, "--optimize", "--model", model, "--output-dir", out, *rest],
             label)
