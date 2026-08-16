@@ -30,9 +30,9 @@ The two fixed-weight methods have different operators and are exposed separately
 
 | Method | Selection | Weight edit | Runtime dependency | Validation |
 |---|---|---|---|---|
-| KCRN | Default | Projected harmful-key regression with bounded low-rank factors | None | Reloaded checkpoint, disjoint held-out KL, generation, per-writer certificates |
+| KCRN | Default; `apostate ablate` or `apostate kcrn` | Projected harmful-key regression with bounded low-rank factors | None | Reloaded checkpoint, disjoint held-out KL, generation, per-writer certificates |
 | CCV | `apostate ccv` | Predictive/contrastive refusal co-vector in the existing optimized engine | None | Reloaded fixed-weight engine report with refusal and harmless-KL measurements |
-| Legacy | `apostate ablate` | Compatibility path for the earlier optimization engine | None after export | Legacy report format and benchmark tooling |
+| Legacy | Explicit `--method legacy` | Earlier optimization engine for compatibility | None after export | Legacy report format and benchmark tooling |
 
 KCRN is designed to make the preservation constraint explicit instead of treating a small calibration KL as proof of generalization. Harmful calibration keys and benign calibration keys are fit separately; the benign held-out set is excluded from basis construction, writer selection, strength tuning, and checkpoint selection. The exported checkpoint contains normal tensors rather than a hook, router, adapter, detector, or prompt-dependent branch.
 
@@ -107,7 +107,7 @@ apostate ccv \
   --out qwen3-8b-ccv
 ```
 
-CCV forms a refusal direction from paired activations, predicts the refusal component from orthogonal activation coordinates with a ridge solve, optionally adds a harmful contrast term, and uses the resulting co-vector for the fixed-weight writer or reader edit. Its controls include `--oblique-predictive`, `--predictive-ridge`, `--oblique-preserve`, and `--oblique-contrast`. `apostate ablate` remains available for the earlier engine; it is not the default path. A saved configuration without an explicit method is treated as legacy for compatibility, while a fresh `ApostateConfig` and the interactive Ablate action use KCRN.
+CCV forms a refusal direction from paired activations, predicts the refusal component from orthogonal activation coordinates with a ridge solve, optionally adds a harmful contrast term, and uses the resulting co-vector for the fixed-weight writer or reader edit. Its controls include `--oblique-predictive`, `--predictive-ridge`, `--oblique-preserve`, and `--oblique-contrast`. `apostate ablate` is an alias for the default KCRN build; the earlier engine is available only through an explicit `--method legacy` configuration. A saved configuration without an explicit method is treated as legacy for compatibility, while a fresh `ApostateConfig` and the interactive Ablate action use KCRN.
 
 The interactive command opens the terminal interface:
 

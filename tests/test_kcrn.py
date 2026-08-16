@@ -555,7 +555,7 @@ def test_cli_can_override_old_config_method(monkeypatch, tmp_path):
     assert calls == ["kcrn"]
 
 
-def test_subcommands_select_legacy_or_kcrn_engine(monkeypatch):
+def test_subcommands_select_kcrn_or_ccv_engine(monkeypatch):
     import apostate.__main__ as main_module
 
     calls = []
@@ -565,10 +565,10 @@ def test_subcommands_select_legacy_or_kcrn_engine(monkeypatch):
         lambda args, label=None: calls.append((args, label)) or 0,
     )
 
-    assert main_module.main(["ablate", "--model", "base", "--out", "legacy-out", "--resume"]) == 0
+    assert main_module.main(["ablate", "--model", "base", "--out", "abliterated-out", "--resume"]) == 0
     assert main_module.main(["kcrn", "--model", "base", "--out", "kcrn-out"]) == 0
     assert main_module.main(["ccv", "--model", "base", "--out", "ccv-out"]) == 0
-    assert calls[0][0][calls[0][0].index("--method") + 1] == "legacy"
+    assert calls[0][0][calls[0][0].index("--method") + 1] == "kcrn"
     assert calls[1][0][calls[1][0].index("--method") + 1] == "kcrn"
     assert calls[2][0][calls[2][0].index("--method") + 1] == "ccv"
 
