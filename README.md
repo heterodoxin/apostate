@@ -32,7 +32,6 @@ The two fixed-weight methods have different operators and are exposed separately
 |---|---|---|---|---|
 | KCRN | Default; `apostate ablate` or `apostate kcrn` | Projected harmful-key regression with bounded low-rank factors | None | Reloaded checkpoint, disjoint held-out KL, generation, per-writer certificates |
 | CCV | `apostate ccv` | Predictive/contrastive refusal co-vector in the existing optimized engine | None | Reloaded fixed-weight engine report with refusal and harmless-KL measurements |
-| Legacy | Explicit `--method legacy` | Earlier optimization engine for compatibility | None after export | Legacy report format and benchmark tooling |
 
 KCRN is designed to make the preservation constraint explicit instead of treating a small calibration KL as proof of generalization. Harmful calibration keys and benign calibration keys are fit separately; the benign held-out set is excluded from basis construction, writer selection, strength tuning, and checkpoint selection. The exported checkpoint contains normal tensors rather than a hook, router, adapter, detector, or prompt-dependent branch.
 
