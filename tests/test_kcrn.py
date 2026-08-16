@@ -573,6 +573,18 @@ def test_subcommands_select_legacy_or_kcrn_engine(monkeypatch):
     assert calls[2][0][calls[2][0].index("--method") + 1] == "ccv"
 
 
+def test_tui_ablation_uses_kcrn_and_abliterated_output(monkeypatch):
+    import apostate.tui as tui
+
+    calls = []
+    app = tui.Apostate.__new__(tui.Apostate)
+    monkeypatch.setattr(app, "run_cli", lambda args: calls.append(args))
+
+    app._do_ablate("/models/Qwen3-8B")
+
+    assert calls == [["kcrn", "--model", "/models/Qwen3-8B", "--out", "Qwen3-8B-abliterated"]]
+
+
 def test_kcrn_defaults_cover_all_writers_without_a_target_cap():
     from apostate.config import ApostateConfig
 

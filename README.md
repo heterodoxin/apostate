@@ -60,3 +60,5 @@ apostate ccv --model Qwen/Qwen3-8B --out qwen3-8b-ccv
 ```
 
 Both methods use disjoint calibration and held-out prompt sets and reload the exported checkpoint before measuring float32 KL(base||edited) over non-padding positions. The verified Qwen3-8B KCRN reference measured held-out benign KL 0.003659 and 64/96 delivery (66.7%) with a 256-token generation budget.
+
+The interactive Ablate action invokes KCRN and appends `-abliterated` to the selected model name.
