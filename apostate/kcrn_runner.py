@@ -888,6 +888,7 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
         _release_bundle(edited)
     report = _finite_json({
         "method": "kcrn",
+        "profile": cfg.profile,
         "deployment": "fixed_weight_checkpoint",
         "runtime_hooks": False,
         "model": cfg.model,
