@@ -618,15 +618,15 @@ def test_projected_solver_defaults_to_raw_benign_basis():
     assert cfg.kcrn_benign_basis_mode == "raw"
 
 
-def test_aggressive_profile_expands_kcrn_refusal_budget():
+def test_aggressive_profile_expands_kcrn_update_budget():
     from apostate.config import ApostateConfig
 
     cfg = ApostateConfig(profile="aggressive")
     cfg.with_defaults()
 
-    assert cfg.kcrn_strength == 8.0
+    assert cfg.kcrn_strength == 4.0
     assert cfg.kcrn_preserve_rank == 64
-    assert cfg.kcrn_refusal_rank == 2
+    assert cfg.kcrn_refusal_rank == 1
     assert cfg.kcrn_max_delta_norm == 12.0
     assert cfg.kcrn_max_relative_update == 16.0
 

@@ -228,12 +228,8 @@ class ApostateConfig:
             if self.target_refusal <= 0.0 and self.repair_eval_n == 96:
                 self.repair_eval_n = 96
         elif prof == "aggressive" and (self.method or "kcrn").strip().lower() == "kcrn":
-            if self.kcrn_strength == 4.0:
-                self.kcrn_strength = 8.0
             if self.kcrn_preserve_rank == 128:
                 self.kcrn_preserve_rank = 64
-            if self.kcrn_refusal_rank == 1:
-                self.kcrn_refusal_rank = 2
             if self.kcrn_max_delta_norm == 8.0:
                 self.kcrn_max_delta_norm = 12.0
             if self.kcrn_max_relative_update == 10.0:

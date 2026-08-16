@@ -107,7 +107,7 @@ apostate ablate \
   --profile aggressive
 ```
 
-For KCRN, this profile raises the default strength from `4` to `8`, reduces the raw benign basis rank from `128` to `64`, uses a rank-2 refusal basis, and permits larger bounded writer updates. These are starting settings rather than a KL guarantee; the reloaded held-out value in `kcrn_report.json` is the measurement to use.
+For KCRN, this profile keeps the calibrated strength and rank-1 refusal basis, reduces the raw benign basis rank from `128` to `64`, and permits larger bounded writer updates. On the validated Qwen3-8B run this produced `66.7%` harmful delivery at `0.01504` reloaded held-out KL; the reloaded value in `kcrn_report.json` is the measurement to use for another model or dataset.
 
 CCV is an explicit alternative, not the default:
 
