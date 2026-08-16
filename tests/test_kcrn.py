@@ -631,6 +631,17 @@ def test_aggressive_profile_expands_kcrn_update_budget():
     assert cfg.kcrn_max_relative_update == 16.0
 
 
+def test_aggressive_kcrn_is_the_canonical_profile_name():
+    from apostate.config import ApostateConfig
+
+    cfg = ApostateConfig(profile="aggressive-kcrn")
+    cfg.with_defaults()
+
+    assert cfg.kcrn_preserve_rank == 64
+    assert cfg.kcrn_max_delta_norm == 12.0
+    assert cfg.kcrn_max_relative_update == 16.0
+
+
 def test_aggressive_profile_preserves_explicit_kcrn_values():
     from apostate.config import ApostateConfig
 

@@ -98,16 +98,16 @@ apostate kcrn \
 
 For a smaller benign basis, replace `raw` with `pca` and set `--kcrn-benign-explained-variance`, for example `0.95`. `--kcrn-layers`, `--kcrn-writers`, and `--kcrn-target-writers` constrain the candidate set; `all`, `auto`, and `mlp` are supported selection modes where applicable. `--kcrn-compute-dtype` and `--kcrn-save-dtype` must match because the KCRN validator measures the actual saved dtype.
 
-The default profile preserves the low-KL operating point. Use the opt-in aggressive profile when a higher held-out KL budget, around `0.02`, is acceptable in exchange for a stronger refusal edit:
+The default profile preserves the low-KL operating point. Use the opt-in `aggressive-kcrn` profile when a higher held-out KL budget, around `0.02`, is acceptable in exchange for a stronger refusal edit:
 
 ```bash
 apostate ablate \
   --model Qwen/Qwen3-8B \
   --out qwen3-8b-aggressive-abliterated \
-  --profile aggressive
+  --profile aggressive-kcrn
 ```
 
-For KCRN, this profile keeps the calibrated strength and rank-1 refusal basis, reduces the raw benign basis rank from `128` to `64`, and permits larger bounded writer updates. On the validated Qwen3-8B run this produced `66.7%` harmful delivery at `0.01504` reloaded held-out KL; the reloaded value in `kcrn_report.json` is the measurement to use for another model or dataset.
+For KCRN, this profile keeps the calibrated strength and rank-1 refusal basis, reduces the raw benign basis rank from `128` to `64`, and permits larger bounded writer updates. The older `aggressive` spelling remains a compatibility alias; the reloaded value in `kcrn_report.json` is the measurement to use for another model or dataset.
 
 CCV is an explicit alternative, not the default:
 
