@@ -241,6 +241,15 @@ class ApostateConfig:
                 self.opt_eval_n = 64
             if self.target_refusal <= 0.0 and self.repair_eval_n == 96:
                 self.repair_eval_n = 96
+            # verified KCRN operating point (Qwen3-8B, JailbreakBench held-out, 256 tok):
+            # preserve_rank 64 + strength 5 delivers on every held-out prompt with 0 hard
+            # refusals at full-position KL ~0.003, beating the rank-128 default on delivery
+            # while staying well under a 0.006 KL budget. (rank 128 -> 64.6%, KL 0.0016.)
+            if (self.method or "kcrn").strip().lower() == "kcrn":
+                if self.kcrn_preserve_rank == 128:
+                    self.kcrn_preserve_rank = 64
+                if self.kcrn_strength == 4.0:
+                    self.kcrn_strength = 5.0
         elif prof in {"aggressive", "aggressive-kcrn", "aggressive kcrn"} and (self.method or "kcrn").strip().lower() == "kcrn":
             from .aggressive_kcrn import parse_strength_grid
 

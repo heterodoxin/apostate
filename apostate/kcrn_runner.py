@@ -263,6 +263,58 @@ def _compatible_targets(bundle, layers: Iterable[int], writer_spec: str) -> list
     return targets
 
 
+def _write_model_card(output: Path, report: dict) -> None:
+    """Write a checkpoint README describing the KCRN edit and the numbers this run measured."""
+
+    delivery = report.get("harmful_delivery")
+    kl = report.get("heldout_benign_kl")
+    rows = [
+        ("base model", f"`{report.get('model')}`"),
+        ("method", "Apostate KCRN (fixed-weight key-conditional refusal nulling)"),
+        ("edited writers", str(len(report.get("targets") or []))),
+        ("strength", str(report.get("kcrn_strength"))),
+        ("checkpoint dtype", str(report.get("save_dtype"))),
+    ]
+    if delivery is not None:
+        rows.append(("held-out harmful delivery", f"{delivery * 100:.1f}% of {report.get('eval_n')} prompts"))
+    if kl is not None:
+        rows.append(("held-out benign full-position KL", f"{kl:.6f}"))
+    table = "\n".join(f"| {name} | {value} |" for name, value in rows)
+    text = f"""# {output.name}
+
+Uncensored build of `{report.get('model')}`, produced with
+[Apostate](https://github.com/heterodoxin/apostate) using the fixed-weight KCRN path.
+
+KCRN removes the refusal direction from the residual writers that carry it, conditioned on the
+harmful key subspace where the refusal decision is made, while pinning a benign key basis to
+zero change. The result is a plain checkpoint: no runtime hook, adapter, finetune, or router.
+
+| field | value |
+|---|---|
+{table}
+
+Delivery is scored on held-out prompts the edit was never fitted on, with a strict judge. KL is
+raw float32 `KL(base || edited)` over every non-padding prompt position, measured after reloading
+this checkpoint. Both numbers are protocol-specific and only comparable against runs using the
+same splits, token budget, judge, dtype, and loading path; `kcrn_report.json` records that protocol.
+
+## Usage
+
+```python
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+model = AutoModelForCausalLM.from_pretrained("{output.name}", device_map="auto")
+tokenizer = AutoTokenizer.from_pretrained("{output.name}")
+```
+
+## Warning
+
+This model is uncensored and will answer harmful and dangerous requests. You are responsible
+for how you use it.
+"""
+    (output / "README.md").write_text(text, encoding="utf-8")
+
+
 def _load_saved_edits(path: str) -> tuple[list[dict], dict]:
     saved = torch.load(path, map_location="cpu", weights_only=False)
     if isinstance(saved, dict):
@@ -1598,6 +1650,7 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
     output.mkdir(parents=True, exist_ok=True)
     (output / "kcrn_report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     (output / "apostate_config.json").write_text(cfg.to_json() + "\n", encoding="utf-8")
+    _write_model_card(output, report)
     print(json.dumps(report, indent=2), flush=True)
     bundle.model = None
     bundle.tokenizer = None
