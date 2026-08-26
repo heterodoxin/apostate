@@ -196,3 +196,5 @@ Thanks to the people who have helped make Apostate better:
 - **dreamfast** for benchmarking Apostate and adding Docker support.
 - **erm14254** for the packed-MoE expert compatibility shim.
 - **MelodicRecognition7** for detailed setup feedback: the missing `accelerate` dependency note, how to point at a local model, and the TUI / quantization edge cases.
+
+A small portion of this project is AI-assisted.
