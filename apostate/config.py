@@ -175,6 +175,10 @@ class ApostateConfig:
 
     kcrn_edits: Optional[str] = None
     kcrn_force: bool = False
+    # Load the model in NF4 for the fit and evaluation forward passes on models that do not fit
+    # the GPU in fp16 (e.g. a 27B on a 34GB card). The bake still loads fp16 on CPU and saves an
+    # fp16 checkpoint; only the measured KL is then a consistent 4bit-vs-4bit number, not fp16.
+    kcrn_load_in_4bit: bool = False
     kcrn_compute_dtype: str = "float16"
     kcrn_save_dtype: str = "float16"
     kcrn_fit_n: int = 0

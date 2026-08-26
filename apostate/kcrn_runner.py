@@ -1376,11 +1376,11 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
     cfg.save_dtype = cfg.kcrn_save_dtype
     if cfg.compute_dtype != cfg.save_dtype:
         raise ValueError("KCRN requires matching compute and save dtypes for raw KL validation")
-    cfg.load_in_4bit = False
+    cfg.load_in_4bit = bool(cfg.kcrn_load_in_4bit)
     if cfg.batch_size == 24:
         cfg.batch_size = 4
     cfg.with_defaults()
-    cfg.load_in_4bit = False
+    cfg.load_in_4bit = bool(cfg.kcrn_load_in_4bit)
     guard_model_and_output(cfg.model, cfg.output_dir, bool(cfg.kcrn_force))
     fit_n = int(cfg.kcrn_harmful_fit_n or cfg.kcrn_fit_n or cfg.n_harmful)
     benign_fit_n = int(cfg.kcrn_benign_fit_n or fit_n)
@@ -1514,7 +1514,9 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
             cfg,
             {"edits": edits},
             tokenizer=tokenizer,
-            model=bundle.model,
+            # in 4bit-fit mode the loaded writers are quantized and cannot be edited in place;
+            # bake loads a fresh fp16 model on CPU (model=None) and saves an fp16 checkpoint.
+            model=(None if bool(cfg.kcrn_load_in_4bit) else bundle.model),
             preserve_bases=preserve_bases,
             post_bake_metrics=post_bake_metrics,
         )
@@ -1524,7 +1526,7 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
             model=cfg.output_dir,
             output_dir=cfg.output_dir,
             device=cfg.device,
-            load_in_4bit=False,
+            load_in_4bit=bool(cfg.kcrn_load_in_4bit),
             cpu_offload_gb=cfg.cpu_offload_gb,
             compute_dtype=cfg.save_dtype,
             save_dtype=cfg.save_dtype,
