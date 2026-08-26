@@ -1,5 +1,4 @@
-# apostate doctor: safe GPU readiness check. Runs only a tiny kernel (8 floats).
-# Exit 0 = ready, 1 = problem found.
+# Lightweight GPU readiness check
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-# collect last-token / response-mean activations for harmful and harmless prompts.
+# Collect harmful and harmless activations
 
 from __future__ import annotations
 
@@ -36,8 +36,7 @@ def _last_token_rows(t: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor
     return t[torch.arange(t.shape[0], device=t.device), last, :]
 
 
-# cap prompt length during activation collection; prevents outlier-length prompts from padding
-# an entire batch to thousands of tokens and making O(n²) attention cost blow up.
+# Cap prompt length to control attention cost
 _ACT_MAX_LEN = 768
 
 
@@ -48,8 +47,7 @@ def _prompt_batches(bundle, tok, prompts, batch_size, device, max_len: int = _AC
         setattr(bundle, "_act_enc_cache", cache)
     key = (tuple(prompts), batch_size, str(device), max_len)
     if key not in cache:
-        # sort by approximate length so each batch pads to its own local max (not global).
-        # downstream callers (refusal_subspace, causal_scores) use means/PCA — order-insensitive.
+        # Group similar lengths to reduce padding
         sorted_prompts = sorted(prompts, key=len, reverse=True)
         batches = []
         for i in range(0, len(sorted_prompts), batch_size):

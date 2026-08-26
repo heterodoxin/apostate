@@ -1,4 +1,4 @@
-# the pipeline: load, collect, build directions, search, guard, de-escalate KL, bake.
+# Apostate processing pipeline
 
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ _LOG_T0 = time.time()
 
 
 def _log(msg: str):
-    # elapsed prefix makes every run self-profiling: gaps between phase markers = phase durations.
+    # Prefix logs with elapsed time
     print(f"[apostate +{time.time() - _LOG_T0:5.0f}s] {msg}", flush=True)
 
 
@@ -62,7 +62,7 @@ def _prompt_hash(instructions) -> str:
 def _activation_cache_dir(cfg: ApostateConfig) -> str:
     if cfg.activation_cache_dir:
         return cfg.activation_cache_dir
-    # default outside output_dir so it survives output dir deletion/restarts
+    # Keep the activation cache across restarts
     return os.path.join(os.path.expanduser("~/.apostate"), "activation_cache")
 
 
@@ -984,8 +984,8 @@ def _repair_alphas(bundle, controller, cfg, eval_harmful, eval_harmless, start_r
         probe_n = max(1, cfg.repair_probe_candidates)
         exact_n = max(1, cfg.repair_rerank_k)
         if cfg.target_refusal <= 0.0 and best_ref > 0.0:
-            probe_n = max(probe_n, 24)  # cheap margin-proxy candidates (no generation)
-            exact_n = max(exact_n, 5)   # full-256-gen reranks: the repair's main cost -- proxy already ranked them
+            probe_n = max(probe_n, 24)  # Cheap proxy candidates
+            exact_n = max(exact_n, 5)   # Exact generation reranks
         candidates.sort(reverse=True)
         candidates = candidates[:probe_n]
         _log(
@@ -1089,7 +1089,7 @@ def _push_refusal_scale(bundle, controller, cfg, eval_harmful, eval_harmless):
         with controller.active():
             ref = refusal_rate(bundle, eval_harmful, cfg.max_new_tokens, cfg.batch_size)
         kl = kl_harmless(bundle, controller, eval_harmless, cfg.batch_size, positions=cfg.kl_positions)
-        # plateaued and over budget -> more alpha just raises kl, give up the sweep.
+        # Stop an over-budget plateau
         if ref < best_ref_seen - 0.005:
             best_ref_seen = ref
             no_improve = 0
@@ -1330,7 +1330,7 @@ def _direction_kwargs(cfg):
     }
 
 
-# post-norm models: per-layer reader-side directions + a calibrated global strength.
+# Post-norm reader calibration
 def _reader_profile(bundle, controller, ah, al, cfg, preserve_lookup, eval_harmful, eval_harmless, log):
     nl = bundle.num_layers
     predictive = bool(getattr(cfg, "oblique_predictive", False))
@@ -1345,9 +1345,7 @@ def _reader_profile(bundle, controller, ah, al, cfg, preserve_lookup, eval_harmf
             **_direction_kwargs(cfg),
         )
         Rl = gram_schmidt_remove(Rl, preserve_lookup(l))
-        # contrastive reader co-vector: remove refusal along Rl but re-inject the harmless-
-        # predictable component (suppressed on harmful), so KL stays low while we ablate harder.
-        # this brings the granite/qwen oblique win to the post-norm reader path (gemma).
+        # Preserve harmless reader variance with a contrastive co-vector
         Dl = None
         if predictive:
             Dl, _ = predictive_covector(Rl, al[l], ridge=ridge, preserve=preserve,
@@ -1355,8 +1353,7 @@ def _reader_profile(bundle, controller, ah, al, cfg, preserve_lookup, eval_harmf
         controller.set_reader_layer_subspace(l, Rl, D=Dl)
     if cfg.causal_targeting:
         log("scoring per-layer causal importance (reader) ...")
-        # floor 0 concentrates strength on layers that actually carry refusal; this keeps
-        # kl down (edge layers near the head spike kl for little refusal benefit).
+        # Concentrate strength on refusal-carrying layers
         causal = causal_layer_scores(
             bundle, controller, eval_harmful[: cfg.opt_eval_n], cfg.batch_size,
             floor=0.0, temperature=cfg.causal_temperature,
@@ -1371,19 +1368,19 @@ def _reader_profile(bundle, controller, ah, al, cfg, preserve_lookup, eval_harmf
             controller.set_layer_alpha(l, g * causal[l])
 
     controller.enable()
-    # pick the knee (best refusal/KL, not max ablation); on diffusion rank by the fast encoder proxy.
+    # Select the refusal-KL knee
     L_dir = max(0, min(nl - 1, int(nl * cfg.direction_layer_frac)))
     fast = bool(getattr(cfg, "reader_fast_proxy", False)) and bundle.is_block_diffusion()
     if fast:
         log(f"reader fast-proxy: ranking strengths by encoder-residual refusal projection "
             f"@ layer {L_dir} (one forward/strength, not an 8-step generate)")
     w = float(getattr(cfg, "reader_strength_kl_weight", 1.0))
-    best = None      # best feasible by tradeoff score: (g, ref, kl, score)
-    fallback = None  # gentlest (lowest-kl) tried, used only if nothing is feasible
+    best = None      # Best feasible score
+    fallback = None  # Lowest-KL fallback
     for g in cfg.reader_strengths:
         apply(g)
         ref = diffusion_refusal_proxy(bundle, controller, hset, L_dir, cfg.batch_size) if fast else None
-        if ref is None:  # proxy disabled or unavailable -> real generated refusal
+        if ref is None:  # Use generated refusal without a proxy
             with controller.active():
                 ref = refusal_rate(bundle, hset, cfg.opt_gen_tokens, cfg.batch_size)
         kl = kl_harmless(bundle, controller, lset, cfg.batch_size, positions=cfg.kl_positions)
@@ -1397,10 +1394,10 @@ def _reader_profile(bundle, controller, ah, al, cfg, preserve_lookup, eval_harmf
             if ref <= cfg.target_refusal:
                 break
         elif best is not None:
-            break  # past the KL ceiling and we already have a feasible pick; higher only worse
+            break  # Stop beyond the feasible KL ceiling
     chosen = best if best is not None else fallback
     apply(chosen[0])
-    with controller.active():  # one real refusal number for the report
+    with controller.active():  # Final report metric
         ref = refusal_rate(bundle, eval_harmful[: cfg.opt_eval_n], cfg.opt_gen_tokens, cfg.batch_size)
     return {"strength": chosen[0], "refusal": ref, "kl": chosen[2], "causal": causal}
 
@@ -1429,7 +1426,7 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
     _log(f"{bundle.num_layers} layers, hidden={bundle.hidden_size}, {arch}, direction layer={L_dir}")
     mark("load_model")
     if bundle.uses_post_norm() and not cfg.fit_response_activations:
-        cfg.fit_response_activations = True  # response-decision direction disentangles refusal from topic -> low KL post-norm
+        cfg.fit_response_activations = True  # Separate refusal from topic
         _log("post-norm: response-based directions on (refusal-decision contrast, not harmful-topic)")
 
     harmful = _cached_prompts(cfg, "harmful_fit", cfg.harmful_path, cfg.n_harmful + cfg.n_eval, cfg.seed)
@@ -1467,8 +1464,8 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
 
     controller = ProjectionController(bundle)
     controller.disable()
-    controller._kl_eval = test_harmless + eval_harmless  # one fixed held-out harmless set for all KL (was per-phase slices -> 5x noise)
-    # let kl_harmless persist the diffusion base reference (a full generate per batch) to disk.
+    controller._kl_eval = test_harmless + eval_harmless  # Fixed held-out KL set
+    # Persist the diffusion base reference
     controller._kl_disk = (_activation_cache_dir(cfg), cfg.model, cfg.resume)
 
     if cfg.baseline_eval_n and cfg.baseline_eval_n > 0:
@@ -1483,12 +1480,9 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
 
     head_only_profile = False
     head_ref_est = None
-    reader_est = None  # (refusal, kl) estimate to skip the redundant validation pass
+    reader_est = None  # Cached reader estimate
     head_sweep_profile = _head_sweep_enabled(bundle, cfg)
-    # post-norm (reader-side) models always take the reader path below, which needs the
-    # per-layer activations. head-sweep would skip that collection AND never run (reader_mode
-    # wins the if/elif), so disable it here. fixes gemma-4 (no PLE but vocab_size_per_layer_input
-    # -> head_sweep_enabled True -> ah/al left None -> reader profile crash).
+    # Disable incompatible head sweeps for post-norm models
     if bundle.uses_post_norm():
         head_sweep_profile = False
     head_sweep_attrs = None
@@ -1585,10 +1579,10 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
         mark("activation_fit")
 
     reader_mode = bundle.uses_post_norm()
-    fast = (cfg.profile or "balanced").lower() == "fast"  # profile, not architecture
+    fast = (cfg.profile or "balanced").lower() == "fast"  # Profile selection
     if (getattr(cfg, "oblique_ablation", True) and not reader_mode and not head_sweep_profile
             and al is not None):
-        # oblique edit preserves the harmless mean; the whole search then optimizes it.
+        # Preserve the harmless mean during search
         mu = al[L_dir].mean(0)
         controller.enable_oblique(mu, cfg.oblique_strength, cfg.oblique_denom_floor,
                                   writers_only=getattr(cfg, "oblique_writers_only", True),
@@ -1600,9 +1594,8 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
         _log(f"oblique ablation enabled (predictive={getattr(cfg, 'oblique_predictive', False)}, "
              f"writers_only={getattr(cfg, 'oblique_writers_only', True)}, |mu|={float(mu.norm()):.2f})")
     if reader_mode:
-        # gemma2/3/4-style post-norm: writer edits get renormalized away, so ablate
-        # reader-side with per-layer directions, and give kl extra headroom.
-        cfg._kl_ceiling = cfg.max_kl  # real bake/refine budget -- kept; the reader SWEEP gets headroom via reader_max_kl (in _reader_profile)
+        # Use reader-side edits for post-norm models
+        cfg._kl_ceiling = cfg.max_kl  # Final bake and refine budget
         cfg.kl_target = max(cfg.kl_target, cfg.reader_kl_target)
         _log("post-norm architecture: per-layer reader-side ablation")
         rinfo = _reader_profile(bundle, controller, ah, al, cfg, preserve_lookup,
@@ -1612,11 +1605,11 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
         report_extra.update({"reader_mode": True, "reader_strength": rinfo["strength"],
                              "best_trial": {"refusal": rinfo["refusal"], "kl": rinfo["kl"]},
                              "n_trials": 0})
-        if fast:  # reuse the search estimate instead of a full validation pass
+        if fast:  # Reuse the search estimate
             reader_est = (rinfo["refusal"], rinfo["kl"])
         mark("reader_profile")
         if rinfo["refusal"] > cfg.target_refusal:
-            # corrective directions try to push refusal lower; conservative, so it can't hurt
+            # Add conservative corrective directions
             _log("running reader guard (corrective directions) ...")
             run_reader_guard(bundle, controller, fit_harmful[: cfg.opt_eval_n],
                              harmless[: cfg.opt_eval_n], cfg, preserve_lookup,
@@ -1727,9 +1720,7 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
         skip_guard = ref_quick <= cfg.target_refusal
     if guard_skip_reason is None and ((not cfg.optimize) or cfg.opt_guard) and not skip_guard:
         _log("running reconstruction guard ...")
-        # cap at opt_eval_n: 256 was running all 64 projection hooks × 256 samples,
-        # which caused multi-hour guard timing on large models. opt_eval_n (64) is plenty
-        # for direction re-estimation; the guard's refusal/kl eval uses the same count anyway.
+        # Cap guard samples to control large-model runtime
         gcap = cfg.opt_eval_n
         guard_hist = run_guard(
             bundle, controller, fit_harmful[:gcap], harmless[:gcap], cfg, L_dir, initial_sep,
@@ -1772,7 +1763,7 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
     edited_refusal = refine_ref
     kl = refine_kl
     if (edited_refusal is None or kl is None) and reader_est is not None:
-        edited_refusal, kl = reader_est  # reuse the sweep estimate; skip a generation pass
+        edited_refusal, kl = reader_est  # Reuse the sweep estimate
     if edited_refusal is None or kl is None:
         with controller.active():
             edited_refusal = refusal_rate(bundle, eval_harmful, cfg.max_new_tokens, cfg.batch_size)

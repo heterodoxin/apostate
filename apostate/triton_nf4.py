@@ -19,9 +19,7 @@ import torch.nn.functional as F
 
 
 def _install_do_bench_guard():
-    # ROCm (gfx1201) timer occasionally measures estimate_ms=0 for a very fast kernel, and triton's
-    # do_bench then divides by it -> ZeroDivisionError that crashes the whole forward mid-autotune.
-    # Treat a glitched config as worst (inf) so a working config is chosen instead of crashing.
+    # Reject invalid ROCm benchmark timings
     import triton.testing as _tt
     if getattr(_tt.do_bench, "_rocm_guarded", False):
         return
@@ -41,9 +39,7 @@ def _install_do_bench_guard():
 
 _install_do_bench_guard()
 
-# ---------------------------------------------------------------------------
-# Double-quantized absmax dequantization (uint8 → float32)
-# ---------------------------------------------------------------------------
+# Double-quantized absmax dequantization
 
 @triton.jit
 def _dequant_absmax_kernel(
@@ -92,15 +88,7 @@ def dequant_absmax(quant_state: object) -> torch.Tensor:
     return result
 
 
-# ---------------------------------------------------------------------------
-# Fused NF4 + GEMM kernel — bfloat16 inputs for RDNA4 WMMA tensor cores
-#
-# Both x (activations) and decoded w must be bfloat16 so tl.dot compiles
-# to WMMA instructions instead of scalar FMAs. f32@f32 has no WMMA on RDNA4.
-#
-# BK = BSIZE (= 64) so each K-tile has exactly one absmax value per N-row.
-# Weight packing: HIGH nibble = k=2b (even K), LOW nibble = k=2b+1 (odd K).
-# ---------------------------------------------------------------------------
+# Fused NF4 GEMM for RDNA4 WMMA
 
 @triton.autotune(
     configs=[
@@ -146,7 +134,7 @@ def _nf4_matmul_kernel(
         offs_ko = offs_ke + 1                         # odd  K indices
         mask_m = offs_m[:, None] < M
 
-        # Load activations as bfloat16 — keeps WMMA compatibility
+        # Preserve WMMA-compatible activation dtype
         x_even = tl.load(
             x_ptr + offs_m[:, None] * stride_xm + offs_ke[None, :] * stride_xk,
             mask=mask_m & (offs_ke[None, :] < K), other=0.0,
@@ -156,23 +144,22 @@ def _nf4_matmul_kernel(
             mask=mask_m & (offs_ko[None, :] < K), other=0.0,
         )  # [BM, BK//2] bf16
 
-        # Absmax for this N-slice × K-block  [BN]
+        # Load block scales
         k_block = k0 // BSIZE
         absmax = tl.load(am_ptr + offs_n * stride_amn + k_block, mask=offs_n < N, other=1.0)
 
-        # Packed weight bytes  [BN, BK//2]
+        # Load packed weights
         offs_kb = k0 // 2 + tl.arange(0, BK // 2)
         w_bytes = tl.load(
             w_ptr + offs_n[:, None] * stride_wn + offs_kb[None, :],
             mask=(offs_n[:, None] < N) & (offs_kb[None, :] < K // 2), other=0,
         ).to(tl.int32)
 
-        # NF4 decode: gather from 64-byte table (L1-resident after first hit),
-        # scale by absmax, cast to bfloat16 for WMMA
+        # Decode NF4 weights for WMMA
         w_even = (tl.load(code_ptr + ((w_bytes >> 4) & 0xF)) * absmax[:, None]).to(tl.bfloat16)
         w_odd  = (tl.load(code_ptr + (w_bytes & 0xF))         * absmax[:, None]).to(tl.bfloat16)
 
-        # bf16 @ bf16.T → f32 accumulation using RDNA4 WMMA hardware
+        # Accumulate with RDNA4 WMMA
         acc += tl.dot(x_even, tl.trans(w_even), allow_tf32=True)
         acc += tl.dot(x_odd,  tl.trans(w_odd),  allow_tf32=True)
 
@@ -214,9 +201,7 @@ def nf4_matmul(x: torch.Tensor, w: torch.Tensor, quant_state, bias=None) -> torc
     return out.view(*x.shape[:-1], N)
 
 
-# ---------------------------------------------------------------------------
-# Patch bitsandbytes Linear4bit on ROCm
-# ---------------------------------------------------------------------------
+# ROCm Linear4bit patch
 
 _patched = False
 

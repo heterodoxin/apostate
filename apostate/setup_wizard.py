@@ -1,5 +1,4 @@
-# setup wizard: install python deps for the right GPU backend, check gpu, optionally provision vllm.
-# AMD/ROCm cards need the ROCm wheel index; plain pip torch pulls a CUDA build that can't see AMD GPUs.
+# Backend-aware setup wizard
 
 from __future__ import annotations
 
@@ -13,11 +12,11 @@ ROOT = Path(__file__).resolve().parent.parent
 IS_WIN = sys.platform.startswith("win")
 
 TORCH_PKGS = ["torch", "torchvision", "torchaudio"]
-# deps that are backend-agnostic; bitsandbytes is added for CUDA only (below)
+# Backend-agnostic dependencies
 BASE_DEPS = ["transformers", "datasets", "safetensors", "optuna", "peft",
              "accelerate", "requests", "sentencepiece", "protobuf", "scipy", "textual"]
 
-# default ROCm wheel index. RDNA4 / gfx12xx needs >= 6.4; bump if you have newer.
+# Default ROCm wheel index
 DEFAULT_ROCM_INDEX = "https://download.pytorch.org/whl/rocm6.4"
 CUDA_INDEX = "https://download.pytorch.org/whl/cu128"
 
@@ -46,7 +45,7 @@ def _to_wsl(p) -> str:
 
 
 def _is_amd_gpu() -> bool:
-    # kernel-level signal, no torch needed: the amdgpu compute device node.
+    # Detect AMD without importing torch
     return os.path.exists("/dev/kfd")
 
 
@@ -111,7 +110,7 @@ def main(argv=None) -> int:
         _pip("install", "-U", "--quiet", *deps)
 
     print("\n[2/3] gpu check ...")
-    # guarded: a broken/unsupported runtime prints a message instead of crashing.
+    # Keep runtime checks nonfatal
     subprocess.run([sys.executable, "-c",
                     "import torch\n"
                     "try:\n"
@@ -125,7 +124,7 @@ def main(argv=None) -> int:
     print("  next: run `apostate doctor` to verify the GPU can actually execute a kernel\n"
           "        (catches RDNA4/gfx12xx-on-old-ROCm BEFORE a big model load).")
 
-    # vLLM is optional and heavy; on Windows it lives in WSL
+    # Install optional vLLM through WSL on Windows
     q = "[3/3] set up vLLM now? (several GB) [y/N] "
     if _ask("\n" + q) in ("y", "yes"):
         if IS_WIN:

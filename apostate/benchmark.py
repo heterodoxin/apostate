@@ -1,4 +1,4 @@
-# benchmarking: load models, run the factual probe + KL, and sandboxed code pass@1.
+# Model quality benchmarks
 
 from __future__ import annotations
 
@@ -238,7 +238,7 @@ def run_compare(
     return report
 
 
-# code benchmarking: solve problems and run their tests in a sandbox for executable pass@1.
+# Sandboxed code benchmark
 
 _PLACEHOLDERS = [
     "# todo", "# your code", "# implement", "raise notimplementederror",
@@ -299,7 +299,7 @@ def coding_instructions(spec: str, n: int) -> List[str]:
 
 @torch.no_grad()
 def solution_logprob(bundle: ModelBundle, problems: List[dict]) -> float:
-    # cheap capability proxy: how likely the model finds the canonical solution
+    # Lightweight capability proxy
     tok, model = bundle.tokenizer, bundle.model
     device = next(model.parameters()).device
     vals = []
@@ -372,7 +372,7 @@ def _solve(bundle: ModelBundle, problems: List[dict], max_new_tokens: int, batch
 
 
 def _run_program(src: str, timeout: int) -> bool:
-    # isolated interpreter (-I -S), temp cwd, hard timeout; never trust generated code
+    # Isolate generated code with a timeout
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, "prog.py")
         with open(path, "w", encoding="utf-8") as f:
@@ -431,7 +431,7 @@ def pass_at_1(
     return (passed / n if execute else 0.0), complete / n
 
 
-# cli: compare a base against candidate models on the probe set.
+# Benchmark CLI
 
 def main(argv=None):
     p = argparse.ArgumentParser(prog="apostate.benchmark")

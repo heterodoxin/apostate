@@ -1,4 +1,4 @@
-# fold the final projection into residual-writer weights and save a standalone checkpoint.
+# Bake projections into a standalone checkpoint
 
 from __future__ import annotations
 
@@ -106,8 +106,7 @@ def _kcrn_writer(bundle, edit: dict):
     return writers[writer_index]
 
 
-# R is the left/removal basis; U is the right co-vector (oblique mean-preserving edit).
-# when U is None the edit is the usual symmetric projection (U == R).
+# R removes while U detects
 
 def _edit_linear(W: torch.Tensor, R: torch.Tensor, coeff: float, U: torch.Tensor = None) -> torch.Tensor:
     right = R if U is None else U
@@ -128,8 +127,7 @@ def _edit_embed(W: torch.Tensor, R: torch.Tensor, coeff: float, U: torch.Tensor 
 
 
 def _edit_out(mod, R: torch.Tensor, coeff: float, U: torch.Tensor = None):
-    # project R out of what `mod` writes to the residual. Conv1D weight is [in, out]
-    # (transposed vs Linear [out, in]), so the output axis is columns, not rows.
+    # Remove R from residual outputs
     if _is_conv1d(mod):
         mod.weight.data = _edit_embed(mod.weight.data, R, coeff, U)
     else:
@@ -139,9 +137,7 @@ def _edit_out(mod, R: torch.Tensor, coeff: float, U: torch.Tensor = None):
 
 
 def _edit_in(mod, R: torch.Tensor, coeff: float, U: torch.Tensor = None):
-    # input-side fold: W + coeff*(W @ (U or R)) @ R.t(). symmetric removal when U is None.
-    # the contrastive reader passes R=detector(D), U=removal(refusal R) so the baked weight
-    # matches the pre-hook x - a(x@D)R (detect along D, remove along R). Conv1D flips the axis.
+    # Fold reader projection into input weights
     if _is_conv1d(mod):
         mod.weight.data = _edit_linear(mod.weight.data, R, coeff, U)
     else:
@@ -149,7 +145,7 @@ def _edit_in(mod, R: torch.Tensor, coeff: float, U: torch.Tensor = None):
 
 
 def _edit_head(W: torch.Tensor, R: torch.Tensor, coeff: float, U: torch.Tensor = None) -> torch.Tensor:
-    # input-side fold (lm_head reads the hidden): (W @ Rbake) @ U.t(), so R=Rbake, outer=U.
+    # Fold projection into the language head
     outer = R if U is None else U
     Wf = W.float()
     return (Wf + coeff * ((Wf @ R) @ outer.t())).to(W.dtype)
@@ -161,7 +157,7 @@ def _is_packed_writer(mod) -> bool:
 
 
 def _edit_writer(mod, R: torch.Tensor, coeff: float, U: torch.Tensor = None):
-    # fixed linear op, so per-expert slices compose under the router gates -> packed MoE ok.
+    # Apply the linear edit per packed expert
     if _is_packed_writer(mod):
         down = mod.down_proj
         edited = [_edit_linear(down.data[i], R, coeff, U) for i in range(down.shape[0])]
@@ -171,7 +167,7 @@ def _edit_writer(mod, R: torch.Tensor, coeff: float, U: torch.Tensor = None):
 
 
 def _packed_reader_param(mod):
-    # the experts' input-reading packed weight (gate/up), distinct from down_proj (the writer).
+    # Locate packed expert reader weights
     for name in ("gate_up_proj", "gate_proj", "w1"):
         p = getattr(mod, name, None)
         if isinstance(p, torch.nn.Parameter) and p.dim() == 3:
@@ -248,8 +244,7 @@ def bake(
         R = e["R"].float()
         sign = float(e["sign"])
         if e.get("kind") == "reader":
-            # post-norm models: project the (per-layer) direction out of each reader's input columns.
-            # D_layers (contrastive co-vector) is the removal direction; falls back to RL.
+            # Project each post-norm reader input
             R_layers = e.get("R_layers")
             D_layers = e.get("D_layers")
             for L, layer in enumerate(layers):
@@ -263,8 +258,7 @@ def bake(
                 if D_layers is not None and L < len(D_layers) and D_layers[L] is not None:
                     DL = D_layers[L].float()
                 for mod in bundle.reader_modules(layer):
-                    # detect along D, remove along R (matches the reader pre-hook); DL absent ->
-                    # symmetric removal along R. handles plain Linears AND packed MoE experts.
+                    # Match runtime reader projection semantics
                     if DL is not None:
                         _edit_reader(mod, DL, sign * a, RL)
                     else:
@@ -325,12 +319,11 @@ def bake(
                     if getattr(mod, "bias", None) is not None:
                         mod.bias.data = _edit_vec(mod.bias.data, R, sign * a)
             continue
-        # oblique (mean-preserving) edit: left = Rbake, right co-vector = U. symmetric when absent.
+        # Apply an oblique or symmetric writer edit
         U = e["U"].float() if e.get("U") is not None else None
-        U_layers = e.get("U_layers")  # per-layer predictive co-vector D_L, indexed by layer
+        U_layers = e.get("U_layers")  # Per-layer detector co-vectors
         left = e["Rbake"].float() if e.get("Rbake") is not None else R
-        # embed rows and the lm-head input are not residual writers; under writers-only they
-        # stay symmetric (matching the runtime hook, which skips oblique for those modules).
+        # Keep embeddings and the language head symmetric
         writers_only = bool(e.get("oblique_writers_only", False))
         emb_left, emb_U = (R, None) if writers_only else (left, U)
         a_emb = float(e["embed_alpha"])
@@ -387,10 +380,7 @@ def bake(
     tok = tokenizer or AutoTokenizer.from_pretrained(cfg.model, trust_remote_code=True)
     tok.save_pretrained(cfg.output_dir)
 
-    # Copy extra files save_pretrained skips: the SentencePiece tokenizer.model (Gemma 1/2/3/3n
-    # etc. need it; fast-tokenizer save_pretrained writes only tokenizer.json), plus vision/video
-    # processor configs. Resolve from the local dir if present, else the HF cache/hub -- for hub
-    # models tok.name_or_path is the repo id (not a path), so the local check alone always missed.
+    # Copy tokenizer and processor files omitted by save_pretrained
     _extra = [
         "tokenizer.model",
         "preprocessor_config.json",
@@ -401,10 +391,10 @@ def bake(
     for fname in _extra:
         dst = Path(cfg.output_dir) / fname
         if dst.exists():
-            continue  # save_pretrained already wrote it
+            continue  # Already saved
         src_file = src_dir / fname
         if not src_file.exists():
-            try:  # hub model: fetch from the HF cache (downloads only if not already cached)
+            try:  # Resolve Hub files through the cache
                 from transformers.utils import cached_file
                 resolved = cached_file(
                     cfg.model, fname, _raise_exceptions_for_missing_entries=False,

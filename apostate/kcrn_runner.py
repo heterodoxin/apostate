@@ -1514,8 +1514,7 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
             cfg,
             {"edits": edits},
             tokenizer=tokenizer,
-            # in 4bit-fit mode the loaded writers are quantized and cannot be edited in place;
-            # bake loads a fresh fp16 model on CPU (model=None) and saves an fp16 checkpoint.
+            # Bake quantized fits through a fresh fp16 model
             model=(None if bool(cfg.kcrn_load_in_4bit) else bundle.model),
             preserve_bases=preserve_bases,
             post_bake_metrics=post_bake_metrics,

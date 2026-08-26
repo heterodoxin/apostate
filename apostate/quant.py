@@ -5,7 +5,7 @@ import glob
 import os
 import torch
 
-# weight quant modes for `talk` loading; KV-cache dtypes are a vLLM-only thing
+# Talk-mode weight quantization
 MODES = ["auto", "bf16", "fp16", "nf4", "fp4", "int8", "gptq", "marlin", "awq"]
 
 KV_CACHE_DTYPES = [
@@ -30,8 +30,7 @@ def _model_size_gb(path: str) -> float:
 
 
 def _low_mem_quant() -> str:
-    # 4-bit needs working bitsandbytes; on ROCm-without-bnb fall back to bf16
-    # rather than picking a mode that errors (or hangs) at load.
+    # Fall back to bf16 when 4-bit is unavailable
     from . import accel
     ok, _ = accel.bitsandbytes_status()
     return "nf4" if ok else "bf16"
@@ -91,10 +90,10 @@ def quant_kwargs(mode: str, tokenizer=None, calib=None) -> dict:
     raise ValueError(f"unknown quant {mode!r} (choose: {', '.join(MODES)})")
 
 
-# offline gptq baker: quantize a checkpoint to disk once (python -m apostate.quant).
+# Offline GPTQ checkpoint baker
 
 def _calib(tok, n):
-    # reuse our own prompt files as calibration text; fall back to a filler line
+    # Reuse bundled prompts for calibration
     here = os.path.dirname(__file__)
     data = os.path.join(os.path.dirname(here), "data")
     lines = []

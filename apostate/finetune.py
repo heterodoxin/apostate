@@ -96,9 +96,7 @@ def qlora_finetune(model_id, out_dir, n_code=2500, n_math=1500, n_general=500, m
     accel.require_gpu(dev)
     accel.gpu_smoke_test(dev, log=lambda m: print("[ft] " + m, flush=True))
 
-    # QLoRA needs bitsandbytes (4-bit base + paged 8-bit optimizer). On ROCm
-    # without a usable bnb, fall back to bf16 LoRA -- works without bnb, fits a
-    # 24GB+ card for small models.
+    # Fall back to bf16 LoRA without bitsandbytes
     bnb_ok, why = accel.bitsandbytes_status()
     use_4bit = bnb_ok and dev == "cuda"
     if not use_4bit:
@@ -122,8 +120,7 @@ def qlora_finetune(model_id, out_dir, n_code=2500, n_math=1500, n_general=500, m
         print(f"[ft] loading {model_id} bf16 + LoRA(r={r}) ...", flush=True)
         model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=torch.bfloat16,
                                                      device_map={"": dev}, trust_remote_code=True)
-        # Trainer enables grad-checkpointing via TrainingArguments; a non-kbit frozen
-        # base still needs input grads turned on for LoRA to backprop through it.
+        # Enable input gradients for frozen LoRA bases
         model.enable_input_require_grads()
     model = get_peft_model(model, LoraConfig(
         r=r, lora_alpha=2 * r, lora_dropout=0.05, bias="none", task_type="CAUSAL_LM",
@@ -135,7 +132,7 @@ def qlora_finetune(model_id, out_dir, n_code=2500, n_math=1500, n_general=500, m
     args = TrainingArguments(
         output_dir=out_dir + "_ckpt", per_device_train_batch_size=batch, gradient_accumulation_steps=grad_accum,
         max_steps=steps, learning_rate=lr, bf16=True, logging_steps=10, save_strategy="no",
-        # paged_adamw_8bit is a bitsandbytes optimizer; plain adamw_torch when bnb is unusable
+        # Select an optimizer compatible with bitsandbytes
         optim="paged_adamw_8bit" if use_4bit else "adamw_torch",
         warmup_ratio=0.03, lr_scheduler_type="cosine", report_to=[],
         gradient_checkpointing=True, gradient_checkpointing_kwargs={"use_reentrant": False})

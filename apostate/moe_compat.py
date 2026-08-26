@@ -18,8 +18,7 @@ def _dedupe_modules(mods: List[torch.nn.Module]) -> List[torch.nn.Module]:
 
 
 def _iter_expert_modules(experts) -> List[torch.nn.Module]:
-    # Returns expert modules from both list-like and packed MoE containers.
-    # Packed modules like Qwen3_5MoeExperts are a single torch.nn.Module without len().
+    # Support list-like and packed MoE containers
     if experts is None:
         return []
 

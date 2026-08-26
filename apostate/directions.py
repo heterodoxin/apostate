@@ -1,4 +1,4 @@
-# build the refusal subspace and score each layer's causal contribution to refusal.
+# Refusal subspace construction
 
 from __future__ import annotations
 
@@ -162,8 +162,7 @@ def refusal_subspace(
     mu_harmless = harmless.mean(0)
     mean_diff = harmful.mean(0) - mu_harmless
     if orthogonalize:
-        # keep only the part orthogonal to the harmless mean, so ablating it disturbs
-        # general behavior less (the part along the harmless mean is "be a normal model").
+        # Preserve the harmless mean component
         gh = mu_harmless / (mu_harmless.norm() + 1e-8)
         mean_diff = mean_diff - (mean_diff @ gh) * gh
     mean_dir = mean_diff / (mean_diff.norm() + 1e-8)
@@ -272,7 +271,7 @@ def augment_subspace(existing: torch.Tensor, new_dirs: torch.Tensor, max_rank: i
     return merged[:, :max_rank]
 
 
-# per-layer strength prior: fast approximation from pre-collected activations.
+# Fast per-layer strength estimate
 
 def causal_layer_scores_fast(
     ah: torch.Tensor,
@@ -281,8 +280,7 @@ def causal_layer_scores_fast(
     floor: float = 0.10,
     temperature: float = 1.0,
 ) -> List[float]:
-    # Approximate causal scores: project the harmful-harmless gap onto R per layer.
-    # ~100x faster than forward-pass isolation; gives equivalent layer rankings.
+    # Approximate causal scores from cached activations
     Rf = R.float()
     scores: List[float] = []
     for i in range(ah.shape[0]):
@@ -303,7 +301,7 @@ def causal_layer_scores_fast(
     return [float(floor + (1.0 - floor) * x) for x in t]
 
 
-# per-layer strength prior: ablate each layer alone, turn the refusal drop into an alpha.
+# Isolated per-layer strength estimate
 
 def causal_layer_scores(
     bundle,

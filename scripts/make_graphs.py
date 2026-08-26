@@ -13,7 +13,7 @@ from huggingface_hub import hf_hub_download
 ASSETS = Path(__file__).resolve().parent.parent / "assets"
 ASSETS.mkdir(exist_ok=True)
 
-# (display name, hf repo) ordered roughly by size
+# Models ordered by size
 ROSTER = [
     ("VibeThinker-3B", "vibethinker-3b-apostate"),
     ("Gemma-4-E4B", "gemma-4-e4b-it-apostate"),
@@ -42,7 +42,7 @@ kl = [r[3] for r in rows]
 
 PURPLE, GREY = "#7c3aed", "#cbd5e1"
 
-# --- Graph 1: refusal rate, base vs Apostate (grouped horizontal bars) ---
+# Base and Apostate refusal rates
 fig, ax = plt.subplots(figsize=(9, 5))
 y = range(len(names))
 ax.barh([i + 0.2 for i in y], base, height=0.4, color=GREY, label="Base model")
@@ -56,7 +56,7 @@ for i, v in zip(y, edit):
     ax.text(v + 1, i - 0.2, f"{v:.0f}%", va="center", fontsize=8, color=PURPLE)
 fig.tight_layout(); fig.savefig(ASSETS / "refusal_before_after.png", dpi=130); plt.close(fig)
 
-# --- Graph 2: final refusal vs harmless KL (the quality frontier) ---
+# Refusal and harmless-KL frontier
 fig, ax = plt.subplots(figsize=(8, 5.5))
 ax.scatter(edit, kl, s=90, color=PURPLE, zorder=3, edgecolor="white")
 for n, x, yk in zip(names, edit, kl):
@@ -70,10 +70,7 @@ fig.tight_layout(); fig.savefig(ASSETS / "refusal_kl.png", dpi=130); plt.close(f
 
 print(f"wrote {ASSETS}/refusal_before_after.png and refusal_kl.png")
 
-# --- Graph 3: Apostate vs Heretic on Qwen2.5-7B (real same-budget numbers from the README) ---
-# apostate / heretic: refusal %, harmless KL (nats), ablation wall (s)
-# fresh same-budget run: 16 trials, seed 0, AMD R9700 (gfx1201, ROCm). heretic = its best-refusal
-# Pareto point at 16 trials.
+# Same-budget Apostate and Heretic comparison
 metrics = ["Refusal (%)  ↓ lower better", "Harmless KL (nats)  ↓ lower better",
            "Ablation wall (s)  ↓ lower better"]
 apo = [2.9, 0.095, 249.9]

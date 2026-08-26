@@ -1,4 +1,4 @@
-# textual tui: pick an action and a model, then run the matching cli command.
+# Textual command interface
 
 from __future__ import annotations
 
@@ -195,8 +195,7 @@ class Apostate(App):
                 yield ListView(*(ListItem(Label(text)) for _, text in ACTIONS), id="menu")
 
     def on_mount(self) -> None:
-        # bases = unablated hf models; apostate = baked checkpoints found anywhere on disk.
-        # full drive scan runs in the background; talk/test await it before opening.
+        # Load base and baked model choices
         self.base_models: List[str] = [DEFAULT_MODEL, *discover.hf_models()]
         self.apostate_models: List[str] = discover.apostate_checkpoints()
         self._scan = self.run_worker(self._scan_drive, thread=True, exclusive=True)
@@ -217,7 +216,7 @@ class Apostate(App):
         elif action == "list":
             self.run_cli(["list"])
         elif action == "ablate":
-            # only bases to ablate, never an already-ablated model
+            # Exclude already ablated models
             self.push_screen(Pick("base model to ablate", self.base_models, allow_custom=True),
                              self._do_ablate)
         elif action == "talk":
@@ -230,7 +229,7 @@ class Apostate(App):
                              self._pick_base)
 
     async def _await_scan(self) -> None:
-        # block briefly on first talk/test so the drive scan has the full list ready
+        # Await the initial model scan
         if getattr(self, "_scan", None) is not None and self._scan.is_running:
             try:
                 await self._scan.wait()
@@ -239,7 +238,7 @@ class Apostate(App):
 
     def _do_ablate(self, model: Optional[str]) -> None:
         if model:
-            # strip trailing slashes so a local dir like /path/to/ yields the folder name, not an empty out
+            # Derive output names from normalized paths
             name = model.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1] or "model"
             out = name + "-abliterated"
             self.run_cli(["kcrn", "--model", model, "--out", out])
@@ -260,7 +259,7 @@ class Apostate(App):
 
     def _talk(self, model: str, quant: str) -> None:
         if quant == "vllm":
-            # vllm can quantize the kv cache; let the user pick a dtype
+            # Offer vLLM KV-cache quantization
             self.push_screen(Pick("KV-cache dtype", [n for n, _ in KV_CACHE]),
                              lambda kv: self.run_cli(["talk", "--model", model, "--backend", "vllm"]
                                                      + (["--kv-cache-dtype", kv] if kv and kv != "auto" else [])))

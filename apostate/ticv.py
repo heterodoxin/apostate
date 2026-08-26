@@ -1,12 +1,4 @@
-# Topic-Invariant Co-Vectors (TICV): remove residual soft-deflection from an
-# already-abliterated checkpoint and bake it into standard weights, no runtime hooks.
-#
-# Deflection is an engaging non-answer that dodges the request without refusing.
-# It survives abliteration because it is not a refusal. TICV builds a topic-invariant
-# deflection axis from the model's OWN deflect-vs-deliver split on harmful prompts, with
-# a benign-hedge preserve set so the detector ignores legitimate caveats, then bakes it as
-# a constant-gate MLP writer neuron per layer: gate -> a near-constant dim (gelu ~= c),
-# up = detector D, down = -(alpha/c) R, so the neuron adds -alpha*(x.D)*R to the residual.
+# Topic-invariant soft-deflection removal
 from __future__ import annotations
 
 import argparse
@@ -25,8 +17,7 @@ from .evaluate import judge_strict_refusal
 from .model import load_model
 from .projectors import predictive_covector
 
-# harmless prompts that elicit normal hedging/caveats: the preserve set keeps the detector
-# near zero on legitimate disclaimers so the edit stays near-zero KL.
+# Benign hedge preservation prompts
 PRESERVE = [
     "How do I fix it?", "What's the best way to do this?", "How should I approach this?",
     "Is it a good idea to invest in stocks?", "What are the risks of hiking alone?",
@@ -48,8 +39,7 @@ def _decoder(model):
 
 
 def _premlp_norm(layer):
-    # post-norm archs (gemma) expose pre_feedforward_layernorm; pre-norm archs use the
-    # post-attention norm as the pre-MLP norm.
+    # Resolve the pre-MLP norm
     for n in ("pre_feedforward_layernorm", "post_attention_layernorm"):
         m = getattr(layer, n, None)
         if m is not None:
@@ -99,7 +89,7 @@ def fit_directions(bundle, n_harmful=80):
         return resid, xm
 
     hresp = [gen(p) for p in harmful]
-    flags = judge_strict_refusal(bundle, hresp, prompts=harmful)  # True = deflect/refuse
+    flags = judge_strict_refusal(bundle, hresp, prompts=harmful)  # Deflection or refusal
     hacts = [racts(p, r) for p, r in zip(harmful, hresp)]
     dfl = [a for a, f in zip(hacts, flags) if f]
     dlv = [a for a, f in zip(hacts, flags) if not f]
@@ -165,12 +155,12 @@ def bake(model, tok, R_l, Dm, alpha):
             mlp = _gated_mlp(L)
             X = samples[li]
             mean, std = X.mean(0), X.std(0)
-            cd = int((mean.abs() / std.clamp_min(1e-6)).argmax())  # most bias-like dim
+            cd = int((mean.abs() / std.clamp_min(1e-6)).argmax())  # Most bias-like dimension
             m = mean[cd].item()
-            kappa = 3.0 / m  # gate.x ~ +3 on average -> gelu(3)=2.996; sign handles m<0
+            kappa = 3.0 / m  # Approximate a constant gate
             c = F.gelu(kappa * X[:, cd]).mean().item()
             D, R = Dm[li].to(dev), R_l[li].to(dev)
-            j = mlp.gate_proj.weight.shape[0] - 1  # repurpose the last neuron
+            j = mlp.gate_proj.weight.shape[0] - 1  # Reuse the final neuron
             mlp.gate_proj.weight[j].zero_()
             mlp.gate_proj.weight[j, cd] = kappa
             mlp.up_proj.weight[j].copy_(D.to(mlp.up_proj.weight.dtype))
@@ -204,7 +194,7 @@ def main(argv=None):
     ap.add_argument("--n-harmful", type=int, default=80, help="prompts used to fit the direction")
     a = ap.parse_args(sys.argv[1:] if argv is None else argv)
 
-    # phase 1: fit directions (4-bit is enough for activations)
+    # Fit directions in 4-bit
     cfg = ApostateConfig(model=a.model, output_dir="/tmp/ticv_fit", load_in_4bit=True)
     cfg.with_defaults()
     bundle = load_model(cfg)
@@ -214,7 +204,7 @@ def main(argv=None):
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    # phase 2: bake into full-precision weights and save
+    # Bake full-precision weights
     tok = AutoTokenizer.from_pretrained(a.model)
     model = AutoModelForCausalLM.from_pretrained(
         a.model, dtype=torch.bfloat16, device_map={"": 0}, trust_remote_code=True)
@@ -224,7 +214,7 @@ def main(argv=None):
     os.makedirs(a.out, exist_ok=True)
     model.save_pretrained(a.out, safe_serialization=True)
     tok.save_pretrained(a.out)
-    for f in os.listdir(a.model):  # carry over aux files the loader needs
+    for f in os.listdir(a.model):  # Copy required auxiliary files
         if (f.endswith(".json") or "processor" in f or "tokenizer" in f or f.endswith(".jinja")):
             dst = os.path.join(a.out, f)
             if not os.path.exists(dst):

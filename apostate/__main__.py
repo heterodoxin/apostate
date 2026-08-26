@@ -1,4 +1,4 @@
-# apostate cli. no args opens the tui; subcommands run the engine.
+# Apostate CLI entrypoint
 
 from __future__ import annotations
 

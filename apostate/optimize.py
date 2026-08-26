@@ -1,4 +1,4 @@
-# TPE/random search over the per-layer ablation profile, minimizing refusal + KL + drift.
+# Per-layer ablation search
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from .evaluate import (
 from .data import format_chat
 
 
-# search backend: TPE via optuna if available, else random search.
+# Prefer TPE over random search
 
 Space = Dict[str, tuple]
 Objective = Callable[[Dict[str, Any]], Tuple[float, Dict[str, Any]]]
@@ -122,8 +122,7 @@ def run_search(objective: Objective, space: Space, n_trials: int, seed: int = 0,
 def _kl_loss(kl: float, cfg) -> float:
     over_target = max(0.0, kl - cfg.kl_target)
     over_budget = max(0.0, kl - cfg.max_kl)
-    # headroom bonus: rewards KL well below budget so TPE can push strength higher to reduce refusal.
-    # prevents KL=0.004 and KL=0.048 from looking nearly equal in the loss.
+    # Reward KL headroom
     headroom = max(0.0, cfg.max_kl - kl)
     headroom_bonus = cfg.kl_headroom_weight * headroom * headroom
     return (

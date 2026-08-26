@@ -1,4 +1,4 @@
-# model loading + architecture probing: locate the decoder, its residual writers and readers.
+# Model loading and architecture probing
 
 from __future__ import annotations
 
@@ -57,8 +57,7 @@ def _as_decoder(mod):
 
 
 def _dynamic_decoder(root):
-    # last-resort, name-agnostic: the decoder is the module owning the biggest
-    # ModuleList of repeated compound blocks (the transformer layers).
+    # Find the largest repeated decoder stack
     best = None
     for mod in root.modules():
         for child in mod.children():
@@ -80,7 +79,7 @@ def _dynamic_decoder(root):
 try:
     from transformers.pytorch_utils import Conv1D as _Conv1D
     _LINEAR_LIKE = (torch.nn.Linear, _Conv1D)
-except Exception:  # older/newer transformers without Conv1D
+except Exception:  # Transformers without Conv1D
     _Conv1D = ()
     _LINEAR_LIKE = (torch.nn.Linear,)
 
@@ -90,7 +89,7 @@ def _is_conv1d(m) -> bool:
 
 
 def _io_features(m):
-    # (in_features, out_features) for nn.Linear and gpt2-style Conv1D (weight is [in, out])
+    # Normalize linear input and output dimensions
     if isinstance(m, torch.nn.Linear):
         return m.in_features, m.out_features
     if _is_conv1d(m):
@@ -108,8 +107,7 @@ def _reads_residual(m, hidden) -> bool:
 
 
 def _has_packed_reader(mod) -> bool:
-    # MoE experts module with an input-reading packed 3D weight (gate/up) -- the bf16 (bake) form
-    # of the NF4-quantized experts. carries refusal on the reader path, so it must be baked.
+    # Detect packed MoE reader weights
     for name in ("gate_up_proj", "gate_proj", "w1"):
         p = getattr(mod, name, None)
         if isinstance(p, torch.nn.Parameter) and p.dim() == 3:
@@ -175,10 +173,7 @@ class ModelBundle:
     hidden_size: int
 
     def is_block_diffusion(self) -> bool:
-        # encoder-decoder block-diffusion (diffusion_gemma): the prompt is encoded, then a
-        # canvas is denoised by the decoder. model(input_ids) runs the ENCODER, so that is the
-        # stack apostate edits (clean prompt residuals; the decoder only ever sees a random
-        # canvas on a bare forward). see apostate-diffusion-gemma notes.
+        # Detect encoder-decoder block diffusion
         if config_value(self.model.config, "model_type") == "diffusion_gemma":
             return True
         return type(self.model).__name__ == "DiffusionGemmaForBlockDiffusion"
@@ -186,10 +181,7 @@ class ModelBundle:
     def _diffusion_edit_stack(self):
         if not self.is_block_diffusion():
             return None
-        # edit/extract on the ENCODER (the KV source): the decoder reads the prompt only via the
-        # read-only encoder KV cache, re-read every decoder layer, so cleaning the encoder cleans
-        # the KV before the decoder ever sees it. reader_modules ALSO pairs in the matching decoder
-        # layer's readers so the decoder's intrinsic refusal is removed too (both-stacks).
+        # Use the encoder as the editable diffusion stack
         enc = _as_decoder(_path_get(self.model, ("model", "encoder", "language_model")))
         if enc is not None:
             return enc
@@ -200,7 +192,7 @@ class ModelBundle:
         return list(dec.layers) if dec is not None and hasattr(dec, "layers") else []
 
     def _paired_decoder_layer(self, enc_layer):
-        # given an encoder (edit-stack) layer, return the matching decoder layer (same index/depth).
+        # Find the paired decoder layer
         enc_layers = self.layers()
         dec_layers = self._diffusion_decoder_layers()
         for i, L in enumerate(enc_layers):
@@ -232,9 +224,7 @@ class ModelBundle:
         return list(getattr(dec, "layers"))
 
     def direction_layers(self) -> List[torch.nn.Module]:
-        # Extract the refusal direction from the edit stack. For block-diffusion that is the ENCODER
-        # (the clean KV source; model(input_ids) runs it). Shared weights make the encoder-extracted
-        # direction valid for the paired decoder readers too (see reader_modules / _diffusion_edit_stack).
+        # Extract directions from the editable stack
         return self.layers()
 
     def _hidden(self) -> Optional[int]:
@@ -246,7 +236,7 @@ class ModelBundle:
         for name in ("embed_tokens", "wte", "word_embeddings", "tok_embeddings"):
             if hasattr(dec, name):
                 return getattr(dec, name)
-        # fallback: the embedding whose width matches the hidden size
+        # Fall back to a hidden-width embedding
         hidden = self._hidden()
         cands = [m for m in self.model.modules() if isinstance(m, torch.nn.Embedding)]
         for m in cands:
@@ -261,7 +251,7 @@ class ModelBundle:
         for name in ("norm", "ln_f", "final_layernorm", "final_norm", "ln_out"):
             if hasattr(dec, name):
                 return getattr(dec, name)
-        # fallback: the last norm-like direct child of the decoder
+        # Fall back to the final decoder norm
         last = None
         for _name, child in dec.named_children():
             if isinstance(child, torch.nn.ModuleList):
@@ -276,7 +266,7 @@ class ModelBundle:
             for name in ("lm_head", "output", "embed_out", "output_layer"):
                 if hasattr(root, name) and isinstance(getattr(root, name), _LINEAR_LIKE):
                     return getattr(root, name)
-        # fallback: a linear whose output width is the vocab size
+        # Fall back to a vocabulary-width linear
         vocab = config_value(self.model.config, "vocab_size")
         for m in self.model.modules():
             if isinstance(m, _LINEAR_LIKE) and vocab and _io_features(m)[1] == int(vocab):
@@ -289,8 +279,7 @@ class ModelBundle:
             for proj in ("o_proj", "out_proj", "dense", "c_proj", "wo", "proj"):
                 if hasattr(attn, proj) and isinstance(getattr(attn, proj), _LINEAR_LIKE):
                     return getattr(attn, proj)
-        # fallback: in the attention block, the linear that writes back to the residual
-        # (output width == hidden), preferring the one that isn't a q/k/v reader.
+        # Fall back to the attention residual writer
         hidden = self._hidden()
         if attn is not None and hidden is not None:
             outs = [m for m in attn.modules() if _writes_residual(m, hidden)]
@@ -300,7 +289,7 @@ class ModelBundle:
         raise AttributeError("Could not locate attention output projection.")
 
     def attn_module(self, layer: torch.nn.Module):
-        # incl. linear-attention / state-space mixers (qwen3.5 gated deltanet, etc.)
+        # Include linear-attention and state-space mixers
         for attn_name in ("self_attn", "attention", "attn", "self_attention", "mixer",
                           "linear_attn", "temporal_mixer"):
             if hasattr(layer, attn_name):
@@ -390,7 +379,7 @@ class ModelBundle:
                 out = getattr(mod, proj)
                 if isinstance(out, torch.nn.Module):
                     return out
-        # fallback: the linear in this mlp whose output is the residual width
+        # Fall back to the MLP residual writer
         hidden = self._hidden()
         if hidden is not None:
             outs = [m for m in mod.modules() if _writes_residual(m, hidden)]
@@ -457,14 +446,14 @@ class ModelBundle:
             out.append(ple)
         out = [w for w in out if w is not None]
         if not out:
-            # name-agnostic fallback: every linear-like that writes the residual
+            # Find residual writers by shape
             hidden = self._hidden()
             if hidden is not None:
                 out = [m for m in layer.modules() if _writes_residual(m, hidden)]
         return out
 
     def _mlp_readers(self, mod) -> List[torch.nn.Module]:
-        # matrices that read the residual into the mlp (gate + up, across naming variants)
+        # Find MLP readers across naming variants
         out = []
         for name in ("gate_proj", "up_proj", "w1", "w3", "c_fc", "fc_in", "gate_up_proj", "dense_h_to_4h"):
             m = getattr(mod, name, None)
@@ -485,7 +474,7 @@ class ModelBundle:
                 se = getattr(mlp, sname, None)
                 if se is not None:
                     out.extend(self._mlp_readers(se))
-            gate = getattr(mlp, "gate", None)  # moe router
+            gate = getattr(mlp, "gate", None)  # MoE router
             if isinstance(gate, torch.nn.Module):
                 out.append(gate)
         else:
@@ -493,32 +482,26 @@ class ModelBundle:
         return out
 
     def _collect_readers(self, layer: torch.nn.Module) -> List[torch.nn.Module]:
-        # the readers that carry the refusal feature: mlp gate/up plus the per-layer gate.
-        # attention q/k/v are excluded on purpose -- ablating them perturbs attention
-        # patterns (and shared-kv layers) for no refusal gain; refusal lives in the mlp path.
+        # Limit refusal readers to the MLP path
         out = list(self.mlp_readers(layer))
         gate = getattr(layer, "per_layer_input_gate", None)
         if isinstance(gate, torch.nn.Module):
             out.append(gate)
-        # NF4-quantized packed experts (moe_nf4): a pre-hook on the experts module edits the
-        # hidden_states feeding them -- routing the reader co-vector into the expert path.
+        # Include NF4 packed-expert readers
         for mod in layer.modules():
             if hasattr(mod, "_nf4_experts") or _has_packed_reader(mod):
                 out.append(mod)
         return [m for m in out if isinstance(m, torch.nn.Module)]
 
     def reader_modules(self, layer: torch.nn.Module) -> List[torch.nn.Module]:
-        # block-diffusion: ALSO edit the paired decoder layer's readers. the encoder edit cleans the
-        # KV; once it's clean the decoder edit removes its intrinsic refusal (shared weights, so the
-        # encoder-extracted direction is valid for both stacks). non-diffusion: just this layer.
+        # Include paired diffusion decoder readers
         out = self._collect_readers(layer)
         if self.is_block_diffusion():
             dec_layer = self._paired_decoder_layer(layer)
             if dec_layer is not None:
                 out = out + self._collect_readers(dec_layer)
         if not out:
-            # name-agnostic fallback: linear-likes that read the residual (input width == hidden),
-            # minus the writers (an o_proj can share the hidden width when heads*head_dim == hidden)
+            # Find residual readers by shape
             hidden = self._hidden()
             if hidden is not None:
                 writers = {id(w) for w in self.layer_writers(layer)}
@@ -532,9 +515,7 @@ class ModelBundle:
         return uniq
 
     def uses_post_norm(self) -> bool:
-        # gemma2/3/4 sandwich: a norm sits on the mlp/attn OUTPUT before the residual.
-        # detect by the feedforward sandwich norms -- NOT post_attention_layernorm, which
-        # pre-norm models (qwen, llama, mistral) also have as their pre-mlp norm.
+        # Detect post-norm transformer sandwiches
         layers = self.layers()
         if not layers:
             return False
@@ -579,10 +560,7 @@ class ModelBundle:
         )
 
 
-# Auto-class preference order. AutoModelForCausalLM only maps decoder-only LMs; multimodal
-# and block-diffusion archs (e.g. diffusion_gemma) live in the image-text-to-text or base
-# mappings. We resolve the loader from the config's model_type so an unknown-but-loadable
-# arch loads rather than being skipped.
+# Auto-class preference order
 _AUTO_LOADER_ORDER = (
     ("AutoModelForCausalLM", "MODEL_FOR_CAUSAL_LM_MAPPING_NAMES"),
     ("AutoModelForImageTextToText", "MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES"),
@@ -624,15 +602,12 @@ def _safetensors_size_gb(model_id: str) -> float:
 def load_model(cfg: ApostateConfig) -> ModelBundle:
     torch.manual_seed(cfg.seed)
 
-    # 'auto' -> concrete device; ROCm resolves to 'cuda' (its runtime uses the
-    # cuda device string). Store it back so reports record the real device.
+    # Resolve and record the concrete device
     cfg.device = accel.resolve_device(cfg.device)
-    accel.require_gpu(cfg.device)  # backend-aware error (steers AMD users to the ROCm wheel)
+    accel.require_gpu(cfg.device)  # Backend-aware GPU error
     backend = accel.gpu_backend()
 
-    # Optional hard VRAM cap (APOSTATE_VRAM_FRACTION=0.0-1.0). On a card that also drives the
-    # display, capping the process below 100% leaves headroom so the compositor/other GPU apps
-    # don't get starved (which shows up as system lag). Workload must fit under the cap or it OOMs.
+    # Reserve optional VRAM headroom
     import os as _os
     _frac = _os.environ.get("APOSTATE_VRAM_FRACTION")
     if _frac and cfg.device == "cuda":
@@ -645,8 +620,7 @@ def load_model(cfg: ApostateConfig) -> ModelBundle:
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
 
-    # clearer than transformers' "Repo id must be in the form ..." when a local --model path is a
-    # file or a folder without config.json. point --model at the model directory, not a file.
+    # Validate local model directories early
     import os as _os
     if _os.path.exists(cfg.model):
         if _os.path.isfile(cfg.model):
@@ -655,11 +629,10 @@ def load_model(cfg: ApostateConfig) -> ModelBundle:
         if not _os.path.exists(_os.path.join(cfg.model, "config.json")):
             raise ValueError(f"no config.json in {cfg.model}; point --model at the model directory.")
 
-    # decide quantization up front so the VRAM preflight reflects what we'll load.
+    # Resolve quantization before VRAM preflight
     use_4bit = bool(cfg.load_in_4bit) and cfg.device == "cuda"
     if use_4bit:
-        # a model that ships its own quantization (e.g. FP8) can't also load 4-bit via bitsandbytes;
-        # a second quant config errors, so detect it and load the model as-is.
+        # Preserve model-provided quantization
         try:
             from transformers import AutoConfig as _AC
             _pq = getattr(_AC.from_pretrained(cfg.model, trust_remote_code=True), "quantization_config", None)
@@ -672,8 +645,7 @@ def load_model(cfg: ApostateConfig) -> ModelBundle:
     if use_4bit:
         ok, why = accel.bitsandbytes_status()
         if not ok:
-            # don't crash mid-load or silently mis-allocate: drop to full precision.
-            # the preflight below catches the case where bf16 then won't fit.
+            # Fall back to full precision safely
             _log(f"4-bit requested but bitsandbytes is not usable here ({why}); "
                  f"falling back to {cfg.compute_dtype}. on ROCm, install a ROCm-enabled "
                  f"bitsandbytes or run with --no-load-in-4bit.")
@@ -682,14 +654,11 @@ def load_model(cfg: ApostateConfig) -> ModelBundle:
             from . import triton_nf4
             triton_nf4.patch_bnb_linear4bit()
 
-    # anti-freeze guards: confirm the runtime can execute a kernel for this arch,
-    # then confirm the model fits in VRAM -- both BEFORE the big allocation. an
-    # over-allocation or an unsupported-arch kernel can hang amdgpu and freeze the
-    # whole machine, so we fail fast and cheap on the cpu side instead.
+    # Run safety checks before large allocations
     accel.gpu_smoke_test(cfg.device, log=_log)
     offload_gb = float(cfg.cpu_offload_gb) if cfg.cpu_offload_gb else 0.0
     if offload_gb > 0:
-        # CPU offload: don't abort on VRAM — the model will spill to RAM.
+        # Allow VRAM spill into CPU RAM
         try:
             accel.maybe_preflight(
                 cfg.device,
@@ -720,8 +689,7 @@ def load_model(cfg: ApostateConfig) -> ModelBundle:
     compute_dtype = _DTYPES[cfg.compute_dtype]
     kwargs = dict(trust_remote_code=True, low_cpu_mem_usage=True)
     if offload_gb > 0:
-        # accelerate device_map="auto" with max_memory distributes layers across GPU and CPU.
-        # GPU gets whatever free VRAM is available; the rest spills to cpu_offload_gb of RAM.
+        # Distribute layers across GPU and CPU
         try:
             free_vram, _ = torch.cuda.mem_get_info()
             gpu_limit_gb = int(free_vram * 0.92 / 1e9)
@@ -762,17 +730,13 @@ def load_model(cfg: ApostateConfig) -> ModelBundle:
     from . import moe_nf4
     packed_moe = use_4bit and offload_gb <= 0 and moe_nf4.has_packed_experts(cfg.model)
     if packed_moe:
-        # bitsandbytes can't 4-bit packed 3D MoE experts -> they'd load as bf16 and OOM. Normally
-        # we stage the whole bf16 on CPU, NF4-quantize the experts onto the GPU, 4-bit the rest, and
-        # move it up. But if the bf16 model won't fit free CPU RAM (big MoE + the display/other apps
-        # holding memory), stage it on CPU and the OOM-killer takes us out -> stream instead: read
-        # the checkpoint key-by-key, quantizing each expert straight to GPU (CPU peak ~one tensor).
+        # Stream packed MoE weights when CPU staging is unsafe
         import psutil as _psutil
         avail_gb = _psutil.virtual_memory().available / 1e9
         model_gb = _safetensors_size_gb(cfg.model)
         split = model_gb > 0 and model_gb > avail_gb * 0.85
         if split:
-            # bf16 won't fit CPU RAM; stream the checkpoint key-by-key, NF4-quantizing experts to GPU.
+            # Stream NF4 experts directly to GPU
             _log(f"packed-MoE: {model_gb:.0f}GB bf16 won't fit {avail_gb:.0f}GB free RAM -> "
                  f"streaming load (NF4-quantize experts to GPU as the checkpoint is read)")
             model = moe_nf4.load_packed_moe_streaming(
@@ -782,10 +746,7 @@ def load_model(cfg: ApostateConfig) -> ModelBundle:
             model = model_loader.from_pretrained(
                 cfg.model, torch_dtype=compute_dtype, low_cpu_mem_usage=True,
                 device_map={"": "cpu"}, trust_remote_code=True)
-        # text-only ablation: drop the vision tower + embedder FIRST, before any GPU quantization,
-        # so their (multi-GB) Linears are never 4-bit-quantized or moved to the GPU. The encoder
-        # forward only touches them when pixel_values is given (never for text prompts), so this is
-        # safe and frees several GB -- important on a card that also drives the display.
+        # Drop unused vision modules before quantization
         enc = _path_get(model, ("model", "encoder"))
         if enc is not None:
             for _vn in ("vision_tower", "embed_vision"):
@@ -793,7 +754,7 @@ def load_model(cfg: ApostateConfig) -> ModelBundle:
                     setattr(enc, _vn, None)
                     _log(f"dropped {_vn} (text-only; frees VRAM)")
         if not split:
-            # the streamed path already quantized and placed everything; only CPU-staging needs this.
+            # Quantize only CPU-staged experts
             moe_nf4.quantize_packed_experts(model, device=cfg.device, log=_log)
             moe_nf4.quantize_linears_4bit(model, device=cfg.device, log=_log)
             try:
@@ -801,20 +762,16 @@ def load_model(cfg: ApostateConfig) -> ModelBundle:
             except torch.cuda.OutOfMemoryError:
                 torch.cuda.empty_cache()
                 model.to(cfg.device)
-        # release the bf16 transients the per-expert/linear quantization left in the caching
-        # allocator -- otherwise PyTorch sits at the ~26GB quant peak (reserved, not freed) and
-        # starves the display even though steady-state is ~20GB. empty_cache drops it back.
+        # Release transient quantization allocations
         torch.cuda.empty_cache()
-        # diffusion denoising generate is very slow at 48 steps x 256 canvas; cap it for eval.
+        # Cap diffusion generation for evaluation
         if config_value(model.config, "model_type") == "diffusion_gemma":
             gc = getattr(model, "generation_config", None)
             if gc is not None and getattr(gc, "max_denoising_steps", None):
                 gc.max_denoising_steps = min(gc.max_denoising_steps, int(cfg.eval_denoising_steps))
             set_config_value(model.config, "canvas_length",
                              min(int(config_value(model.config, "canvas_length") or 256), 32))
-            # DiffusionGemma's decoder rejects use_cache (it always caches), but apostate's
-            # activation/KL forwards pass use_cache=False. Strip it on this model's forward.
-            # generate() has its own path (self.model/_denoising_step) and is unaffected.
+            # Strip unsupported use_cache arguments
             _orig_forward = model.forward
             def _forward_strip_use_cache(*a, _f=_orig_forward, **kw):
                 kw.pop("use_cache", None)

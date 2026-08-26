@@ -1,14 +1,4 @@
-# NF4 quantization for PACKED 3D MoE expert tensors.
-#
-# bitsandbytes 4-bit only replaces nn.Linear, so models that store experts as packed 3D
-# Parameters (qwen3_5_moe, granitemoehybrid, diffusion_gemma: gate_up_proj [E,out,in],
-# down_proj [E,out,in]) leave those experts in bf16 -> 50-95GB -> won't fit a 34GB card.
-# This quantizes each expert's [out,in] slice to bnb's NF4 format and routes the experts'
-# forward through triton_nf4.nf4_matmul (the same WMMA dequant-matmul used for Linear4bit),
-# shrinking the experts ~4x so the model fits.
-#
-# Quantization is done slice-by-slice (one expert moved to GPU at a time) so the full bf16
-# expert stack never lands on the GPU -- the model is loaded on CPU first (see load path).
+# NF4 quantization for packed MoE experts
 
 from __future__ import annotations
 
@@ -23,7 +13,7 @@ def _log(msg: str):
     print(f"[apostate] {msg}", flush=True)
 
 
-# packed 3D expert weight Parameter names seen across archs (all [num_experts, out, in])
+# Packed expert weight names
 _PACKED_PARAMS = ("gate_up_proj", "down_proj", "gate_proj", "up_proj", "w1", "w2", "w3")
 
 
@@ -66,12 +56,12 @@ def quantize_packed_experts(model: nn.Module, device: str = "cuda", log=_log) ->
         for name in names:
             param = getattr(mod, name)
             store[name] = _quantize_slices(param.data, device)
-            # drop the bf16 Parameter (free CPU RAM); keep a tiny marker so state_dict/edits skip it
+            # Replace the bf16 parameter with a marker
             del mod._parameters[name]
             setattr(mod, name + "_nf4_shape", tuple(param.shape))
             n_quantized += 1
         mod._nf4_experts = store
-        # patch this module class's forward once
+        # Patch each module class once
         cls = type(mod)
         if cls not in patched_classes:
             _patch_forward(cls)
@@ -174,7 +164,7 @@ def load_packed_moe_streaming(model_loader, model_id: str, device: str, compute_
     for mod, store in stores.values():
         mod._nf4_experts = store
 
-    # 4-bit the Linears, then re-tie the encoder's tied mirror onto the decoder's quantized leaves.
+    # Quantize linears before restoring tied weights
     def _has(p):
         try:
             model.get_submodule(p)
@@ -215,8 +205,7 @@ def load_packed_moe_streaming(model_loader, model_id: str, device: str, compute_
     return model
 
 
-# ---- per-arch patched forwards -------------------------------------------------------------
-# Each replaces the bf16 `F.linear(x, self.<name>[e])` with nf4_matmul(x, *self._nf4(name, e)).
+# Architecture-specific packed expert forwards
 
 def _packed_gateup_down_forward(self, hidden_states, top_k_index, top_k_weights):
     final = torch.zeros_like(hidden_states)
@@ -239,7 +228,7 @@ def _packed_gateup_down_forward(self, hidden_states, top_k_index, top_k_weights)
     return final
 
 
-# qwen3_5_moe and diffusion_gemma use a byte-identical experts forward (gate_up -> act -> down).
+# Shared Qwen and DiffusionGemma expert forward
 _FORWARDS = {
     "Qwen3_5MoeExperts": _packed_gateup_down_forward,
     "DiffusionGemmaTextExperts": _packed_gateup_down_forward,

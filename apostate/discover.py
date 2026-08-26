@@ -1,4 +1,4 @@
-# find local models: huggingface cache ids and baked checkpoint dirs.
+# Local model discovery
 
 from __future__ import annotations
 
@@ -94,7 +94,7 @@ def apostate_checkpoints() -> List[str]:
     return [c for c in checkpoints() if is_apostate_dir(Path(c))]
 
 
-# big or irrelevant trees we never descend into during a scan
+# Pruned scan paths
 _SKIP = {
     "windows", "program files", "program files (x86)", "programdata",
     "$recycle.bin", "system volume information", "node_modules", "__pycache__",
@@ -108,7 +108,7 @@ def _env_roots() -> List[Path]:
 
 
 def _scan_roots() -> List[Path]:
-    # every mounted drive, plus the cwd/repo drive and any APOSTATE_MODEL_ROOTS.
+    # Include mounted and configured model roots
     roots = list(_env_roots())
     for anchor in (Path.cwd(), Path(__file__).resolve().parent.parent, Path.home()):
         try:
@@ -149,7 +149,7 @@ def _walk_for_apostate(root: Path, seen: set, found: List[str]):
 
 
 def scan_apostate(root: str = None) -> List[str]:
-    # dynamically walk every drive for baked models, pruning system and cache trees.
+    # Scan drives for baked models
     roots = [Path(root)] if root is not None else _scan_roots()
     seen, found = set(), []
     for r in roots:
@@ -158,7 +158,7 @@ def scan_apostate(root: str = None) -> List[str]:
 
 
 def apostate_models() -> List[str]:
-    # everything talk/test offers: local checkpoints + a full drive scan.
+    # Build the talk and test model list
     out, seen = [], set()
     for m in apostate_checkpoints() + scan_apostate():
         key = str(Path(m).resolve()).lower()

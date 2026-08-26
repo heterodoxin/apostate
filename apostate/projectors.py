@@ -1,4 +1,4 @@
-# runtime edit controller: forward hooks that project refusal directions out; off == original model.
+# Runtime refusal projection controller
 
 from __future__ import annotations
 
@@ -10,8 +10,7 @@ from .model import ModelBundle
 
 
 def oblique_vectors(R: torch.Tensor, mu: torch.Tensor, strength: float, denom_floor: float = 0.2):
-    # E = I - Rbake U^T. U = R minus strength*its harmless-mean part (E mu = mu); Rbake = R(U^T R)^-1
-    # (E R = 0). strength clamps down if U^T R is ill-conditioned (R near-parallel to mu).
+    # Build a mean-preserving oblique projection
     R = R.float()
     mu = mu.float()
     mhat = mu / (mu.norm() + 1e-8)
@@ -33,14 +32,7 @@ def oblique_vectors(R: torch.Tensor, mu: torch.Tensor, strength: float, denom_fl
 
 def predictive_covector(R: torch.Tensor, harmless: torch.Tensor, ridge: float = 1e-2, preserve: float = 1.0,
                         harmful: torch.Tensor = None, contrast: float = 0.0):
-    # read co-vector D = R - W, W = harmless ridge-predictor of R^T x from x orthogonal to R.
-    # harmless R-variance is predictable (W reproduces it) so D^T x ~ 0 there -> preserved;
-    # the harmful refusal excursion is OOD for W -> D^T x large -> removed. E R = 0 (W _|_ R),
-    # E mu ~ mu, but preserves harmless VARIANCE along R, not just the mean. bake: U = D, Rbake = R.
-    # contrast>0 (with harmful given): W is additionally penalized for responding on the harmful
-    # set -- W = (A^T A + contrast*C^T C + lam I)^-1 A^T b, A=harmless_|_R, C=harmful_|_R. this
-    # preserves harmless-SPECIFIC variance but drops the variance SHARED with harmful (which on
-    # entangled archs smuggles the refusal back in), so D removes refusal AND keeps KL low.
+    # Fit a harmless-preserving detector co-vector
     R = R.float()
     X = harmless.float()
     Xp = X - (X @ R) @ R.t()          # harmless with the R-subspace removed
@@ -55,9 +47,7 @@ def predictive_covector(R: torch.Tensor, harmless: torch.Tensor, ridge: float = 
         G = G + lam * torch.eye(G.shape[0], dtype=G.dtype, device=G.device)
         W = torch.linalg.solve(G, rhs)            # [hidden, r]
         W = W - R @ (R.t() @ W)       # keep W orthogonal to R
-        # preserve in [0,1]: 1 = full oblique (keep all predictable harmless R-variance),
-        # 0 = orthogonal (D=R). on entangled archs (granite) W reproduces the refusal
-        # signal too, so full preservation under-ablates; lower preserve trades KL for reach.
+        # Blend predictive and orthogonal detection
         D = R - float(preserve) * W
         if not torch.isfinite(D).all():
             return None, None
@@ -71,8 +61,7 @@ class ProjectionController:
         self.bundle = bundle
         self.device = next(bundle.model.parameters()).device
         self.enabled = False
-        # post-norm models (gemma2/3/4) renormalize writer outputs, so we ablate the
-        # reader side (q/k/v/gate/up inputs) instead via pre-hooks. see model.uses_post_norm.
+        # Use reader hooks for post-norm models
         self.reader_mode = bool(bundle.uses_post_norm())
         self._handles = []
         self._pre_handles = []
@@ -97,7 +86,7 @@ class ProjectionController:
         self._oblique_floor: float = 0.2
         self._oblique_writers_only: bool = True
         self._register()
-        # embed/final aren't residual writers -> stay symmetric under writers-only.
+        # Keep non-writer projections symmetric
         self._non_writer_ids = {id(m) for m in (self._embed, self._final) if m is not None}
         self.add_edit("primary", sign=-1.0, default_alpha=1.0,
                       kind="reader" if self.reader_mode else "hidden")
@@ -216,7 +205,7 @@ class ProjectionController:
         return v
 
     def _project_pair(self, edit: dict, dtype, device, mod_id=None):
-        # (left, right) for removal (t @ right) @ left.t(): oblique = (Rbake, U), else (R, R).
+        # Resolve the removal basis pair
         oblique = edit.get("Rbake") is not None and edit.get("U") is not None
         if oblique and self._oblique_writers_only and mod_id in self._non_writer_ids:
             oblique = False
@@ -284,7 +273,7 @@ class ProjectionController:
         return hook
 
     def _make_pre_hook(self, module):
-        # remove the refusal direction from a reader's input (q/k/v/gate/up etc.)
+        # Remove refusal from reader inputs
         mod_id = id(module)
 
         layer = self._module_layer.get(mod_id)
@@ -308,9 +297,7 @@ class ProjectionController:
                 D = self._reader_D(e, layer)  # detector co-vector (contrastive); falls back to R
                 Rd = R.to(dtype=x.dtype, device=x.device)
                 Dd = D.to(dtype=x.dtype, device=x.device) if D is not None else Rd
-                # detect along D, remove along R: x - a (x@D) R^T. with the contrastive co-vector
-                # D = R - W, x@D is ~0 on harmless (W reconstructs the harmless R-projection) and
-                # large on harmful -> refusal removed along R, harmless preserved -> lower KL.
+                # Detect along D and remove along R
                 contrib = (e["sign"] * a) * ((x @ Dd) @ Rd.t())
                 delta = contrib if delta is None else delta + contrib
             if delta is None:
@@ -340,7 +327,7 @@ class ProjectionController:
                        writers_only: bool = True, predictive: bool = False, harmless=None, ridge: float = 1e-2,
                        harmless_layers=None, preserve: float = 1.0,
                        harmful=None, contrast: float = 0.0, harmful_layers=None):
-        # store the harmless mean; oblique vectors refresh against whatever R is set later.
+        # Cache statistics for projection refreshes
         self._oblique_mean = mu.to(self.device).float()
         self._oblique_strength = float(strength)
         self._oblique_floor = float(denom_floor)
@@ -351,7 +338,7 @@ class ProjectionController:
         self._oblique_contrast = float(contrast)
         self._oblique_harmless = harmless.to(self.device).float() if harmless is not None else None
         self._oblique_harmful = harmful.to(self.device).float() if harmful is not None else None
-        # per-layer harmless/harmful activations (kept on cpu; streamed to gpu per-layer during refresh).
+        # Keep per-layer activations on CPU
         self._oblique_harmless_layers = (
             [a.detach().float().cpu() if a is not None else None for a in harmless_layers]
             if harmless_layers is not None else None)
@@ -370,7 +357,7 @@ class ProjectionController:
             e["_rbcast"] = None
 
     def _refresh_oblique(self, edit: dict):
-        # primary writer edit only; recomputed whenever R changes (U/Rbake depend on R).
+        # Refresh the primary writer edit
         mu = getattr(self, "_oblique_mean", None)
         edit["_ucast"] = None
         edit["_rbcast"] = None
@@ -388,7 +375,7 @@ class ProjectionController:
         hl_layers = getattr(self, "_oblique_harmless_layers", None)
         fl_layers = getattr(self, "_oblique_harmful_layers", None)
         if predictive and hl_layers is not None:
-            # per-layer D_L = R - W_L so each writer layer preserves ITS OWN harmless variance.
+            # Fit a detector for each writer layer
             U_layers = {}
             for L, hl in enumerate(hl_layers):
                 if hl is None:
@@ -425,12 +412,7 @@ class ProjectionController:
 
     def set_reader_layer_subspace(self, layer_idx: int, R: torch.Tensor, name: str = "primary",
                                   D: torch.Tensor = None):
-        # per-layer refusal direction for the reader edit (post-norm models need this).
-        # R is the removal direction (refusal); D is the detector co-vector. the reader does
-        # x - a(x@D)R: with the contrastive co-vector D = R - W (see predictive_covector), x@D is
-        # ~0 on harmless prompts (W reconstructs the harmless R-projection) and large on harmful,
-        # so refusal is removed along R while harmless variance is preserved -> lower KL, the way
-        # the oblique writer path does. D defaults to R (plain orthogonal removal) when not given.
+        # Set the per-layer reader refusal basis
         e = self._edit(name)
         rl = e.get("R_layers")
         if rl is None:
@@ -453,9 +435,7 @@ class ProjectionController:
 
     def set_residual_layer_subspace(self, layer_idx: int, R: torch.Tensor, D: torch.Tensor = None,
                                     name: str = "residual"):
-        # per-layer refusal direction for the residual edit: scrubbed from each layer's output
-        # (norm-agnostic, unlike writer-weight edits that post-norm renormalizes away). D is the
-        # contrastive co-vector (detect along D ~0 on harmless, remove along R) -> low KL.
+        # Set the norm-agnostic residual refusal basis
         e = self._edit(name)
         rl = e.get("R_layers")
         if rl is None:
@@ -472,7 +452,7 @@ class ProjectionController:
             e["R"] = Rd  # representative so export() doesn't skip the edit
 
     def _layer_targets(self, edit: dict, layer_idx: int):
-        # reader edits act on the layer's readers; everything else on its writers
+        # Route edits to readers or writers
         if edit.get("kind") == "reader":
             return self._reader_modules[layer_idx]
         return self._layer_writers[layer_idx]
@@ -713,7 +693,7 @@ class ProjectionController:
         return self._edit("ple_model_projection")["alpha"].get(id(self._ple_model_projection), 0.0)
 
     def get_embed_alpha(self) -> float:
-        # reader-mode primary has no embed key; tolerate it like the other getters
+        # Tolerate missing reader-mode embeddings
         return self._edit("primary")["alpha"].get(id(self._embed), 0.0)
 
     def get_head_alpha(self) -> float:

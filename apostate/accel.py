@@ -1,6 +1,4 @@
-# accelerator backend detection + anti-freeze guards (cuda / rocm / cpu).
-# ROCm exposes via torch.cuda (HIP masquerades as CUDA); device string stays "cuda" on ROCm.
-# Guards fail fast on CPU before any GPU allocation — gfx12xx on old ROCm hangs instead of raising.
+# Accelerator detection and safety guards
 
 from __future__ import annotations
 
@@ -11,8 +9,7 @@ import torch
 
 
 def gpu_backend() -> Optional[str]:
-    # Returns 'rocm', 'cuda', or None based on the torch build, not GPU reachability.
-    # Reads string attributes only — never initializes a runtime, safe on half-broken drivers.
+    # Detect the backend without initializing it
     if getattr(torch.version, "hip", None):
         return "rocm"
     if getattr(torch.version, "cuda", None):
@@ -25,7 +22,7 @@ def is_rocm() -> bool:
 
 
 def gpu_available() -> bool:
-    # Like torch.cuda.is_available() but swallows HIP/CUDA init failures instead of raising.
+    # Tolerate runtime initialization failures
     try:
         return bool(torch.cuda.is_available())
     except Exception:
@@ -40,7 +37,7 @@ def device_name(index: int = 0) -> str:
 
 
 def gpu_arch() -> Optional[str]:
-    # gfx target of the first GPU (e.g. 'gfx1201' for RDNA4) or 'sm_XX' on CUDA.
+    # Read the first GPU architecture
     try:
         props = torch.cuda.get_device_properties(0)
     except Exception:
@@ -56,8 +53,7 @@ def gpu_arch() -> Optional[str]:
 
 
 def resolve_device(device: Optional[str]) -> str:
-    # Turn 'auto'/None/'' into a concrete device string.
-    # ROCm resolves to 'cuda' — that's the device string the ROCm runtime expects.
+    # Resolve automatic device selection
     if device not in ("auto", None, ""):
         return device
     if gpu_available():
@@ -80,7 +76,7 @@ def resolve_device(device: Optional[str]) -> str:
 
 
 def install_hint() -> str:
-    # Build-aware pip install hint. Uses /dev/kfd to detect AMD even before a GPU-capable torch is installed.
+    # Build-aware installation hint
     backend = gpu_backend()
     if backend == "rocm" or _looks_like_amd():
         return (
@@ -100,9 +96,7 @@ def install_hint() -> str:
 
 
 def _looks_like_amd() -> bool:
-    # kernel-level signal that doesn't need torch's GPU runtime: the amdgpu
-    # compute device node. Lets us give AMD-specific advice before a GPU-capable
-    # torch is even installed.
+    # Detect AMD through its compute device
     try:
         return os.path.exists("/dev/kfd")
     except Exception:
@@ -110,7 +104,7 @@ def _looks_like_amd() -> bool:
 
 
 def require_gpu(device: str) -> None:
-    # Raise a clear backend-aware error if a GPU device was asked for but torch can't see one.
+    # Reject unavailable GPU requests
     if device in ("cpu", "mps", "xpu"):
         return
     if gpu_available():
@@ -125,8 +119,7 @@ def require_gpu(device: str) -> None:
 
 
 def bitsandbytes_status() -> tuple[bool, str]:
-    # Returns (usable, reason). Only checks import-level — launching a bnb GPU kernel to test it
-    # could hang on unsupported archs; a broken bnb will raise cleanly at load time instead.
+    # Check bitsandbytes without launching a kernel
     try:
         import importlib.util
         if importlib.util.find_spec("bitsandbytes") is None:
@@ -137,9 +130,7 @@ def bitsandbytes_status() -> tuple[bool, str]:
         import bitsandbytes as bnb  # importing also probes the native lib
     except Exception as e:
         return False, f"bitsandbytes import failed ({type(e).__name__}: {e})"
-    # multi-backend builds (>=0.45) register backends; CUDA-only builds on ROCm
-    # will not have a rocm/hip backend. Treat unknown layouts as 'usable' and
-    # let the real load surface any error cleanly.
+    # Reject CUDA-only bitsandbytes builds on ROCm
     backends = getattr(bnb, "backends", None)
     if isinstance(backends, dict) and is_rocm():
         keys = ",".join(backends) or "<none>"
@@ -150,13 +141,13 @@ def bitsandbytes_status() -> tuple[bool, str]:
 
 def _bytes_per_param(load_in_4bit: bool, compute_dtype: str) -> float:
     if load_in_4bit:
-        # nf4 ~0.5 B/param + quant state; rounded up so we never under-estimate (under-estimate risks a hang).
+        # Include NF4 quantization overhead
         return 0.6
     return {"float16": 2.0, "bfloat16": 2.0, "float32": 4.0}.get(compute_dtype, 2.0)
 
 
 def estimate_param_count(model_id: str, trust_remote_code: bool = True) -> Optional[int]:
-    # Param count via meta-device build — no real memory or GPU touch. Returns None on failure.
+    # Estimate parameters on the meta device
     n, _ = estimate_weight_footprint(model_id, load_in_4bit=False, compute_dtype="bfloat16",
                                      trust_remote_code=trust_remote_code)
     return n
@@ -191,9 +182,7 @@ def estimate_weight_footprint(model_id: str, *, load_in_4bit: bool, compute_dtyp
         del m
         return int(n), float(n) * dtype_b
     quant_ids = {id(mod.weight) for mod in m.modules() if isinstance(mod, nn.Linear)}
-    # 3D packed MoE expert tensors are NF4-quantized by apostate.moe_nf4 (bnb skips them), so
-    # count them at the 4-bit rate too -- otherwise the preflight over-estimates packed MoEs
-    # (granite-4/SIQ/diffusion) and wrongly refuses what moe_nf4 makes fit.
+    # Count packed MoE experts at the NF4 rate
     quant_ids |= {id(p) for p in m.parameters() if p.dim() == 3}
     n_params = 0
     weight_bytes = 0.0
@@ -214,14 +203,12 @@ def preflight_vram(
     n_params: Optional[int] = None,
     log=print,
 ) -> None:
-    # Refuse to load if the model clearly won't fit in free VRAM before any big GPU allocation.
-    # Best-effort: warns and proceeds if measurement fails; set APOSTATE_STRICT_VRAM=1 to make that fatal.
+    # Reject models that clearly exceed free VRAM
     if device != "cuda":
         return
     strict = os.environ.get("APOSTATE_STRICT_VRAM", "").lower() in ("1", "true", "yes")
 
-    # weight_bytes accounts for what 4-bit actually shrinks (2D Linear only); packed MoE
-    # experts / mamba / embeddings stay at compute_dtype. n_params passed in is just a count.
+    # Estimate only tensors affected by 4-bit loading
     _n, weight_bytes = estimate_weight_footprint(
         model_id, load_in_4bit=load_in_4bit, compute_dtype=compute_dtype)
     if n_params is None:
@@ -266,14 +253,14 @@ def preflight_vram(
 
 
 def maybe_preflight(device: str, **kw) -> None:
-    # preflight_vram unless APOSTATE_SKIP_VRAM_CHECK is set.
+    # Honor the VRAM preflight override
     if os.environ.get("APOSTATE_SKIP_VRAM_CHECK", "").lower() in ("1", "true", "yes"):
         return
     preflight_vram(device, **kw)
 
 
 def total_vram_gb(device: str = "cuda") -> Optional[float]:
-    # detected total VRAM of the first GPU in GB, or None if there is no readable GPU.
+    # Read first-GPU VRAM
     if device != "cuda":
         return None
     try:
@@ -288,10 +275,7 @@ def total_vram_gb(device: str = "cuda") -> Optional[float]:
 def auto_batch_size(model_id: str, *, load_in_4bit: bool, compute_dtype: str = "bfloat16",
                     device: str = "cuda", default: int = 24, cap: int = 64,
                     weight_bytes: Optional[float] = None, log=print) -> int:
-    # Pick the eval/generation batch from detected VRAM minus estimated weights, so the same
-    # code runs narrow on a 16GB card and wide on an 80GB one instead of a value hardcoded to
-    # one machine. Falls back to `default` when VRAM or the model footprint can't be measured.
-    # The 0.7 GB/sample slope fits the measured anchors (16GB gemma -> ~12, 34GB/27B -> ~21).
+    # Scale batch size to estimated free VRAM
     vram = total_vram_gb(device)
     if not vram:
         return default
@@ -309,8 +293,7 @@ def auto_batch_size(model_id: str, *, load_in_4bit: bool, compute_dtype: str = "
 
 
 def gpu_smoke_test(device: str, log=print) -> bool:
-    # Runs a tiny GPU op to confirm the runtime executes kernels for this arch before any large load.
-    # On RDNA4 with old ROCm, kernels can hang rather than raise — cheaper to discover that on 8 bytes.
+    # Probe kernel execution before model loading
     if device != "cuda":
         return True
     if os.environ.get("APOSTATE_SKIP_GPU_SMOKE", "").lower() in ("1", "true", "yes"):

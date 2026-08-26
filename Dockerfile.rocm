@@ -1,21 +1,4 @@
-# ROCm (AMD GPU) image for apostate.
-#
-# Differs from the CUDA Dockerfile on purpose:
-#   - ROCm base image (ships the ROCm userspace runtime), not nvidia/cuda
-#   - torch from the ROCm wheel index, not cu128
-#   - no bitsandbytes (4-bit is experimental on ROCm; apostate runs bf16)
-#   - python entrypoint (no node shim)
-#
-# RDNA4 / gfx12xx (e.g. Radeon AI PRO R9700, RX 9070) needs ROCm >= 6.4. Bump
-# ROCM_VERSION / the wheel index together if your card needs a newer runtime.
-#
-# Build:  docker build -f Dockerfile.rocm -t apostate-rocm \
-#             --build-arg USER_ID=$(id -u) --build-arg GROUP_ID=$(id -g) .
-# Run:    docker run --rm -it \
-#             --device=/dev/kfd --device=/dev/dri --group-add video \
-#             --security-opt seccomp=unconfined --shm-size=8g \
-#             -v "$PWD:/host" -w /host apostate-rocm doctor
-#         (NOTE: ROCm uses --device/--group-add, NOT the NVIDIA-only `--gpus all`.)
+# ROCm image for AMD GPUs
 
 ARG ROCM_VERSION=6.4.1
 FROM rocm/dev-ubuntu-22.04:${ROCM_VERSION}-complete AS apostate-rocm
@@ -54,7 +37,7 @@ RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel \
     --index-url ${ROCM_WHEEL_INDEX} \
     torch torchvision torchaudio
 
-# requirements.txt pulls bitsandbytes (CUDA-only); harmless but unused on ROCm.
+# bitsandbytes is unused on ROCm
 COPY requirements.txt /app/requirements.txt
 RUN python3 -m pip install --no-cache-dir -r /app/requirements.txt
 
@@ -66,6 +49,6 @@ RUN mkdir -p /home/apostate/.cache/huggingface \
 USER apostate
 ENV PYTHONPATH=/app
 
-# python CLI entrypoint: `docker run ... apostate-rocm doctor` -> `python -m apostate doctor`
+# Python CLI entrypoint
 ENTRYPOINT ["python3", "-m", "apostate"]
 CMD ["doctor"]

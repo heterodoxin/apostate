@@ -1,4 +1,4 @@
-# reconstruction guard: re-measure leakage and fold corrective directions back in.
+# Refusal leakage reconstruction guard
 
 from __future__ import annotations
 
@@ -39,8 +39,7 @@ def run_guard(
     eval_harmless = eval_harmless or harmless[: cfg.opt_eval_n]
 
     for it in range(cfg.guard_max_iters):
-        # collect residual activations with ablation active (measures what leakage remains)
-        # but do it in a separate context from generation so we don't compound hook overhead
+        # Measure residual leakage separately
         with controller.active():
             ah = collect_layer_activations(bundle, harmful, direction_layer, cfg.batch_size)
             al = collect_layer_activations(bundle, harmless, direction_layer, cfg.batch_size)
@@ -100,9 +99,8 @@ def run_reader_guard(
     eval_harmless: List[str],
     log,
 ) -> List[dict]:
-    # per-layer analog of run_guard for post-norm models: on the edited model,
-    # find the residual refusal that survived and add a corrective direction per layer.
-    gn = max(24, getattr(cfg, "guard_eval_n", 24))  # guard scores a small subset; final test_metrics validates on the full set
+    # Add per-layer post-norm corrections
+    gn = max(24, getattr(cfg, "guard_eval_n", 24))  # Small guard sample
     harmful, harmless = harmful[:gn], harmless[:gn]
     eval_harmful, eval_harmless = eval_harmful[:gn], eval_harmless[:gn]
     nl = bundle.num_layers
@@ -122,7 +120,7 @@ def run_reader_guard(
         if m <= cfg.target_refusal:
             break
 
-        # snapshot so a step that doesn't help can be undone
+        # Snapshot reversible state
         prev_state = controller.alpha_state()
         prev_R = [controller.get_reader_layer_subspace(l) for l in range(nl)]
         with controller.active():
@@ -147,7 +145,7 @@ def run_reader_guard(
 
         new_m = score()
         new_kl = kl_harmless(bundle, controller, eval_harmless, cfg.batch_size, positions=cfg.kl_positions)
-        # only keep a corrective step that actually lowers refusal, within the REAL budget (not the raised search headroom)
+        # Keep only effective in-budget corrections
         if new_m < m - 1e-3 and new_kl <= getattr(cfg, "_kl_ceiling", cfg.max_kl):
             m, kl = new_m, new_kl
         else:
