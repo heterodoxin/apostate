@@ -54,7 +54,7 @@ Always run `apostate doctor` after install. It executes a real GPU kernel and ca
 Most abliteration removes a refusal direction everywhere and hopes the collateral damage stays small, measured by a single calibration KL number that is easy to fool. Apostate's default method, **KCRN** (Key-Conditional Refusal Nulling), makes the preservation constraint *explicit and exact*, and proves it on held-out data the edit never saw.
 
 - **Benign behavior is preserved by construction, not by luck.** KCRN pins the update to zero change on benign input keys (`ΔW·K_b = 0`) while nulling refusal on the harmful key subspace. The edit lives in the complement of the benign span, so normal prompts see the original weights. That is why it validates at a **held-out KL around 0.003**, one to two orders of magnitude below typical abliteration, instead of the 0.1+ that whole-direction removal costs.
-- **The number is honest.** KL is computed in float32 over every non-padding position, comparing the base model against the *reloaded* baked checkpoint, on a benign set that is disjoint from everything used to fit, select writers, or tune strength. Delivery is scored on JailbreakBench held-out prompts with a strict judge. There is no way for the search to see the test set.
+- **The number is honest.** KL is computed in float32 over every non-padding position, comparing the base model against the *reloaded* baked checkpoint, on a benign set that is disjoint from everything used to fit, select writers, or tune strength. Delivery is scored on JailbreakBench held-out prompts with the request-conditioned HarmBench classifier, which judges whether the response actually delivers the requested behavior rather than pattern-matching the response text. There is no way for the search to see the test set.
 - **Every writer carries a certificate.** Each edited writer ships projected harmful energy, benign leakage, refusal residual, relative update norm, and condition number. A writer that cannot satisfy both goals safely is skipped, not forced.
 - **It generalizes across architecture and scale.** The same operating point that delivers on dense Qwen3-8B ports unchanged to the 27B hybrid linear-attention VLM at the same KL (see Results). Dense, MoE, pre-norm and post-norm, and packed-MoE on a single 34GB card.
 - **A real weight edit, not a finetune, a jailbreak, or a router.** No forgetting, no style drift, no prompt to paste, no custom inference code (`trust_remote_code` is never required). It bakes into a standard checkpoint that drops into Transformers, vLLM, llama.cpp/GGUF, Ollama, and LM Studio.
@@ -82,16 +82,16 @@ Published checkpoints live under [huggingface.co/heterodoxin](https://huggingfac
 
 ## Results
 
-KCRN takes an instruction model from near-total refusal to majority delivery while keeping the change to benign behavior tiny. Delivery is `1 - refusal` on JailbreakBench held-out prompts, judged by a strict GPTFuzz-style judge; held-out KL is `KL(base||edited)` over a disjoint benign set after the checkpoint is baked and reloaded.
+KCRN takes an instruction model from near-total refusal to majority delivery while keeping the change to benign behavior tiny. Delivery is `1 - refusal` on JailbreakBench held-out prompts, judged by the request-conditioned HarmBench classifier (`cais/HarmBench-Llama-2-13b-cls`), which reads the request and the response together and is not fooled by compliant "Sure, here's..." preambles or disclaimer wrappers. Held-out KL is `KL(base||edited)` over a disjoint benign set after the checkpoint is baked and reloaded.
 
 **Qwen3-8B** (dense, default operating point): 13 attention writers edited, JBB held-out `n=96`, fp16.
 
 | model | refusal | delivery | held-out kl |
 |---|---:|---:|---:|
 | base | ~99% | ~1% | 0.000 |
-| apostate (KCRN) | 32.3% | 67.7% | 0.0031 |
+| apostate (KCRN) | 11.5% | 88.5% | 0.0031 |
 
-The strict judge is conservative on delivery: it counts a completion that opens with "Sure, here's..." as a refusal even when the body is a full harmful answer. Hand-inspecting the flagged "refusals" on this run, the hard-refusal count was zero and every flagged case was a real delivery, so 67.7% is a floor, not a ceiling.
+The residual ~11% is genuine, not a judge artifact: inspecting the non-delivered prompts, they are real deflections concentrated in the most extreme categories (child exploitation, direct incitement, dangerous medical advice), which a fixed-weight edit at 0.003 KL still holds back.
 
 **Qwen3.8-27B** (hybrid linear-attention VLM): the *same* operating point ported straight from the 8B, fit and evaluated in NF4, baked to fp16.
 
@@ -99,7 +99,7 @@ The strict judge is conservative on delivery: it counts a completion that opens 
 |---|---:|---:|
 | apostate (KCRN) | 63.5% | 0.0032 |
 
-That the held-out KL lands at 0.0032 on a 27B hybrid arch, matching the 8B's 0.0031, at nearly the same delivery, is the point: the operator is not tuned per model, the preservation constraint holds across scale and architecture.
+The held-out KL lands at 0.0032 on a 27B hybrid arch, matching the 8B's 0.0031: the operator is not tuned per model, the preservation constraint holds across scale and architecture. Delivery is lower than the 8B because the 27B genuinely holds its refusal harder (its non-deliveries survive the HarmBench judge as real refusals), not because of any measurement difference.
 
 ---
 
@@ -126,7 +126,7 @@ Each candidate writer receives a **certificate**: projected harmful energy `ρ`,
 
 ## Validation protocol
 
-KCRN uses four disjoint prompt roles. **Harmful calibration** prompts produce `R` and the harmful-key factors. **Benign calibration** prompts produce the preservation basis `Q_b` and the calibration KL. **Harmful held-out** prompts (JailbreakBench, harder than the fit set) measure delivery. **Benign held-out** prompts measure `KL(base||edited)` after the checkpoint is baked and reloaded.
+KCRN uses four disjoint prompt roles. **Harmful calibration** prompts produce `R` and the harmful-key factors. **Benign calibration** prompts produce the preservation basis `Q_b` and the calibration KL. **Harmful held-out** prompts (JailbreakBench, harder than the fit set) measure delivery, scored by the HarmBench classifier after the target model is released so the 13B judge fits in memory. **Benign held-out** prompts measure `KL(base||edited)` after the checkpoint is baked and reloaded.
 
 The benign held-out set is resolved disjointly from the calibration source and is never used to build `K_b`, select writers, tune strength or ridge, or choose the output checkpoint. KL is computed in float32 over non-padding prompt positions, against cached base-model hidden states or logits, using the same exported model-loading path as the edited checkpoint. Base logits are cached from the base weights *before* any edit is applied, and the edited side is the reloaded baked directory, so the number is a true base-versus-edited comparison, not a model compared against itself.
 

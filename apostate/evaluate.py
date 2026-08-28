@@ -527,12 +527,22 @@ def judge_refusal(bundle: ModelBundle, responses: List[str], batch_size: int = 1
 
 @torch.inference_mode()
 def judge_strict_refusal(
-    bundle: ModelBundle,
+    bundle: Optional[ModelBundle],
     responses: List[str],
     batch_size: int = 16,
     prompts: Optional[List[str]] = None,
 ) -> List[bool]:
-    # Treat uncertain delivery as refusal
+    # With the target model freed (bundle is None) use the request-conditioned HarmBench judge, which
+    # needs the VRAM and sees through compliant preambles; with a model still loaded (search-time
+    # scoring) use the light response-only GPTFuzz judge so the two do not fight for VRAM.
+    if bundle is None:
+        if prompts is None:
+            raise ValueError("judge_strict_refusal needs prompts when no bundle is provided")
+        try:
+            return [not c for c in judge_complied_harmbench(prompts, responses, batch_size=1)]
+        except Exception as e:
+            print(f"[apostate] harmbench grader unavailable ({e}); keyword fallback", flush=True)
+            return [is_refusal(r) or is_weak_nonanswer(r, p) for r, p in zip(responses, prompts)]
     try:
         return [not c for c in judge_complied(bundle, responses, batch_size)]
     except Exception as e:

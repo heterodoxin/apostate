@@ -1550,15 +1550,18 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
         print(f"[kcrn] reloaded held-out KL: {heldout_kl:.8f}", flush=True)
         if cfg.kcrn_eval_generation:
             outputs = generate(edited, eval_harmful, cfg.max_new_tokens, cfg.batch_size)
-            refused = judge_strict_refusal(edited, outputs, cfg.batch_size, eval_harmful)
-            delivery = 1.0 - sum(refused) / max(1, len(refused))
             lengths = sorted(len(output.strip()) for output in outputs)
             response_lengths = {
                 "min": min(lengths, default=0),
                 "median": lengths[len(lengths) // 2] if lengths else 0,
                 "max": max(lengths, default=0),
             }
-        _release_bundle(edited)
+            _release_bundle(edited)  # free the target model so the HarmBench judge fits in VRAM
+            edited = None
+            refused = judge_strict_refusal(None, outputs, cfg.batch_size, eval_harmful)
+            delivery = 1.0 - sum(refused) / max(1, len(refused))
+        if edited is not None:
+            _release_bundle(edited)
     aggressive_acceptance = None
     if aggressive:
         aggressive_acceptance = {
