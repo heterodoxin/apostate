@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import torch
 
+import dataclasses
+
 from .config import ApostateConfig
-from .model import load_model
+from .model import load_model, _safetensors_size_gb
 from .data import resolve_prompts, format_chat
 from .activations import collect_activations
 from . import ticv
@@ -55,20 +57,31 @@ def _capture_premlp(model, tok, prompts, batch_size):
             [torch.cat(a, 0) if a else None for a in allpos])
 
 
-def fit_and_bake(cfg: ApostateConfig, bundle=None) -> dict:
-    """Fit the per-layer detectors and thresholds, write the gated neurons, and save the checkpoint."""
-    cfg.with_defaults()
-    cfg.load_in_4bit = False
-    own = bundle is None
-    base = load_model(cfg) if own else bundle
+def _model_fp16_gb(model_id):
+    import glob
+    import os
+    if os.path.isdir(model_id):
+        files = glob.glob(os.path.join(model_id, "*.safetensors"))
+        if files:
+            return sum(os.path.getsize(f) for f in files) / 1e9
+    return _safetensors_size_gb(model_id)
+
+
+def _release(base):
+    import gc
+    base.model = None
+    del base
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def _fit(base, cfg, band):
+    """Return per-layer detector, actuator, threshold, and constant-dim (cd, m) from forward passes."""
     nl = base.num_layers
     tok = base.tokenizer
     fit_harmful = resolve_prompts(cfg.harmful_path, cfg.diode_fit_n, cfg.seed)
     fit_benign = resolve_prompts(cfg.harmless_path, cfg.diode_fit_n, cfg.seed)
-    rmul = float(getattr(base.model.config, "residual_multiplier", 1.0) or 1.0)
-    lo, hi = cfg.diode_band
-    band = set(range(int(lo * nl), int(hi * nl)))
-
     harmful_res = collect_activations(base, fit_harmful, cfg.batch_size)
     benign_res = collect_activations(base, fit_benign, cfg.batch_size)
     harmful_pre, _ = _capture_premlp(base.model, tok, fit_harmful, cfg.batch_size)
@@ -87,46 +100,83 @@ def fit_and_bake(cfg: ApostateConfig, bundle=None) -> dict:
         theta[l] = float(torch.quantile(benign_pre_all[l] @ detector[l], 1.0 - cfg.diode_target))
 
     samples = ticv._calib_xmlp(base.model, tok, nl)
+    cd = [None] * nl
+    m = [None] * nl
+    for li in band:
+        if detector[li] is None:
+            continue
+        X = samples[li]
+        mean, std = X.mean(0), X.std(0)
+        cd[li] = int((mean.abs().square() / std.clamp_min(1e-6)).argmax())
+        m[li] = mean[cd[li]].item()
+    return detector, actuator, theta, cd, m
+
+
+def _bake(base, cfg, band, rmul, detector, actuator, theta, cd, m):
+    """Write one gated refusal-subtractor neuron per band layer into the (dequantized) weights."""
     layers = ticv._decoder(base.model).layers
-    device = next(base.model.parameters()).device
     written = 0
     with torch.no_grad():
         for li, layer in enumerate(layers):
-            if li not in band or detector[li] is None:
+            if li not in band or detector[li] is None or cd[li] is None:
                 continue
             try:
                 mlp = ticv._gated_mlp(layer)
             except Exception:
                 continue
-            X = samples[li]
-            mean, std = X.mean(0), X.std(0)
-            cd = int((mean.abs().square() / std.clamp_min(1e-6)).argmax())
-            m = mean[cd].item()
+            dev = mlp.gate_proj.weight.device
             gate = (cfg.diode_kappa * detector[li]).clone()
-            gate[cd] = gate[cd] - cfg.diode_kappa * theta[li] / m
+            gate[cd[li]] = gate[cd[li]] - cfg.diode_kappa * theta[li] / m[li]
             j = mlp.gate_proj.weight.shape[0] - 1
-            mlp.gate_proj.weight[j].copy_(gate.to(device).to(mlp.gate_proj.weight.dtype))
+            mlp.gate_proj.weight[j].copy_(gate.to(dev).to(mlp.gate_proj.weight.dtype))
             mlp.up_proj.weight[j].zero_()
-            mlp.up_proj.weight[j, cd] = 1.0
-            down = -(cfg.diode_strength / (cfg.diode_kappa * m * rmul)) * actuator[li]
-            mlp.down_proj.weight[:, j].copy_(down.to(device).to(mlp.down_proj.weight.dtype))
+            mlp.up_proj.weight[j, cd[li]] = 1.0
+            down = -(cfg.diode_strength / (cfg.diode_kappa * m[li] * rmul)) * actuator[li]
+            mlp.down_proj.weight[:, j].copy_(down.to(dev).to(mlp.down_proj.weight.dtype))
             written += 1
+    return written
 
+
+def fit_and_bake(cfg: ApostateConfig, bundle=None) -> dict:
+    """Fit the per-layer detectors and thresholds, write the gated neurons, and save the checkpoint."""
+    cfg.with_defaults()
+    own = bundle is None
+
+    # The bake needs fp16 (a gated neuron can't be written into packed 4bit); when fp16 won't fit the GPU, fit in NF4 and bake the dequantized weights on the CPU.
+    fp16_gb = _model_fp16_gb(cfg.model) if own else 0.0
+    free_vram = torch.cuda.mem_get_info()[0] / 1e9 if torch.cuda.is_available() else 0.0
+    two_phase = own and fp16_gb > 0 and fp16_gb > free_vram * 0.85
+
+    fit_cfg = dataclasses.replace(cfg) if own else cfg
+    if own:
+        fit_cfg.load_in_4bit = bool(two_phase)
+    base = load_model(fit_cfg) if own else bundle
+
+    nl = base.num_layers
+    tok = base.tokenizer
+    rmul = float(getattr(base.model.config, "residual_multiplier", 1.0) or 1.0)
+    lo, hi = cfg.diode_band
+    band = set(range(int(lo * nl), int(hi * nl)))
+
+    detector, actuator, theta, cd, m = _fit(base, fit_cfg, band)
+
+    if two_phase:
+        _release(base)
+        bake_cfg = dataclasses.replace(cfg, load_in_4bit=False, device="cpu", cpu_offload_gb=0)
+        base = load_model(bake_cfg)
+
+    written = _bake(base, cfg, band, rmul, detector, actuator, theta, cd, m)
     base.model.save_pretrained(cfg.output_dir, safe_serialization=True)
     tok.save_pretrained(cfg.output_dir)
+
     report = {
         "method": "diode", "edited_layers": written, "num_layers": nl,
         "band": [min(band), max(band)] if band else [], "residual_multiplier": rmul,
         "strength": cfg.diode_strength, "kappa": cfg.diode_kappa, "benign_fire_target": cfg.diode_target,
-        "runtime_hooks": False, "deployment": "standard weights",
+        "two_phase_bake": two_phase, "runtime_hooks": False, "deployment": "standard weights",
     }
     if own:
-        import gc
-        base.model = None
-        del base
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        _release(base)
     return report
 
 
