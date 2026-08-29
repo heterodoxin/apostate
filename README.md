@@ -98,10 +98,11 @@ The near-zero KL is the conditionality paying off: benign inputs stay below the 
 | model | arch | delivery | held-out kl |
 |---|---|---:|---:|
 | Qwen3-8B | dense | 90.6% | 0.00065 |
+| Qwen3.8-27B | hybrid linear-attention (VLM) | 71.9% | 0.00237 |
 | Gemma 4 (E4B-it) | post-norm sandwich | 86.5% | 0.009 |
 | Granite 4 | residual-scaled MLP | 62.5% | 0.017 |
 
-Gemma and Granite carry higher KL and, for Granite, lower delivery because those architectures hold refusal harder and the detector separates it less cleanly than on Qwen3; the strength and gate-rate knobs trade delivery against KL per model rather than one setting fitting all three.
+The 27B is fit in NF4 on the GPU and baked in fp16 on the CPU (the bake does no forward pass), so a 52GB model edits on a single 34GB card; it beats KCRN's 27B on both delivery and KL. Gemma and Granite carry higher KL and, for Granite, lower delivery because those architectures hold refusal harder and the detector separates it less cleanly than on Qwen3; the strength and gate-rate knobs trade delivery against KL per model rather than one setting fitting all three.
 
 **KCRN** (`--method kcrn`), the unconditional closed-form method behind the published checkpoints:
 
