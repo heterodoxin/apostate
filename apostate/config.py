@@ -8,7 +8,7 @@ import math
 
 @dataclass
 class ApostateConfig:
-    method: str = "kcrn"
+    method: str = "diode"
     model: str = "Qwen/Qwen3-8B"
     output_dir: str = "apostate-out"
     profile: str = "balanced"
@@ -160,6 +160,12 @@ class ApostateConfig:
 
     save_dtype: str = "bfloat16"
     bake: bool = True
+
+    diode_strength: float = 6.0
+    diode_kappa: float = 8.0
+    diode_target: float = 0.05
+    diode_fit_n: int = 160
+    diode_band: tuple = (0.22, 0.78)
 
     kcrn_edits: Optional[str] = None
     kcrn_force: bool = False

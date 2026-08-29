@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import json
 import os
 import shlex
 import sys
@@ -59,15 +60,20 @@ def main(argv=None):
         cfg = ApostateConfig(**kwargs)
 
     command = os.environ.get("APOSTATE_COMMAND") or " ".join(shlex.quote(x) for x in sys.argv)
-    method = (cfg.method or "kcrn").strip().lower()
-    if method == "kcrn":
+    method = (cfg.method or "diode").strip().lower()
+    if method == "diode":
+        from .diode import fit_and_bake as run_diode
+        report = run_diode(cfg)
+        json.dump(report, open(os.path.join(cfg.output_dir, "diode_report.json"), "w"), indent=2)
+        print(f"[diode] baked {report['edited_layers']} gated neurons into {cfg.output_dir}", flush=True)
+    elif method == "kcrn":
         run_kcrn(cfg, command=command)
     elif method == "ccv":
         _run_ccv(cfg, command=command)
     elif method in ("legacy", "engine"):
         run_legacy(cfg, command=command)
     else:
-        raise ValueError(f"unknown Apostate method {cfg.method!r}; use kcrn, ccv, or legacy")
+        raise ValueError(f"unknown Apostate method {cfg.method!r}; use diode, kcrn, ccv, or legacy")
 
 
 if __name__ == "__main__":
