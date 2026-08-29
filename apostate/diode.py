@@ -5,9 +5,11 @@ refusal detector fires above a benign-calibrated threshold, so benign inputs are
 """
 from __future__ import annotations
 
-import torch
-
 import dataclasses
+import json
+from pathlib import Path
+
+import torch
 
 from .config import ApostateConfig
 from .model import load_model, _safetensors_size_gb
@@ -137,12 +139,57 @@ def _bake(base, cfg, band, rmul, detector, actuator, theta, cd, m):
     return written
 
 
+def _write_model_card(output: Path, report: dict) -> None:
+    """Write a checkpoint README describing the diode edit and this run's settings."""
+    rows = [
+        ("base model", f"`{report.get('model')}`"),
+        ("method", "Apostate diode (conditional directional abliteration)"),
+        ("edited layers", f"{report.get('edited_layers')} of {report.get('num_layers')}"),
+        ("strength", str(report.get("strength"))),
+        ("benign fire target", str(report.get("benign_fire_target"))),
+        ("checkpoint dtype", str(report.get("save_dtype"))),
+    ]
+    table = "\n".join(f"| {name} | {value} |" for name, value in rows)
+    text = f"""# {output.name}
+
+Uncensored build of `{report.get('model')}`, produced with
+[Apostate](https://github.com/heterodoxin/apostate) using the diode path.
+
+The diode repurposes one MLP neuron per layer into a gated refusal subtractor: it removes the
+residual refusal direction only when a benign-calibrated detector fires above threshold, so
+benign inputs keep the original weights. The result is a plain checkpoint: no runtime hook,
+adapter, finetune, or router.
+
+| field | value |
+|---|---|
+{table}
+
+Delivery and KL are measured separately by `apostate test`, not during the bake; `diode_report.json`
+records the edit settings. This is a standard Transformers checkpoint.
+
+## Usage
+
+```python
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+model = AutoModelForCausalLM.from_pretrained("{output.name}", device_map="auto")
+tokenizer = AutoTokenizer.from_pretrained("{output.name}")
+```
+
+## Warning
+
+This model is uncensored and will answer harmful and dangerous requests. You are responsible
+for how you use it.
+"""
+    (output / "README.md").write_text(text, encoding="utf-8")
+
+
 def fit_and_bake(cfg: ApostateConfig, bundle=None) -> dict:
     """Fit the per-layer detectors and thresholds, write the gated neurons, and save the checkpoint."""
     cfg.with_defaults()
     own = bundle is None
 
-    # The bake needs fp16 (a gated neuron can't be written into packed 4bit); when fp16 won't fit the GPU, fit in NF4 and bake the dequantized weights on the CPU.
+    # A gated neuron cannot be written into packed 4bit, so oversized models fit in NF4 and bake dequantized fp16 weights on the CPU.
     fp16_gb = _model_fp16_gb(cfg.model) if own else 0.0
     free_vram = torch.cuda.mem_get_info()[0] / 1e9 if torch.cuda.is_available() else 0.0
     two_phase = own and fp16_gb > 0 and fp16_gb > free_vram * 0.85
@@ -170,11 +217,16 @@ def fit_and_bake(cfg: ApostateConfig, bundle=None) -> dict:
     tok.save_pretrained(cfg.output_dir)
 
     report = {
-        "method": "diode", "edited_layers": written, "num_layers": nl,
+        "method": "diode", "model": cfg.model, "edited_layers": written, "num_layers": nl,
         "band": [min(band), max(band)] if band else [], "residual_multiplier": rmul,
         "strength": cfg.diode_strength, "kappa": cfg.diode_kappa, "benign_fire_target": cfg.diode_target,
-        "two_phase_bake": two_phase, "runtime_hooks": False, "deployment": "standard weights",
+        "save_dtype": cfg.save_dtype, "two_phase_bake": two_phase, "runtime_hooks": False,
+        "deployment": "standard weights",
     }
+    out = Path(cfg.output_dir)
+    (out / "diode_report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    (out / "apostate_config.json").write_text(cfg.to_json() + "\n", encoding="utf-8")
+    _write_model_card(out, report)
     if own:
         _release(base)
     return report

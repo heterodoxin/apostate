@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
-import json
 import os
 import shlex
 import sys
@@ -64,7 +63,6 @@ def main(argv=None):
     if method == "diode":
         from .diode import fit_and_bake as run_diode
         report = run_diode(cfg)
-        json.dump(report, open(os.path.join(cfg.output_dir, "diode_report.json"), "w"), indent=2)
         print(f"[diode] baked {report['edited_layers']} gated neurons into {cfg.output_dir}", flush=True)
     elif method == "kcrn":
         run_kcrn(cfg, command=command)

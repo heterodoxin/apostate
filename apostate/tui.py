@@ -241,7 +241,7 @@ class Apostate(App):
             # Derive output names from normalized paths
             name = model.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1] or "model"
             out = name + "-abliterated"
-            self.run_cli(["kcrn", "--model", model, "--out", out])
+            self.run_cli(["ablate", "--model", model, "--out", out])
 
     def _pick_base(self, model: Optional[str]) -> None:
         if model:
