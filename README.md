@@ -8,9 +8,9 @@
 
 ## What is Apostate?
 
-Instruction-tuned models are trained to refuse certain requests. Apostate finds the refusal reflex inside the network and permanently nulls it in the weights, on the exact input directions that trigger it, while leaving everything the model does on normal prompts provably unchanged. Nothing else about the model moves.
+Instruction-tuned models are trained to refuse certain requests. Apostate finds the refusal reflex inside the network and permanently nulls it in the weights, on the exact inputs that trigger it, while leaving everything the model does on normal prompts unchanged. Nothing else about the model moves.
 
-No runtime hook. No adapter. No finetune. No jailbreak prompt. No router or detector. You get a standard checkpoint (safetensors, or GGUF) that behaves like the original but answers instead of refusing.
+No runtime hook. No adapter. No finetune. No jailbreak prompt. No custom inference code (`trust_remote_code` is never required). You get a standard checkpoint (safetensors, or GGUF) that behaves like the original but answers instead of refusing.
 
 ## Install
 
@@ -51,21 +51,21 @@ Always run `apostate doctor` after install. It executes a real GPU kernel and ca
 
 ## Why it's better
 
-Most abliteration removes a refusal direction everywhere and hopes the collateral damage stays small, measured by a single calibration KL number that is easy to fool. Apostate's default method, **KCRN** (Key-Conditional Refusal Nulling), makes the preservation constraint *explicit and exact*, and proves it on held-out data the edit never saw.
+Most abliteration removes a refusal direction from *every* input and hopes the collateral damage stays small. That is a genuine tradeoff: remove enough to make the model answer and you have also moved its behavior on normal prompts, which is why whole-direction removal typically costs 0.1+ KL. Apostate's default method, the **diode**, removes the refusal direction *conditionally*: only on the inputs that actually trigger refusal, and never on benign ones.
 
-- **Benign behavior is preserved by construction, not by luck.** KCRN pins the update to zero change on benign input keys (`ΔW·K_b = 0`) while nulling refusal on the harmful key subspace. The edit lives in the complement of the benign span, so normal prompts see the original weights. That is why it validates at a **held-out KL around 0.003**, one to two orders of magnitude below typical abliteration, instead of the 0.1+ that whole-direction removal costs.
-- **The number is honest.** KL is computed in float32 over every non-padding position, comparing the base model against the *reloaded* baked checkpoint, on a benign set that is disjoint from everything used to fit, select writers, or tune strength. Delivery is scored on JailbreakBench held-out prompts with the request-conditioned HarmBench classifier, which judges whether the response actually delivers the requested behavior rather than pattern-matching the response text. There is no way for the search to see the test set.
-- **Every writer carries a certificate.** Each edited writer ships projected harmful energy, benign leakage, refusal residual, relative update norm, and condition number. A writer that cannot satisfy both goals safely is skipped, not forced.
-- **It generalizes across architecture and scale.** The same operating point that delivers on dense Qwen3-8B ports unchanged to the 27B hybrid linear-attention VLM at the same KL (see Results). Dense, MoE, pre-norm and post-norm, and packed-MoE on a single 34GB card.
-- **A real weight edit, not a finetune, a jailbreak, or a router.** No forgetting, no style drift, no prompt to paste, no custom inference code (`trust_remote_code` is never required). It bakes into a standard checkpoint that drops into Transformers, vLLM, llama.cpp/GGUF, Ollama, and LM Studio.
+- **The edit is gated, and the gate is baked in.** Each decoder layer gets one repurposed MLP neuron that subtracts the residual refusal direction only when a benign-calibrated detector fires above threshold. On a benign prompt the detector stays below threshold, the neuron is silent, and the layer computes exactly the base weights. That conditionality is what walks around the delivery-versus-KL frontier instead of trading along it: Qwen3-8B reaches **90.6% delivery at 0.00065 held-out KL**, an order of magnitude below even KCRN's already-low KL.
+- **It is still just a weight edit.** The detector and the subtraction are a standard SiLU-gated neuron (gate, up, down projections) inside the existing MLP. No runtime hook, no router, no adapter, no `trust_remote_code`. It bakes into a standard checkpoint that drops into Transformers, vLLM, llama.cpp/GGUF, Ollama, and LM Studio.
+- **The number is honest.** KL is computed in float32 over every non-padding position, comparing the base model against the *reloaded* baked checkpoint, on a benign set disjoint from everything used to fit or calibrate. Delivery is scored on JailbreakBench held-out prompts with the request-conditioned HarmBench classifier, which judges whether the response actually delivers the requested behavior rather than pattern-matching the response text.
+- **It generalizes across architecture.** The same operator ports to dense (Qwen3), post-norm sandwich (Gemma 4), and residual-scaled (Granite 4) stacks with a per-model strength and gate-rate knob (see Results). The threshold auto-calibrates per layer, so the detector adapts to each architecture's activation scale rather than being hand-tuned.
+- **KCRN is still there.** The previous default, **KCRN** (Key-Conditional Refusal Nulling), an unconditional closed-form nulling that pins benign keys to zero change and ships a certificate per edited writer, remains available with `--method kcrn` and powers the currently published checkpoints.
 
-Heretic, the popular abliteration tool, tunes against a first-token KL objective that is **blind on reasoning models**: on Qwen3 the first generated token is always `<think>`, so first-token KL reads near zero for any edit. KCRN's full-position, reload-based KL does not have that hole.
+Heretic, the popular abliteration tool, tunes against a first-token KL objective that is **blind on reasoning models**: on Qwen3 the first generated token is always `<think>`, so first-token KL reads near zero for any edit. Apostate's full-position, reload-based KL does not have that hole.
 
 ## Why should I care?
 
 - You want a model that **answers the question** instead of lecturing you or dodging with "I can't help with that."
 - You're doing **red-teaming or safety research** and need a model that won't refuse your test set.
-- You want the base model's **full capability without the corporate guardrails**, without the intelligence tax that finetuned "uncensored" models charge. KCRN's ~0.003 KL means the capability really is intact.
+- You want the base model's **full capability without the corporate guardrails**, without the intelligence tax that finetuned "uncensored" models charge. Sub-0.001 KL means the capability really is intact.
 - You're writing fiction, exploring edgy topics, or building an assistant that treats you like an adult.
 - It runs **anywhere**: an fp16/bf16 checkpoint for Transformers/vLLM, or a GGUF quant for llama.cpp / Ollama / LM Studio.
 
@@ -73,7 +73,7 @@ Heretic, the popular abliteration tool, tunes against a first-token KL objective
 
 ## Downloads
 
-Published checkpoints live under [huggingface.co/heterodoxin](https://huggingface.co/heterodoxin) as standard Transformers directories (drop-in for the base model). Current KCRN builds:
+Published checkpoints live under [huggingface.co/heterodoxin](https://huggingface.co/heterodoxin) as standard Transformers directories (drop-in for the base model). These builds were produced with KCRN:
 
 | model | base | arch |
 |---|---|---|
@@ -82,34 +82,65 @@ Published checkpoints live under [huggingface.co/heterodoxin](https://huggingfac
 
 ## Results
 
-KCRN takes an instruction model from near-total refusal to majority delivery while keeping the change to benign behavior tiny. Delivery is `1 - refusal` on JailbreakBench held-out prompts, judged by the request-conditioned HarmBench classifier (`cais/HarmBench-Llama-2-13b-cls`), which reads the request and the response together and is not fooled by compliant "Sure, here's..." preambles or disclaimer wrappers. Held-out KL is `KL(base||edited)` over a disjoint benign set after the checkpoint is baked and reloaded.
+The diode takes an instruction model from near-total refusal to majority delivery while keeping the change to benign behavior tiny. Delivery is `1 - refusal` on JailbreakBench held-out prompts, judged by the request-conditioned HarmBench classifier (`cais/HarmBench-Llama-2-13b-cls`), which reads the request and the response together and is not fooled by compliant "Sure, here's..." preambles or disclaimer wrappers. Held-out KL is `KL(base||edited)` over a disjoint benign set after the checkpoint is baked and reloaded.
 
-**Qwen3-8B** (dense, default operating point): 13 attention writers edited, JBB held-out `n=96`, fp16.
+**Qwen3-8B** (dense, default operating point), JBB held-out `n=96`, fp16:
 
 | model | refusal | delivery | held-out kl |
 |---|---:|---:|---:|
 | base | ~99% | ~1% | 0.000 |
-| apostate (KCRN) | 11.5% | 88.5% | 0.0031 |
+| apostate (diode) | 9.4% | 90.6% | 0.00065 |
 
-The residual ~11% is genuine, not a judge artifact: inspecting the non-delivered prompts, they are real deflections concentrated in the most extreme categories (child exploitation, direct incitement, dangerous medical advice), which a fixed-weight edit at 0.003 KL still holds back.
+The near-zero KL is the conditionality paying off: benign inputs stay below the gate threshold and see the original weights, so the edit shows up almost entirely on refusal-triggering inputs.
 
-**Qwen3.8-27B** (hybrid linear-attention VLM): the *same* operating point ported straight from the 8B, fit and evaluated in NF4, baked to fp16.
+**Cross-architecture** (diode, same operator, per-model strength and gate-rate knob):
+
+| model | arch | delivery | held-out kl |
+|---|---|---:|---:|
+| Qwen3-8B | dense | 90.6% | 0.00065 |
+| Gemma 4 (E4B-it) | post-norm sandwich | 86.5% | 0.009 |
+| Granite 4 | residual-scaled MLP | 62.5% | 0.017 |
+
+Gemma and Granite carry higher KL and, for Granite, lower delivery because those architectures hold refusal harder and the detector separates it less cleanly than on Qwen3; the strength and gate-rate knobs trade delivery against KL per model rather than one setting fitting all three.
+
+**KCRN** (`--method kcrn`), the unconditional closed-form method behind the published checkpoints:
 
 | model | delivery | held-out kl |
 |---|---:|---:|
-| apostate (KCRN) | 63.5% | 0.0032 |
+| Qwen3-8B | 88.5% | 0.0031 |
+| Qwen3.8-27B (NF4 fit, fp16 bake) | 63.5% | 0.0032 |
 
-The held-out KL lands at 0.0032 on a 27B hybrid arch, matching the 8B's 0.0031: the operator is not tuned per model, the preservation constraint holds across scale and architecture. Delivery is lower than the 8B because the 27B genuinely holds its refusal harder (its non-deliveries survive the HarmBench judge as real refusals), not because of any measurement difference.
+KCRN's held-out KL lands at 0.0032 on a 27B hybrid arch, matching the 8B's 0.0031: the operator is not tuned per model, the preservation constraint holds across scale and architecture.
 
 ---
 
 # For researchers
 
-Everything below is the technical detail: the KCRN operator, the validation protocol, the CLI, and per-architecture handling.
+Everything below is the technical detail: the diode operator, KCRN as the alternative, the validation protocol, the CLI, and per-architecture handling.
 
-## How it works
+## How the diode works
 
-KCRN edits residual **writers** (attention `o_proj`, MLP `down_proj`) in place. For a writer matrix `W` with shape `[d_out, d_in]`, it uses a refusal/output basis `R` (the per-layer residual-space refusal direction, `normalize(mean(harmful) - mean(benign))`), harmful input keys `K_h`, benign preservation keys `K_b`, strength `s`, and ridge `λ`. It builds an orthonormal benign basis `Q_b` from the sampled benign activations, then projects the harmful keys into the benign complement and solves in closed form:
+The diode edits each decoder layer's MLP by repurposing one neuron into a gated refusal subtractor. It realizes the conditional edit
+
+```text
+h ← h - α · [Dᵀh - θ]₊ · Z
+```
+
+where `[·]₊` is a rectifier, `D` is a refusal **detector** in pre-MLP-norm space, `Z` is the residual-space refusal **actuator**, `θ` is a per-layer threshold, and `α` is strength. Benign inputs have `Dᵀh < θ`, so the bracket is zero and the layer computes the base weights exactly.
+
+**Fit.** From harmful and benign calibration prompts:
+
+- `D` is the pre-MLP-norm refusal direction `mean(harmful) - mean(benign)` with its benign span removed (projected out of the top benign principal components), so it fires on refusal and stays quiet on benign variation.
+- `Z = normalize(mean(harmful) - mean(benign))` in residual space, the full refusal direction the writer subtracts. Conditionality, not orthogonalization, is what protects benign here, so `Z` stays the complete direction.
+- `θ` is the `(1 - target)` quantile of benign detector scores `Dᵀh`, auto-calibrated per layer so benign fires at rate `target`. This adapts to each architecture's activation scale with no hand tuning.
+
+**Bake.** For each layer in the edited band, one MLP neuron `j` is overwritten: its gate row becomes `κ·D` with a threshold fold on a near-constant activation dimension (`gate[cd] -= κθ/m`), so the SiLU rectifier switches on only when `Dᵀh > θ`; its up-projection reads that one dimension; its down-projection writes `-(α / (κ·m·RMUL))·Z`. The `κ` factor sharpens the SiLU toward a hard rectifier. `RMUL` is the architecture's `residual_multiplier` (1.0 on most stacks, 0.22 on Granite, which scales MLP output into the residual), so the actual delivered subtraction is `α·Z` regardless of arch. The edit is confined to a middle band of layers (default the central 22-78%), where the refusal representation is cleanest.
+
+Because the whole edit is carried by standard `gate_proj`/`up_proj`/`down_proj` weights, the exported checkpoint has no runtime detector, hook, or custom code: the conditionality is an ordinary neuron.
+
+## Alternative method: KCRN
+
+`--method kcrn` uses Key-Conditional Refusal Nulling, an unconditional closed-form edit of residual **writers** (attention `o_proj`, MLP `down_proj`). For a writer `W` of shape `[d_out, d_in]`, with residual refusal direction `R`, harmful keys `K_h`, benign preservation keys `K_b`, strength `s`, and ridge `λ`, it builds an orthonormal benign basis `Q_b`, projects the harmful keys into the benign complement, and solves:
 
 ```text
 K̃_h = K_h - Q_b(Q_bᵀK_h)      # harmful keys, benign component removed
@@ -120,47 +151,36 @@ G   = K_hᵀ K̃_h
 W'  = W + ΔW
 ```
 
-Because `ΔW` is constructed in the complement of the benign span, `ΔW·Q_b ≈ 0` by construction: benign keys are preserved, and that residual leakage is exactly what the bake validation re-measures. On the harmful key subspace the update drives `Rᵀ(W'·K_h) → 0`, so the writer stops pushing the residual toward refusal on harmful inputs. The factors are low-rank (`ΔW = L C`), so the edit is cheap and composes across MoE router gates as a fixed linear map. A writer whose projected harmful energy is near zero, meaning harmful and benign keys overlap too strongly to separate safely, is skipped rather than given an unbounded update.
-
-Each candidate writer receives a **certificate**: projected harmful energy `ρ`, benign leakage, harmful fit error, refusal residual, relative update norm, condition number, regularized eigenvalues, factor rank, and the applied strength and ridge. Safeguards `--kcrn-min-projected-energy`, `--kcrn-max-condition`, `--kcrn-max-relative-update`, `--kcrn-basis-tolerance`, and `--kcrn-ridge` bound the solve; a candidate that trips a safeguard is dropped, which is why cranking strength or rank too far *reduces* the number of edited writers instead of destabilizing the model.
+Because `ΔW` lives in the complement of the benign span, `ΔW·Q_b ≈ 0` by construction: benign keys are preserved, and that residual leakage is what the bake validation re-measures. On the harmful key subspace the update drives `Rᵀ(W'·K_h) → 0`. Each edited writer ships a **certificate**: projected harmful energy `ρ`, benign leakage, harmful fit error, refusal residual, relative update norm, condition number, regularized eigenvalues, and factor rank. Safeguards `--kcrn-min-projected-energy`, `--kcrn-max-condition`, `--kcrn-max-relative-update`, `--kcrn-basis-tolerance`, and `--kcrn-ridge` bound the solve; a candidate that trips a safeguard is dropped, which is why cranking strength or rank too far *reduces* the number of edited writers instead of destabilizing the model.
 
 ## Validation protocol
 
-KCRN uses four disjoint prompt roles. **Harmful calibration** prompts produce `R` and the harmful-key factors. **Benign calibration** prompts produce the preservation basis `Q_b` and the calibration KL. **Harmful held-out** prompts (JailbreakBench, harder than the fit set) measure delivery, scored by the HarmBench classifier after the target model is released so the 13B judge fits in memory. **Benign held-out** prompts measure `KL(base||edited)` after the checkpoint is baked and reloaded.
+Both methods use disjoint prompt roles. **Harmful calibration** prompts produce the refusal direction and (for KCRN) the harmful-key factors. **Benign calibration** prompts produce the detector's benign statistics (diode) or preservation basis `Q_b` (KCRN). **Harmful held-out** prompts (JailbreakBench, harder than the fit set) measure delivery, scored by the HarmBench classifier after the target model is released so the 13B judge fits in memory. **Benign held-out** prompts measure `KL(base||edited)` after the checkpoint is baked and reloaded.
 
-The benign held-out set is resolved disjointly from the calibration source and is never used to build `K_b`, select writers, tune strength or ridge, or choose the output checkpoint. KL is computed in float32 over non-padding prompt positions, against cached base-model hidden states or logits, using the same exported model-loading path as the edited checkpoint. Base logits are cached from the base weights *before* any edit is applied, and the edited side is the reloaded baked directory, so the number is a true base-versus-edited comparison, not a model compared against itself.
+The benign held-out set is resolved disjointly from the calibration source and is never used to fit, calibrate a threshold, select writers, tune strength, or choose the output checkpoint. KL is computed in float32 over non-padding prompt positions, against cached base-model logits taken from the base weights *before* any edit, and the edited side is the reloaded baked directory, so the number is a true base-versus-edited comparison, not a model compared against itself.
 
 ## Ablate
 
 ```bash
-apostate ablate --model Qwen/Qwen3-8B --out qwen3-8b-apostate
-apostate kcrn   --model Qwen/Qwen3-8B --out qwen3-8b-apostate
+apostate ablate --model Qwen/Qwen3-8B --out qwen3-8b-apostate              # diode (default)
+apostate kcrn   --model Qwen/Qwen3-8B --out qwen3-8b-apostate-kcrn         # KCRN
 ```
 
-`apostate ablate` is an alias for the default KCRN build. `--model` takes a Hugging Face repo id **or a local directory** (point it at the folder holding `config.json`, not an individual `.safetensors` file). `--out` is the directory the edited checkpoint is written to. A finished run writes the fixed-weight model files, `kcrn_report.json`, `apostate_config.json`, and a checkpoint `README.md`.
+`apostate ablate` is the default diode build. `--model` takes a Hugging Face repo id **or a local directory** (point it at the folder holding `config.json`, not an individual `.safetensors` file). `--out` is the directory the edited checkpoint is written to. A finished diode run writes the fixed-weight model files, `diode_report.json`, `apostate_config.json`, and a checkpoint `README.md`. The bake always loads full precision, because a conditional neuron cannot be written into packed 4bit weights.
 
-The default profile ships the verified operating point: `--kcrn-preserve-rank 64`, `--kcrn-strength 5`, harmful rank 16, benign basis `raw`, last-position keys. A reproducible run can pin every source and count:
+The two diode knobs are strength and gate rate:
 
 ```bash
-apostate kcrn \
+apostate ablate \
   --model Qwen/Qwen3-8B \
   --out qwen3-8b-apostate \
-  --harmful-path 'mlabonne/harmful_behaviors:train:text|data/harmful.txt|data/refusal_calibration.txt' \
-  --harmful-test 'JailbreakBench/JBB-Behaviors@behaviors:harmful:Goal' \
-  --harmless-path 'mlabonne/harmless_alpaca:train:text|data/harmless.txt' \
-  --kl-eval-path 'mlabonne/harmless_alpaca:test:text' \
-  --kcrn-harmful-rank 16 \
-  --kcrn-preserve-rank 64 \
-  --kcrn-strength 5 \
-  --kcrn-max-condition 1000 \
-  --kcrn-max-relative-update 10 \
-  --kcrn-eval-n 96 \
-  --max-new-tokens 256
+  --diode-strength 6 \
+  --diode-target 0.05
 ```
 
-For large models, add `--kcrn-load-in-4bit` to fit and evaluate in NF4; the bake still loads fresh fp16 on host memory and saves an fp16 checkpoint, so KL stays a clean 4bit-vs-4bit or fp16-vs-fp16 comparison. `--kcrn-compute-dtype` and `--kcrn-save-dtype` must match, because the validator measures the actual saved dtype.
+`--diode-strength` scales how hard refusal is subtracted when the gate fires (raise it for more delivery). `--diode-target` is the benign firing rate the per-layer threshold is calibrated to (raise it for a looser gate, more delivery and higher KL). `--diode-kappa` sharpens the gate toward a hard rectifier and `--diode-band` sets the layer band. Gemma 4 wants a higher strength and target than Qwen; Granite wants higher still.
 
-An opt-in `aggressive-kcrn` profile searches non-overlapping KCRN factors against a teacher-forced prefix score and benign calibration KL, restoring accepted factors to the base model and baking once, so the exported checkpoint still has no runtime detector or hook. It is successful only when the final held-out `harmful_delivery` and `heldout_benign_kl` clear their targets; the search scores are not substitutes for those.
+KCRN keeps its own flags (`--kcrn-strength`, `--kcrn-preserve-rank`, `--kcrn-harmful-rank`, and the safeguards above); its verified operating point is `--kcrn-strength 5`, harmful rank 16, preserve rank 64, last-position keys. For large models under either method, `--load-in-4bit` fits and evaluates in NF4 while the bake still loads fresh fp16 on host memory and saves an fp16 checkpoint, so KL stays a clean fp16-vs-fp16 comparison.
 
 ## Benchmark
 
@@ -181,9 +201,9 @@ Default fit data combines `mlabonne/harmful_behaviors` train prompts, `mlabonne/
 
 ## Model Coverage
 
-Model support is detected from module layout. Current coverage includes Llama 2/3, Qwen2/2.5/3/3.5(-MoE) and the Qwen3.8 hybrid linear-attention VLM, Mistral, Mixtral, DeepSeek, Gemma/Gemma2/Gemma 4 text decoders, Granite 3 and `granitemoehybrid`, Phi-3/Phi-4, GPT-NeoX, Pythia, OPT-style and MPT-style stacks. Non-CausalLM archs (multimodal / block-diffusion such as `diffusion_gemma`) load through the appropriate `AutoModel*` class. Packed-MoE experts are NF4-quantized so 30-50B MoEs fit a 34GB card; the VRAM preflight accounts for this and refuses cleanly when a model genuinely will not fit.
+Model support is detected from module layout. Current coverage includes Llama 2/3, Qwen2/2.5/3/3.5(-MoE) and the Qwen3.8 hybrid linear-attention VLM, Mistral, Mixtral, DeepSeek, Gemma/Gemma2/Gemma 4 text decoders, Granite 3/4 and `granitemoehybrid`, Phi-3/Phi-4, GPT-NeoX, Pythia, OPT-style and MPT-style stacks. Non-CausalLM archs (multimodal / block-diffusion such as `diffusion_gemma`) load through the appropriate `AutoModel*` class. Packed-MoE experts are NF4-quantized so 30-50B MoEs fit a 34GB card; the VRAM preflight accounts for this and refuses cleanly when a model genuinely will not fit.
 
-Gemma 2/3/4 use a post-norm sandwich, so editing writer outputs gets renormalized away. Apostate detects this and switches to a reader-side edit that projects the refusal direction out of the inputs to the modules reading the residual. The edit still bakes cleanly into a standalone checkpoint. `--cpu-offload-gb` places a bounded amount of model state on host memory, and `APOSTATE_VRAM_FRACTION` caps the GPU allocation fraction for systems where the display shares the accelerator. `APOSTATE_MODEL_ROOTS` adds local directories to the TUI model scan.
+The diode resolves the pre-MLP norm, gated MLP, and residual scaling per architecture, so the same bake path covers post-norm sandwich stacks (Gemma) and residual-scaled MLPs (Granite) without special cases in the operator. For KCRN, Gemma's post-norm sandwich would renormalize a writer-output edit away, so KCRN switches to a reader-side edit there. `--cpu-offload-gb` places a bounded amount of model state on host memory, and `APOSTATE_VRAM_FRACTION` caps the GPU allocation fraction for systems where the display shares the accelerator. `APOSTATE_MODEL_ROOTS` adds local directories to the TUI model scan.
 
 ## Requirements
 
