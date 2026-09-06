@@ -124,6 +124,23 @@ def _neuron_rows(cfg, rmul, detector_li, actuator_li, theta_li, cd_li, m_li, hid
     return gate, up, down
 
 
+def _pad_zero_neurons(mlp, n):
+    """Append n zero neurons to a gated MLP (identity behavior) to align intermediate_size, e.g. to a
+    multiple of 64 so 4-bit inference kernels stay on their fast, stable path."""
+    import torch.nn as nn
+    def rows(lin):
+        W = lin.weight.data
+        nw = nn.Linear(lin.in_features, lin.out_features + n, bias=False, dtype=W.dtype, device=W.device)
+        nw.weight.data[:lin.out_features] = W; nw.weight.data[lin.out_features:] = 0
+        return nw
+    def cols(lin):
+        W = lin.weight.data
+        nw = nn.Linear(lin.in_features + n, lin.out_features, bias=False, dtype=W.dtype, device=W.device)
+        nw.weight.data[:, :lin.in_features] = W; nw.weight.data[:, lin.in_features:] = 0
+        return nw
+    mlp.gate_proj = rows(mlp.gate_proj); mlp.up_proj = rows(mlp.up_proj); mlp.down_proj = cols(mlp.down_proj)
+
+
 def _grow(lin, row=None, col=None):
     """Append one output row (row) or input column (col) to a Linear, copying the originals unchanged."""
     import torch.nn as nn
@@ -173,6 +190,10 @@ def _bake(base, cfg, band, rmul, detector, actuator, theta, cd, m):
                 mlp.down_proj.weight[:, j].copy_(down.to(dev).to(mlp.down_proj.weight.dtype))
                 written += 1
     if cfg.diode_additive:
+        pad = (-ticv._gated_mlp(layers[0]).gate_proj.out_features) % 64   # align to a multiple of 64
+        if pad:
+            for layer in layers:
+                _pad_zero_neurons(ticv._gated_mlp(layer), pad)
         new_isize = ticv._gated_mlp(layers[0]).gate_proj.out_features
         dec = ticv._decoder(base.model)
         # set on the LM's own config (nested text_config on wrapped multimodal models) and top-level
