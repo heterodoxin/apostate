@@ -11,7 +11,7 @@ from pathlib import Path
 from transformers import AutoTokenizer
 
 from .config import ApostateConfig
-from .model import ModelBundle, _is_conv1d, _resolve_model_loader, model_metadata, set_config_value
+from .model import ModelBundle, _is_conv1d, _native_dtype, _resolve_model_loader, model_metadata, set_config_value
 
 _DTYPES = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}
 
@@ -205,10 +205,12 @@ def bake(
     save_dtype = _DTYPES[cfg.save_dtype]
 
     if model is None:
-        print("[bake] loading model for editing...", flush=True)
+        # Load in the checkpoint's native dtype so a bf16 source is not silently downcast to fp16.
+        load_dtype = _native_dtype(cfg.model) or save_dtype
+        print(f"[bake] loading model for editing ({load_dtype}) ...", flush=True)
         loader = _resolve_model_loader(cfg.model, trust_remote_code=True)
         model = loader.from_pretrained(
-            cfg.model, torch_dtype=save_dtype, low_cpu_mem_usage=True,
+            cfg.model, torch_dtype=load_dtype, low_cpu_mem_usage=True,
             device_map={"": "cpu"}, trust_remote_code=True,
         )
 

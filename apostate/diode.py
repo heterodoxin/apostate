@@ -11,8 +11,9 @@ from pathlib import Path
 
 import torch
 
+from transformers import AutoTokenizer
 from .config import ApostateConfig
-from .model import load_model, _safetensors_size_gb
+from .model import load_model, _safetensors_size_gb, _resolve_model_loader, _native_dtype, model_metadata, ModelBundle
 from .data import resolve_prompts, format_chat
 from .activations import collect_activations
 from . import ticv
@@ -114,28 +115,73 @@ def _fit(base, cfg, band):
     return detector, actuator, theta, cd, m
 
 
+def _neuron_rows(cfg, rmul, detector_li, actuator_li, theta_li, cd_li, m_li, hidden):
+    """The gate row, up row, and down column of one gated refusal-subtractor neuron."""
+    gate = (cfg.diode_kappa * detector_li).clone()
+    gate[cd_li] = gate[cd_li] - cfg.diode_kappa * theta_li / m_li
+    up = torch.zeros(hidden); up[cd_li] = 1.0
+    down = -(cfg.diode_strength / (cfg.diode_kappa * m_li * rmul)) * actuator_li
+    return gate, up, down
+
+
+def _grow(lin, row=None, col=None):
+    """Append one output row (row) or input column (col) to a Linear, copying the originals unchanged."""
+    import torch.nn as nn
+    W = lin.weight.data
+    if row is not None:
+        nw = nn.Linear(lin.in_features, lin.out_features + 1, bias=False, dtype=W.dtype, device=W.device)
+        nw.weight.data[:-1] = W
+        nw.weight.data[-1] = row.to(W.dtype).to(W.device)
+    else:
+        nw = nn.Linear(lin.in_features + 1, lin.out_features, bias=False, dtype=W.dtype, device=W.device)
+        nw.weight.data[:, :-1] = W
+        nw.weight.data[:, -1] = col.to(W.dtype).to(W.device)
+    return nw
+
+
 def _bake(base, cfg, band, rmul, detector, actuator, theta, cd, m):
-    """Write one gated refusal-subtractor neuron per band layer into the (dequantized) weights."""
+    """Write one gated refusal-subtractor neuron per band layer into the (dequantized) weights.
+
+    Overwrites the layer's last MLP neuron by default; with cfg.diode_additive it appends a NEW neuron
+    to every layer (band layers get the guard, others a zero neuron) so no original weight is touched.
+    """
     layers = ticv._decoder(base.model).layers
+    hidden = ticv._gated_mlp(layers[0]).gate_proj.in_features
     written = 0
     with torch.no_grad():
         for li, layer in enumerate(layers):
-            if li not in band or detector[li] is None or cd[li] is None:
-                continue
             try:
                 mlp = ticv._gated_mlp(layer)
             except Exception:
                 continue
-            dev = mlp.gate_proj.weight.device
-            gate = (cfg.diode_kappa * detector[li]).clone()
-            gate[cd[li]] = gate[cd[li]] - cfg.diode_kappa * theta[li] / m[li]
-            j = mlp.gate_proj.weight.shape[0] - 1
-            mlp.gate_proj.weight[j].copy_(gate.to(dev).to(mlp.gate_proj.weight.dtype))
-            mlp.up_proj.weight[j].zero_()
-            mlp.up_proj.weight[j, cd[li]] = 1.0
-            down = -(cfg.diode_strength / (cfg.diode_kappa * m[li] * rmul)) * actuator[li]
-            mlp.down_proj.weight[:, j].copy_(down.to(dev).to(mlp.down_proj.weight.dtype))
-            written += 1
+            active = li in band and detector[li] is not None and cd[li] is not None
+            if cfg.diode_additive:
+                gate = up = down = None
+                if active:
+                    gate, up, down = _neuron_rows(cfg, rmul, detector[li], actuator[li], theta[li], cd[li], m[li], hidden)
+                    written += 1
+                z = torch.zeros(hidden)
+                mlp.gate_proj = _grow(mlp.gate_proj, row=gate if gate is not None else z)
+                mlp.up_proj = _grow(mlp.up_proj, row=up if up is not None else z)
+                mlp.down_proj = _grow(mlp.down_proj, col=down if down is not None else z)
+            elif active:
+                gate, up, down = _neuron_rows(cfg, rmul, detector[li], actuator[li], theta[li], cd[li], m[li], hidden)
+                dev = mlp.gate_proj.weight.device
+                j = mlp.gate_proj.weight.shape[0] - 1
+                mlp.gate_proj.weight[j].copy_(gate.to(dev).to(mlp.gate_proj.weight.dtype))
+                mlp.up_proj.weight[j].copy_(up.to(dev).to(mlp.up_proj.weight.dtype))
+                mlp.down_proj.weight[:, j].copy_(down.to(dev).to(mlp.down_proj.weight.dtype))
+                written += 1
+    if cfg.diode_additive:
+        new_isize = ticv._gated_mlp(layers[0]).gate_proj.out_features
+        dec = ticv._decoder(base.model)
+        # set on the LM's own config (nested text_config on wrapped multimodal models) and top-level
+        for c in (getattr(dec, "config", None), base.model.config):
+            if c is not None and getattr(c, "intermediate_size", None) is not None:
+                c.intermediate_size = new_isize
+        for layer in layers:
+            if hasattr(layer.mlp, "intermediate_size"):
+                layer.mlp.intermediate_size = new_isize
     return written
 
 
@@ -184,6 +230,26 @@ for how you use it.
     (output / "README.md").write_text(text, encoding="utf-8")
 
 
+def _load_full_for_bake(cfg: ApostateConfig) -> "ModelBundle":
+    """Full model for the CPU bake with the vision tower and MTP head intact, in the native dtype.
+
+    load_model drops the vision tower to save VRAM (fine for fitting), but baking that model ships a
+    text-only, wrong-dtype checkpoint whose config needs a manual overlay to serve. Loading the whole
+    model here lets save_pretrained emit a complete, self-describing checkpoint the serving stack loads.
+    """
+    loader = _resolve_model_loader(cfg.model, trust_remote_code=True)
+    dtype = _native_dtype(cfg.model) or torch.bfloat16
+    model = loader.from_pretrained(
+        cfg.model, torch_dtype=dtype, low_cpu_mem_usage=True,
+        device_map={"": "cpu"}, trust_remote_code=True,
+    )
+    model.eval()
+    model.requires_grad_(False)
+    tok = AutoTokenizer.from_pretrained(cfg.model, trust_remote_code=True)
+    nl, hidden = model_metadata(model)
+    return ModelBundle(model=model, tokenizer=tok, num_layers=nl, hidden_size=hidden)
+
+
 def fit_and_bake(cfg: ApostateConfig, bundle=None) -> dict:
     """Fit the per-layer detectors and thresholds, write the gated neurons, and save the checkpoint."""
     cfg.with_defaults()
@@ -209,8 +275,7 @@ def fit_and_bake(cfg: ApostateConfig, bundle=None) -> dict:
 
     if two_phase:
         _release(base)
-        bake_cfg = dataclasses.replace(cfg, load_in_4bit=False, device="cpu", cpu_offload_gb=0)
-        base = load_model(bake_cfg)
+        base = _load_full_for_bake(cfg)
 
     written = _bake(base, cfg, band, rmul, detector, actuator, theta, cd, m)
     base.model.save_pretrained(cfg.output_dir, safe_serialization=True)
@@ -221,7 +286,7 @@ def fit_and_bake(cfg: ApostateConfig, bundle=None) -> dict:
         "band": [min(band), max(band)] if band else [], "residual_multiplier": rmul,
         "strength": cfg.diode_strength, "kappa": cfg.diode_kappa, "benign_fire_target": cfg.diode_target,
         "save_dtype": cfg.save_dtype, "two_phase_bake": two_phase, "runtime_hooks": False,
-        "deployment": "standard weights",
+        "additive": bool(cfg.diode_additive), "deployment": "standard weights",
     }
     out = Path(cfg.output_dir)
     (out / "diode_report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")

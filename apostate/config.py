@@ -166,6 +166,7 @@ class ApostateConfig:
     diode_target: float = 0.05
     diode_fit_n: int = 160
     diode_band: tuple = (0.22, 0.78)
+    diode_additive: bool = False  # non-destructive: append new gated neurons instead of overwriting existing ones
 
     kcrn_edits: Optional[str] = None
     kcrn_force: bool = False

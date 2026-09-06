@@ -599,6 +599,28 @@ def _safetensors_size_gb(model_id: str) -> float:
         return 0.0
 
 
+_ST_DTYPES = {"BF16": torch.bfloat16, "F16": torch.float16, "F32": torch.float32}
+
+
+def _native_dtype(model_id: str):
+    """The checkpoint's on-disk dtype, read from the first local safetensors header; None if unknown.
+    Preserving it keeps a bf16 source bf16 rather than downcasting to the compute/save dtype default."""
+    import glob, json, os, struct
+    try:
+        from huggingface_hub import snapshot_download
+        d = model_id if os.path.isdir(model_id) else snapshot_download(
+            model_id, allow_patterns=["*.safetensors"], local_files_only=True)
+        f = sorted(glob.glob(os.path.join(d, "*.safetensors")))
+        if not f:
+            return None
+        with open(f[0], "rb") as fh:
+            hdr = json.loads(fh.read(struct.unpack("<Q", fh.read(8))[0]))
+        seen = {v["dtype"] for k, v in hdr.items() if isinstance(v, dict) and "dtype" in v}
+        return _ST_DTYPES.get(next(iter(seen))) if len(seen) == 1 else None
+    except Exception:
+        return None
+
+
 def load_model(cfg: ApostateConfig) -> ModelBundle:
     torch.manual_seed(cfg.seed)
 

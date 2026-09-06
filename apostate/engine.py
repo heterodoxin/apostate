@@ -1078,11 +1078,16 @@ def _backoff_to_kl(bundle, controller, cfg, eval_harmful, eval_harmless):
 
 def _push_refusal_scale(bundle, controller, cfg, eval_harmful, eval_harmless):
     base = _alpha_state(controller)
-    best = None
+    # Seed with the incoming (refine) operating point so a push can only ever improve on it; otherwise,
+    # when every larger scale is worse, we would hand back a worse refusal/kl than we started with.
+    with controller.active():
+        base_ref = refusal_rate(bundle, eval_harmful, cfg.max_new_tokens, cfg.batch_size)
+    base_kl = kl_harmless(bundle, controller, eval_harmless, cfg.batch_size, positions=cfg.kl_positions)
+    best = (base_ref, base_kl, base, 1.0) if base_kl <= cfg.max_kl else None
     zero_over = None
     prev_scale = 1.0
     prev_ref = None
-    best_ref_seen = 1.0
+    best_ref_seen = base_ref
     no_improve = 0
     for scale in (1.10, 1.25, 1.40, 1.60, 1.85, 2.10):
         _scale_alpha_state(controller, base, scale)
