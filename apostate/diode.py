@@ -237,7 +237,13 @@ def _load_full_for_bake(cfg: ApostateConfig) -> "ModelBundle":
     text-only, wrong-dtype checkpoint whose config needs a manual overlay to serve. Loading the whole
     model here lets save_pretrained emit a complete, self-describing checkpoint the serving stack loads.
     """
-    loader = _resolve_model_loader(cfg.model, trust_remote_code=True)
+    # Load the model's own architecture class (e.g. Qwen3_5ForConditionalGeneration) so the vision
+    # tower and MTP head are kept. _resolve_model_loader prefers AutoModelForCausalLM, which on a
+    # wrapped multimodal model resolves to the text-only causal class and strips them.
+    import transformers as _tf
+    from transformers import AutoConfig
+    arch = (getattr(AutoConfig.from_pretrained(cfg.model, trust_remote_code=True), "architectures", None) or [None])[0]
+    loader = getattr(_tf, arch, None) or _resolve_model_loader(cfg.model, trust_remote_code=True)
     dtype = _native_dtype(cfg.model) or torch.bfloat16
     model = loader.from_pretrained(
         cfg.model, torch_dtype=dtype, low_cpu_mem_usage=True,
@@ -248,6 +254,48 @@ def _load_full_for_bake(cfg: ApostateConfig) -> "ModelBundle":
     tok = AutoTokenizer.from_pretrained(cfg.model, trust_remote_code=True)
     nl, hidden = model_metadata(model)
     return ModelBundle(model=model, tokenizer=tok, num_layers=nl, hidden_size=hidden)
+
+
+def _copy_dropped_tensors(model_id: str, out_dir: str) -> int:
+    """Copy source weights the loader class did not instantiate (e.g. a Qwen3.5 MTP head) into the
+    saved checkpoint, so a multimodal export is complete. Abliteration never touches these, so the
+    source copies are correct. No-op for single-shard (unindexed) or already-complete checkpoints."""
+    import glob, json, os
+    from safetensors import safe_open
+    from safetensors.torch import save_file
+    src = model_id
+    if not os.path.isdir(src):
+        try:
+            from huggingface_hub import snapshot_download
+            src = snapshot_download(src, allow_patterns=["*.safetensors", "*.json"], local_files_only=True)
+        except Exception:
+            return 0
+    oidxp = os.path.join(out_dir, "model.safetensors.index.json")
+    if not os.path.exists(oidxp):
+        return 0
+    oidx = json.load(open(oidxp)); saved = set(oidx["weight_map"])
+    missing = {}
+    for sh in sorted(glob.glob(os.path.join(src, "*.safetensors"))):
+        with safe_open(sh, framework="pt") as t:
+            ks = [k for k in t.keys() if k not in saved]
+            if ks:
+                missing[sh] = ks
+    keys = [k for ks in missing.values() for k in ks]
+    if not keys:
+        return 0
+    tensors = {}
+    for sh, ks in missing.items():
+        with safe_open(sh, framework="pt") as t:
+            for k in ks:
+                tensors[k] = t.get_tensor(k)
+    newshard = "model-extra-dropped.safetensors"
+    save_file(tensors, os.path.join(out_dir, newshard), metadata={"format": "pt"})
+    for k in keys:
+        oidx["weight_map"][k] = newshard
+    oidx.setdefault("metadata", {})["total_size"] = oidx.get("metadata", {}).get("total_size", 0) + os.path.getsize(os.path.join(out_dir, newshard))
+    json.dump(oidx, open(oidxp, "w"), indent=2)
+    print(f"[diode] copied {len(keys)} source tensors the loader dropped (e.g. MTP head) into the checkpoint", flush=True)
+    return len(keys)
 
 
 def fit_and_bake(cfg: ApostateConfig, bundle=None) -> dict:
@@ -280,6 +328,8 @@ def fit_and_bake(cfg: ApostateConfig, bundle=None) -> dict:
     written = _bake(base, cfg, band, rmul, detector, actuator, theta, cd, m)
     base.model.save_pretrained(cfg.output_dir, safe_serialization=True)
     tok.save_pretrained(cfg.output_dir)
+    if two_phase:  # full-model bake: restore any head the loader class did not instantiate (e.g. MTP)
+        _copy_dropped_tensors(cfg.model, cfg.output_dir)
 
     report = {
         "method": "diode", "model": cfg.model, "edited_layers": written, "num_layers": nl,
