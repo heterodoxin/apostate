@@ -326,7 +326,7 @@ def fit_and_bake(cfg: ApostateConfig, bundle=None) -> dict:
         base = _load_full_for_bake(cfg)
 
     written = _bake(base, cfg, band, rmul, detector, actuator, theta, cd, m)
-    base.model.save_pretrained(cfg.output_dir, safe_serialization=True)
+    base.model.save_pretrained(cfg.output_dir, safe_serialization=True, max_shard_size="5GB")
     tok.save_pretrained(cfg.output_dir)
     if two_phase:  # full-model bake: restore any head the loader class did not instantiate (e.g. MTP)
         _copy_dropped_tensors(cfg.model, cfg.output_dir)
