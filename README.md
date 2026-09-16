@@ -209,12 +209,15 @@ apostate prepare-quant \
 correct; the baked model grows by 255 because its real diode neuron is already the 17409th value. An
 exact gate refuses a matrix from the wrong base instead of zero-filling genuine channels.
 
-`--imatrix-source` accepts `mradermacher` or `bartowski`. Apostate lists the publisher's candidate
-repository, discovers its sole imatrix file, downloads it through `huggingface_hub`, and reuses
-`~/.cache/apostate/imatrix` thereafter. It never invents a remote filename: current publishers differ
-even for the same base (`Qwen3.8-27B.imatrix.gguf` versus `Qwen3.8-27B-imatrix.gguf`). Use
-`--imatrix /path/to/imatrix.gguf` instead for an existing or custom matrix; the local and automatic
-forms are mutually exclusive.
+`--imatrix-source` accepts `mradermacher` or `bartowski`. Apostate asks the Hub for the publisher's
+candidate repository, requires exactly one imatrix file, pins the commit it found, downloads that
+revision through `huggingface_hub`, and reuses `~/.cache/apostate/imatrix` thereafter. It never
+invents a remote filename: current publishers differ even for the same base
+(`Qwen3.8-27B.imatrix.gguf` versus `Qwen3.8-27B-imatrix.gguf`). The receipt records the repository,
+filename, pinned commit, and SHA-256 of the matrix that was actually used, and marks a cache hit as
+such with no commit, because a cached file cannot prove which revision produced it. An implausibly
+large remote matrix is refused rather than downloaded. Use `--imatrix /path/to/imatrix.gguf` for an
+existing or custom matrix; the local and automatic forms are mutually exclusive.
 
 Use `--dry-run` first. Automatic discovery may populate the imatrix cache, but no model, adapted
 matrix, or receipt is written. The command validates both artifacts before writing either output. It
@@ -229,12 +232,16 @@ The source must be an unquantized F32/F16/BF16 GGUF. Fused or ambiguous MLP layo
 than guessed. Each output path is first reserved with an exclusive create, so an existing file or a
 symlink is refused rather than followed, and the finished artifact is then committed with
 `os.replace`. That path needs no hard links, so it behaves the same on Windows and POSIX and on
-filesystems such as exFAT. A failure after the
-model is published removes the artifacts of that run, so an identical retry stays possible. A matrix
+filesystems such as exFAT. A failure after the model is published removes the artifacts of that run,
+so an identical retry stays possible. A matrix
 that already matches the target is still written to `--out-imatrix` as a provenance copy, so a
 successful exit never leaves a requested artifact missing. This path uses the public `gguf-py` API and
 unmodified llama.cpp; install the optional tooling with `python -m pip install -e ".[gguf]"` when it is
 not already available from a llama.cpp checkout.
+
+Both produced artifacts record the basename of their inputs, not absolute paths, because they are
+meant to be quantized and published. Full local paths stay in the receipt, which stays on the
+machine that ran the command.
 
 ## Benchmark
 

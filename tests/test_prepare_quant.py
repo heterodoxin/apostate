@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -235,18 +236,31 @@ def test_dry_run_writes_nothing(tmp_path: Path, capsys: pytest.CaptureFixture[st
     assert not out.exists()
 
 
+def _repo_info(files: dict[str, int], sha: str = "c0ffee"):
+    class Sibling:
+        def __init__(self, name: str, size: int):
+            self.rfilename, self.size = name, size
+
+    class Info:
+        def __init__(self):
+            self.sha = sha
+            self.siblings = [Sibling(name, size) for name, size in files.items()]
+
+    return Info()
+
 
 def test_bartowski_matrix_is_discovered_instead_of_assuming_one_filename(tmp_path: Path):
     attempts: list[str] = []
 
     class Api:
-        def list_repo_files(self, repo_id: str):
+        def repo_info(self, repo_id: str, **_kwargs):
             attempts.append(repo_id)
             if repo_id == "bartowski/Qwen3.8-27B-GGUF":
-                return ["README.md", "Qwen3.8-27B-imatrix.gguf"]
+                return _repo_info({"README.md": 10, "Qwen3.8-27B-imatrix.gguf": 4096})
             raise AssertionError(f"unexpected repository {repo_id}")
 
-    def download(*, repo_id: str, filename: str, local_dir: str):
+    def download(*, repo_id: str, filename: str, revision: str, local_dir: str):
+        assert revision == "c0ffee", "the download must be pinned to a resolved commit"
         destination = Path(local_dir) / filename
         destination.parent.mkdir(parents=True)
         destination.write_bytes(b"matrix")
@@ -258,11 +272,11 @@ def test_bartowski_matrix_is_discovered_instead_of_assuming_one_filename(tmp_pat
 
     assert path.read_bytes() == b"matrix"
     assert attempts == ["bartowski/Qwen3.8-27B-GGUF"]
-    assert provenance == {
-        "publisher": "bartowski",
-        "repository": "bartowski/Qwen3.8-27B-GGUF",
-        "filename": "Qwen3.8-27B-imatrix.gguf",
-    }
+    assert provenance["repository"] == "bartowski/Qwen3.8-27B-GGUF"
+    assert provenance["filename"] == "Qwen3.8-27B-imatrix.gguf"
+    assert provenance["revision"] == "c0ffee"
+    assert provenance["sha256"] == hashlib.sha256(b"matrix").hexdigest()
+    assert provenance["origin"] == "hub"
 
 
 def test_published_matrix_rejects_cache_path_traversal(tmp_path: Path):
@@ -278,7 +292,7 @@ def test_published_matrix_cache_avoids_a_hub_call(tmp_path: Path):
     cached.write_bytes(b"cached")
 
     class OfflineApi:
-        def list_repo_files(self, _repo_id: str):
+        def repo_info(self, *_args, **_kwargs):
             raise AssertionError("cache hit attempted a Hub request")
 
     path, provenance = prepare_quant.resolve_published_imatrix(
@@ -287,12 +301,32 @@ def test_published_matrix_cache_avoids_a_hub_call(tmp_path: Path):
 
     assert path == cached.resolve()
     assert provenance["repository"] == "mradermacher/Qwen3.8-27B-i1-GGUF"
+    assert provenance["origin"] == "cache"
+    assert provenance["revision"] is None, "a cached file cannot claim a verified commit"
+    assert provenance["sha256"] == hashlib.sha256(b"cached").hexdigest()
+
+
+def test_a_symlinked_cache_entry_is_ignored(tmp_path: Path):
+    cache = tmp_path / "mradermacher" / "Qwen3.8-27B-i1-GGUF"
+    cache.mkdir(parents=True)
+    outside = tmp_path / "elsewhere.imatrix.gguf"
+    outside.write_bytes(b"planted")
+    (cache / "imatrix.gguf").symlink_to(outside)
+
+    class Api:
+        def repo_info(self, *_args, **_kwargs):
+            raise LookupError("no such repository")
+
+    with pytest.raises(prepare_quant.PreparationRefused, match="no mradermacher imatrix"):
+        prepare_quant.resolve_published_imatrix(
+            "mradermacher", "Qwen/Qwen3.8-27B", tmp_path, api=Api(), downloader=lambda **_k: None
+        )
 
 
 def test_a_hostile_remote_filename_is_refused(tmp_path: Path):
     class Api:
-        def list_repo_files(self, _repo_id: str):
-            return ["../../escaped-imatrix.gguf"]
+        def repo_info(self, *_args, **_kwargs):
+            return _repo_info({"../../escaped-imatrix.gguf": 4096})
 
     def download(**_kwargs):
         raise AssertionError("download attempted for an unsafe remote filename")
@@ -303,13 +337,27 @@ def test_a_hostile_remote_filename_is_refused(tmp_path: Path):
         )
 
 
+def test_an_implausibly_large_remote_imatrix_is_refused(tmp_path: Path):
+    class Api:
+        def repo_info(self, *_args, **_kwargs):
+            return _repo_info({"imatrix.gguf": prepare_quant.IMATRIX_MAX_BYTES + 1})
+
+    def download(**_kwargs):
+        raise AssertionError("download attempted for an oversized file")
+
+    with pytest.raises(prepare_quant.PreparationRefused, match="too large"):
+        prepare_quant.resolve_published_imatrix(
+            "mradermacher", "Qwen/Qwen3.8-27B", tmp_path, api=Api(), downloader=download
+        )
+
+
 def test_a_download_outside_the_cache_is_refused(tmp_path: Path):
     outside = tmp_path / "outside.gguf"
     outside.write_bytes(b"matrix")
 
     class Api:
-        def list_repo_files(self, _repo_id: str):
-            return ["imatrix.gguf"]
+        def repo_info(self, *_args, **_kwargs):
+            return _repo_info({"imatrix.gguf": 4096})
 
     def download(**_kwargs):
         return str(outside)
@@ -318,6 +366,33 @@ def test_a_download_outside_the_cache_is_refused(tmp_path: Path):
         prepare_quant.resolve_published_imatrix(
             "mradermacher", "Qwen/Qwen3.8-27B", tmp_path, api=Api(), downloader=download
         )
+
+
+def test_artifacts_record_only_basenames_not_local_paths(tmp_path: Path):
+    source = _write_model(tmp_path / "source.gguf", BASE)
+    out = tmp_path / "padded.gguf"
+    prepare_quant.prepare_model(source, out, ALIGNED)
+
+    fields = {k: v.contents() for k, v in GGUFReader(str(out)).fields.items()}
+    recorded = fields["apostate.quant_preparation.source"]
+    assert recorded == "source.gguf"
+    assert str(tmp_path) not in str(recorded), "a published artifact must not carry local paths"
+
+
+def test_an_interrupted_run_leaves_an_explained_stub(tmp_path: Path):
+    source = _write_model(tmp_path / "source.gguf", BASE)
+    out = tmp_path / "padded.gguf"
+    out.touch()
+
+    with pytest.raises(prepare_quant.PreparationRefused, match="interrupted"):
+        prepare_quant.prepare_model(source, out, ALIGNED)
+
+
+def test_an_unwritable_output_directory_is_a_refusal_not_a_traceback(tmp_path: Path):
+    source = _write_model(tmp_path / "source.gguf", BASE)
+
+    with pytest.raises(prepare_quant.PreparationRefused, match="output directory"):
+        prepare_quant.prepare_model(source, tmp_path / "absent" / "padded.gguf", ALIGNED)
 
 
 def test_expect_append_must_match_exactly(tmp_path: Path):

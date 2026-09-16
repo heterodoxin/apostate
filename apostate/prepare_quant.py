@@ -13,6 +13,7 @@ payloads, so it streams source to destination and never creates a model-sized te
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -28,6 +29,9 @@ QK_K = 256
 _MODEL_TYPES = {"F32", "F16", "BF16"}
 _MLP_SUFFIXES = ("ffn_down.weight", "ffn_gate.weight", "ffn_up.weight")
 _BLOCK = re.compile(r"^blk\.(\d+)\.")
+# A published importance matrix for a 27B model is ~14 MB. A ceiling well above that still refuses a
+# repository that would turn one CLI flag into unbounded download and an in-memory copy.
+IMATRIX_MAX_BYTES = 1024 * 1024 * 1024
 
 
 class PreparationRefused(RuntimeError):
@@ -208,7 +212,9 @@ def _copy_model_metadata(writer: Any, fields: Mapping[str, Any], target_width: i
             writer.add_array(key, list(value))
         else:
             writer.add_key_value(key, value, _value_type(value))
-    writer.add_string("apostate.quant_preparation.source", str(source))
+    # The basename only: these artifacts exist to be quantized and published, so a full local path
+    # would disclose the operator's home layout. Full paths stay in the local receipt.
+    writer.add_string("apostate.quant_preparation.source", source.name)
     writer.add_uint32("apostate.quant_preparation.target_width", target_width)
     writer.add_uint32("apostate.quant_preparation.tensors", count)
     writer.add_string("apostate.quant_preparation.utc", datetime.now(timezone.utc).isoformat(timespec="seconds"))
@@ -251,8 +257,19 @@ def _new_stage(final: Path) -> Path:
     try:
         os.close(os.open(final, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644))
     except FileExistsError as error:
-        raise PreparationRefused(f"output already exists: {final}") from error
-    directory = Path(tempfile.mkdtemp(prefix=f".{final.name}.", dir=parent))
+        # A zero-length file is almost always our own reservation from a killed run. Saying so turns
+        # a confusing permanent refusal into an obvious one-line fix.
+        interrupted = final.is_file() and final.stat().st_size == 0
+        detail = "a previous run was interrupted; delete it to retry" if interrupted else "refusing to replace it"
+        raise PreparationRefused(f"output already exists: {final} ({detail})") from error
+    except OSError as error:
+        raise PreparationRefused(f"cannot create output {final}: {error}") from error
+    try:
+        directory = Path(tempfile.mkdtemp(prefix=f".{final.name}.", dir=parent))
+    except OSError as error:
+        # The reservation is already on disk, so it must not outlive a staging failure.
+        final.unlink(missing_ok=True)
+        raise PreparationRefused(f"cannot stage output beside {final}: {error}") from error
     return directory / final.name
 
 
@@ -298,9 +315,10 @@ def prepare_model(
     by_name = {item["tensor"]: item for item in plan["plan"]}
     architecture = str(_fields(reader).get("general.architecture", ""))
     stage = _new_stage(out)
-    writer = writer_type(str(stage), architecture)
+    writer = None
     stripped = 0
     try:
+        writer = writer_type(str(stage), architecture)
         _copy_model_metadata(writer, _fields(reader), target_width, source, len(by_name))
         for tensor in reader.tensors:
             array = _raw_tensor(tensor)
@@ -327,13 +345,16 @@ def prepare_model(
         _publish_stage(stage, out)
     except BaseException:
         try:
-            writer.close()
+            if writer is not None:
+                writer.close()
         finally:
             _discard_stage(stage, out)
         raise
     receipt["stripped_bytes_verified_zero"] = stripped
     receipt["out_bytes"] = out.stat().st_size
     return receipt
+
+
 def _publisher_repositories(publisher: str, base_model: str) -> list[str]:
     coordinates = base_model.strip().strip("/")
     segment = r"[A-Za-z0-9][A-Za-z0-9._-]*"
@@ -358,10 +379,21 @@ def _cached_imatrices(directory: Path) -> list[Path]:
         return []
     return sorted(
         path for path in directory.rglob("*")
-        if path.is_file()
+        # A symlink is skipped deliberately: the cache must describe what it holds, and following
+        # one would let a planted link be reported under the publisher's repository name.
+        if not path.is_symlink()
+        and path.is_file()
         and "imatrix" in path.name.lower()
         and (path.name.lower().endswith(".gguf") or path.name.lower().endswith(".imatrix"))
     )
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def _safe_remote_name(filename: str) -> str:
@@ -391,6 +423,11 @@ def resolve_published_imatrix(
                 "publisher": publisher,
                 "repository": repository,
                 "filename": local[0].relative_to(cache).as_posix(),
+                # A cached file cannot prove which commit produced it, so the receipt says so
+                # instead of implying an audit that never happened.
+                "revision": None,
+                "sha256": _sha256(local[0]),
+                "origin": "cache",
             }
         if len(local) > 1:
             raise PreparationRefused(
@@ -410,21 +447,34 @@ def resolve_published_imatrix(
     failures: list[str] = []
     for repository in repositories:
         try:
-            files = [
-                name for name in api.list_repo_files(repository)
-                if "imatrix" in Path(name).name.lower()
-                and (name.lower().endswith(".gguf") or name.lower().endswith(".imatrix"))
-            ]
+            info = api.repo_info(repository, files_metadata=True)
+            candidates = {
+                sibling.rfilename: getattr(sibling, "size", None)
+                for sibling in (getattr(info, "siblings", None) or [])
+                if "imatrix" in PurePosixPath(sibling.rfilename).name.lower()
+                and sibling.rfilename.lower().endswith((".gguf", ".imatrix"))
+            }
         except Exception as error:
             failures.append(f"{repository}: {type(error).__name__}")
             continue
-        if len(files) != 1:
-            reason = "no imatrix" if not files else f"{len(files)} imatrices"
+        if len(candidates) != 1:
+            reason = "no imatrix" if not candidates else f"{len(candidates)} imatrices"
             failures.append(f"{repository}: {reason}")
             continue
-        filename = _safe_remote_name(files[0])
+        name, size = next(iter(candidates.items()))
+        filename = _safe_remote_name(name)
+        if size is not None and int(size) > IMATRIX_MAX_BYTES:
+            raise PreparationRefused(
+                f"{repository}/{filename} is too large for an importance matrix "
+                f"({int(size)} bytes > {IMATRIX_MAX_BYTES}); pass --imatrix if this is genuinely wanted"
+            )
+        # Pin the commit the listing came from, so the receipt names a fixed artifact rather than
+        # whatever the branch happens to hold later.
+        revision = getattr(info, "sha", None)
         cache = root / publisher / repository.split("/", 1)[1]
-        downloaded = Path(downloader(repo_id=repository, filename=filename, local_dir=str(cache)))
+        downloaded = Path(
+            downloader(repo_id=repository, filename=filename, revision=revision, local_dir=str(cache))
+        )
         resolved = downloaded.resolve()
         if not resolved.is_relative_to(cache.resolve()):
             raise PreparationRefused(f"download landed outside the cache directory: {resolved}")
@@ -432,6 +482,9 @@ def resolve_published_imatrix(
             "publisher": publisher,
             "repository": repository,
             "filename": filename,
+            "revision": revision,
+            "sha256": _sha256(resolved),
+            "origin": "hub",
         }
     raise PreparationRefused(
         f"no {publisher} imatrix found for {base_model!r} ({'; '.join(failures)}); pass --imatrix"
@@ -545,11 +598,12 @@ def adapt_matrix(
     np, _types, _reader, _values, writer_type = _deps()
     by_name = {item["statistic"]: item for item in plan}
     stage = _new_stage(out)
-    writer = writer_type(str(stage), "")
+    writer = None
     try:
+        writer = writer_type(str(stage), "")
         _copy_matrix_metadata(writer, fields)
-        writer.add_string("apostate.quant_preparation.imatrix_from", str(imatrix))
-        writer.add_string("apostate.quant_preparation.target", str(target))
+        writer.add_string("apostate.quant_preparation.imatrix_from", imatrix.name)
+        writer.add_string("apostate.quant_preparation.target", target.name)
         writer.add_string("apostate.quant_preparation.appended_value", "zero")
         for name, values in tensors.items():
             item = by_name.get(name)
@@ -565,7 +619,8 @@ def adapt_matrix(
         _publish_stage(stage, out)
     except BaseException:
         try:
-            writer.close()
+            if writer is not None:
+                writer.close()
         finally:
             _discard_stage(stage, out)
         raise
