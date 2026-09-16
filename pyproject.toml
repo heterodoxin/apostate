@@ -10,6 +10,9 @@ requires-python = ">=3.10"
 dependencies = ["textual>=0.80"]
 
 # Heavy ML dependencies are installed separately
+[project.optional-dependencies]
+gguf = ["numpy", "gguf", "huggingface_hub"]
+
 
 [project.scripts]
 apostate = "apostate.__main__:main"
