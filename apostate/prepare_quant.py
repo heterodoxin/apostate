@@ -1,0 +1,760 @@
+"""Prepare an additive-diode BF16 GGUF and imatrix for stock llama.cpp quantization.
+
+The diode's appended neuron changes the MLP width from a quantization-friendly value such as
+17408 to 17409. Stock llama.cpp can load that model, but K-quant tensors whose first dimension is
+not divisible by 256 fall back to F16. A published importance matrix also retains the old width and
+llama.cpp rejects that mismatch.
+
+This command fixes both artifacts without modifying llama.cpp and without repeating HF-to-GGUF
+conversion. It rewrites the existing BF16 GGUF directly to the next declared width, then grows only
+the matching imatrix statistics with zeros. The model writer declares every tensor before writing
+payloads, so it streams source to destination and never creates a model-sized temporary spool.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+import tempfile
+from datetime import datetime, timezone
+from math import prod
+from pathlib import Path, PurePosixPath
+from typing import Any, Mapping, Sequence
+
+
+QK_K = 256
+_MODEL_TYPES = {"F32", "F16", "BF16"}
+_MLP_SUFFIXES = ("ffn_down.weight", "ffn_gate.weight", "ffn_up.weight")
+_BLOCK = re.compile(r"^blk\.(\d+)\.")
+
+
+class PreparationRefused(RuntimeError):
+    """The input cannot be transformed without guessing or losing weights."""
+
+
+def _deps():
+    try:
+        import numpy as np
+        from gguf import GGMLQuantizationType, GGUFReader, GGUFValueType, GGUFWriter
+    except ImportError as error:
+        raise PreparationRefused(
+            "GGUF preparation needs numpy and gguf-py; install llama.cpp's gguf package first"
+        ) from error
+    return np, GGMLQuantizationType, GGUFReader, GGUFValueType, GGUFWriter
+
+
+def _open(path: Path):
+    _np, _types, reader_type, _values, _writer = _deps()
+    if not path.is_file():
+        raise PreparationRefused(f"input does not exist: {path}")
+    try:
+        return reader_type(str(path))
+    except Exception as error:
+        raise PreparationRefused(f"cannot read {path} as GGUF: {error}") from error
+
+
+def _contents(field: Any) -> Any:
+    value = field.contents()
+    if hasattr(value, "tolist"):
+        return value.tolist()
+    return value
+
+
+def _fields(reader: Any) -> dict[str, Any]:
+    return {name: _contents(field) for name, field in reader.fields.items() if not name.startswith("GGUF.")}
+
+
+def _integer(value: Any, label: str) -> int:
+    try:
+        result = int(value)
+    except (TypeError, ValueError) as error:
+        raise PreparationRefused(f"{label} is not an integer: {value!r}") from error
+    if result <= 0:
+        raise PreparationRefused(f"{label} must be positive, got {result}")
+    return result
+
+
+def _declared_width(fields: Mapping[str, Any]) -> tuple[int, tuple[str, ...]]:
+    keys = tuple(name for name in fields if name.endswith(".feed_forward_length"))
+    if not keys:
+        raise PreparationRefused("model has no *.feed_forward_length metadata")
+    values: set[int] = set()
+    for key in keys:
+        value = fields[key]
+        if isinstance(value, (list, tuple)):
+            values.update(_integer(item, key) for item in value)
+        else:
+            values.add(_integer(value, key))
+    if len(values) != 1:
+        raise PreparationRefused(f"feed-forward metadata disagrees: {sorted(values)}")
+    return values.pop(), keys
+
+
+def _block_count(fields: Mapping[str, Any]) -> int | None:
+    values = [fields[name] for name in fields if name.endswith(".block_count")]
+    if not values:
+        return None
+    parsed = {_integer(value, "block_count") for value in values}
+    if len(parsed) != 1:
+        raise PreparationRefused(f"block-count metadata disagrees: {sorted(parsed)}")
+    return parsed.pop()
+
+
+def _is_draft(name: str, block_count: int | None) -> bool:
+    match = _BLOCK.match(name)
+    return block_count is not None and match is not None and int(match.group(1)) >= block_count
+
+
+def _tensor_ne(tensor: Any) -> tuple[int, ...]:
+    return tuple(int(value) for value in tensor.shape)
+
+
+def _raw_tensor(tensor: Any):
+    np, types, _reader, _values, _writer = _deps()
+    kind = tensor.tensor_type.name
+    if kind not in _MODEL_TYPES:
+        raise PreparationRefused(
+            f"{tensor.name} is {kind}; prepare the BF16/F16/F32 trunk before quantizing, not a quantized GGUF"
+        )
+    array = np.asarray(tensor.data)
+    if kind == "BF16" and array.dtype == np.uint8:
+        return np.ascontiguousarray(array).view(np.uint16)
+    return array
+
+
+def _model_plan(reader: Any, target_width: int) -> dict[str, Any]:
+    fields = _fields(reader)
+    source_width, width_keys = _declared_width(fields)
+    if source_width == target_width:
+        raise PreparationRefused(f"model is already {source_width} wide")
+    direction = "pad" if target_width > source_width else "strip"
+    if direction == "pad" and target_width % QK_K:
+        raise PreparationRefused(f"target width {target_width} is not a multiple of {QK_K}")
+    block_count = _block_count(fields)
+    plan: list[dict[str, Any]] = []
+    draft: list[str] = []
+    for tensor in reader.tensors:
+        array = _raw_tensor(tensor)
+        name = str(tensor.name)
+        matching_suffix = next((suffix for suffix in _MLP_SUFFIXES if name.endswith(suffix)), None)
+        if matching_suffix is None:
+            continue
+        if _is_draft(name, block_count):
+            draft.append(name)
+            continue
+        axes = [axis for axis, size in enumerate(array.shape) if int(size) == source_width]
+        if len(axes) != 1:
+            raise PreparationRefused(
+                f"{name} does not expose exactly one axis at declared width {source_width}; fused or expert layouts need an explicit implementation"
+            )
+        plan.append({
+            "tensor": name,
+            "axis": axes[0],
+            "before": source_width,
+            "after": target_width,
+            "dtype": str(array.dtype),
+        })
+    if not plan:
+        raise PreparationRefused("no decoder MLP tensors matched the declared feed-forward width")
+    suspicious = [
+        str(tensor.name) for tensor in reader.tensors
+        if "ffn" in str(tensor.name) and str(tensor.name).endswith(".weight")
+        and not _is_draft(str(tensor.name), block_count)
+        and not any(str(tensor.name).endswith(suffix) for suffix in _MLP_SUFFIXES)
+        and source_width in _tensor_ne(tensor)
+    ]
+    if suspicious:
+        raise PreparationRefused(
+            "unsupported MLP tensors would leave a mixed-width model: " + ", ".join(suspicious[:8])
+        )
+    return {
+        "source_width": source_width,
+        "target_width": target_width,
+        "direction": direction,
+        "feed_forward_length_keys": list(width_keys),
+        "tensors_resized": len(plan),
+        "draft_tensors_left_alone": sorted(draft),
+        "plan": plan,
+    }
+
+
+def _value_type(value: Any):
+    _np, _types, _reader, kinds, _writer = _deps()
+    if isinstance(value, bool):
+        return kinds.BOOL
+    if isinstance(value, int):
+        return kinds.UINT32 if 0 <= value < 2**32 else kinds.INT64
+    if isinstance(value, float):
+        return kinds.FLOAT32
+    if isinstance(value, str):
+        return kinds.STRING
+    raise PreparationRefused(f"cannot preserve metadata value {value!r} ({type(value).__name__})")
+
+
+def _copy_model_metadata(writer: Any, fields: Mapping[str, Any], target_width: int, source: Path, count: int) -> None:
+    if "general.alignment" in fields:
+        writer.add_custom_alignment(_integer(fields["general.alignment"], "general.alignment"))
+    for key, value in fields.items():
+        if key in ("general.alignment", "general.architecture"):
+            continue
+        if key.endswith(".feed_forward_length"):
+            if isinstance(value, (list, tuple)):
+                writer.add_array(key, [target_width] * len(value))
+            else:
+                writer.add_key_value(key, target_width, _value_type(value))
+        elif isinstance(value, (list, tuple)):
+            writer.add_array(key, list(value))
+        else:
+            writer.add_key_value(key, value, _value_type(value))
+    writer.add_string("apostate.quant_preparation.source", str(source))
+    writer.add_uint32("apostate.quant_preparation.target_width", target_width)
+    writer.add_uint32("apostate.quant_preparation.tensors", count)
+    writer.add_string("apostate.quant_preparation.utc", datetime.now(timezone.utc).isoformat(timespec="seconds"))
+
+
+def _resized(array: Any, item: Mapping[str, Any]) -> tuple[Any, int]:
+    np, _types, _reader, _values, _writer = _deps()
+    axis = int(item["axis"])
+    before, after = int(item["before"]), int(item["after"])
+    if after > before:
+        pads = [(0, 0)] * array.ndim
+        pads[axis] = (0, after - before)
+        return np.pad(array, pads, mode="constant"), 0
+    removed_slice = [slice(None)] * array.ndim
+    removed_slice[axis] = slice(after, before)
+    removed = array[tuple(removed_slice)]
+    if np.count_nonzero(removed):
+        raise PreparationRefused(f"{item['tensor']} has non-zero weights in the region that would be removed")
+    kept_slice = [slice(None)] * array.ndim
+    kept_slice[axis] = slice(0, after)
+    return np.ascontiguousarray(array[tuple(kept_slice)]), int(removed.nbytes)
+
+
+def _entry_exists(path: Path) -> bool:
+    return os.path.lexists(path)
+
+
+def _new_stage(final: Path) -> Path:
+    """Reserve the final path, then return a staged sibling path to write into.
+
+    The reservation is an exclusive create, so an existing file -- or a symlink, which is never
+    followed because ``O_EXCL`` fails on one -- is refused before any work happens. Publishing is
+    then ``os.replace`` of our own reservation, which is atomic on Windows and POSIX and needs no
+    hard-link support: ``os.link`` would fail on exFAT and rejects ``follow_symlinks=False`` on
+    Windows.
+    """
+    parent = final.parent
+    if not parent.is_dir():
+        raise PreparationRefused(f"output directory does not exist: {parent}")
+    try:
+        os.close(os.open(final, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644))
+    except FileExistsError as error:
+        raise PreparationRefused(f"output already exists: {final}") from error
+    directory = Path(tempfile.mkdtemp(prefix=f".{final.name}.", dir=parent))
+    return directory / final.name
+
+
+def _discard_stage(stage: Path, final: Path) -> None:
+    """Drop the staged file, its private directory, and the reservation we created."""
+    stage.unlink(missing_ok=True)
+    try:
+        stage.parent.rmdir()
+    except FileNotFoundError:
+        pass
+    final.unlink(missing_ok=True)
+
+
+def _publish_stage(stage: Path, final: Path) -> None:
+    try:
+        os.replace(stage, final)
+    finally:
+        stage.unlink(missing_ok=True)
+        try:
+            stage.parent.rmdir()
+        except FileNotFoundError:
+            pass
+
+
+def prepare_model(
+    source: Path | str,
+    out: Path | str,
+    target_width: int,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    source, out = Path(source), Path(out)
+    if source.resolve() == out.resolve():
+        raise PreparationRefused("the model rewrite never writes over its input")
+    if _entry_exists(out):
+        raise PreparationRefused(f"output already exists: {out}")
+    reader = _open(source)
+    plan = _model_plan(reader, target_width)
+    receipt = {"source": str(source), "out": str(out), **plan}
+    if dry_run:
+        return receipt
+
+    np, _types, _reader, _values, writer_type = _deps()
+    by_name = {item["tensor"]: item for item in plan["plan"]}
+    architecture = str(_fields(reader).get("general.architecture", ""))
+    stage = _new_stage(out)
+    writer = writer_type(str(stage), architecture)
+    stripped = 0
+    try:
+        _copy_model_metadata(writer, _fields(reader), target_width, source, len(by_name))
+        for tensor in reader.tensors:
+            array = _raw_tensor(tensor)
+            item = by_name.get(str(tensor.name))
+            shape = list(array.shape)
+            nbytes = int(array.nbytes)
+            if item is not None:
+                shape[int(item["axis"])] = target_width
+                nbytes = prod(shape) * int(array.dtype.itemsize)
+            writer.add_tensor_info(
+                str(tensor.name), shape, array.dtype, nbytes, raw_dtype=tensor.tensor_type
+            )
+        writer.write_header_to_file()
+        writer.write_kv_data_to_file()
+        writer.write_ti_data_to_file()
+        for tensor in reader.tensors:
+            array = _raw_tensor(tensor)
+            item = by_name.get(str(tensor.name))
+            if item is not None:
+                array, removed = _resized(array, item)
+                stripped += removed
+            writer.write_tensor_data(array)
+        writer.close()
+        _publish_stage(stage, out)
+    except BaseException:
+        try:
+            writer.close()
+        finally:
+            _discard_stage(stage, out)
+        raise
+    receipt["stripped_bytes_verified_zero"] = stripped
+    receipt["out_bytes"] = out.stat().st_size
+    return receipt
+def _publisher_repositories(publisher: str, base_model: str) -> list[str]:
+    coordinates = base_model.strip().strip("/")
+    segment = r"[A-Za-z0-9][A-Za-z0-9._-]*"
+    if re.fullmatch(rf"{segment}(/{segment})?", coordinates) is None:
+        raise PreparationRefused(
+            f"--base-model must be a valid owner/model or model name, got {base_model!r}"
+        )
+    model = coordinates.split("/")[-1]
+    if publisher == "mradermacher":
+        return [f"mradermacher/{model}-i1-GGUF"]
+    if publisher == "bartowski":
+        owner_model = coordinates.replace("/", "_")
+        return list(dict.fromkeys([
+            f"bartowski/{model}-GGUF",
+            f"bartowski/{owner_model}-GGUF",
+        ]))
+    raise PreparationRefused(f"unknown imatrix publisher {publisher!r}")
+
+
+def _cached_imatrices(directory: Path) -> list[Path]:
+    if not directory.is_dir():
+        return []
+    return sorted(
+        path for path in directory.rglob("*")
+        if path.is_file()
+        and "imatrix" in path.name.lower()
+        and (path.name.lower().endswith(".gguf") or path.name.lower().endswith(".imatrix"))
+    )
+
+
+def _safe_remote_name(filename: str) -> str:
+    """A repository-relative path that cannot escape the cache directory it is written into."""
+    candidate = PurePosixPath(filename)
+    if candidate.is_absolute() or ".." in candidate.parts or not candidate.name:
+        raise PreparationRefused(f"unsafe remote filename published by the repository: {filename!r}")
+    return str(candidate)
+
+
+def resolve_published_imatrix(
+    publisher: str,
+    base_model: str,
+    cache_root: Path | str,
+    *,
+    api: Any = None,
+    downloader: Any = None,
+) -> tuple[Path, dict[str, str]]:
+    """Discover one publisher's matrix, cache it, and return its exact Hub provenance."""
+    repositories = _publisher_repositories(publisher, base_model)
+    root = Path(cache_root).expanduser()
+    for repository in repositories:
+        cache = root / publisher / repository.split("/", 1)[1]
+        local = _cached_imatrices(cache)
+        if len(local) == 1:
+            return local[0].resolve(), {
+                "publisher": publisher,
+                "repository": repository,
+                "filename": local[0].relative_to(cache).as_posix(),
+            }
+        if len(local) > 1:
+            raise PreparationRefused(
+                f"{cache} holds more than one imatrix; pass --imatrix to select one"
+            )
+
+    if api is None or downloader is None:
+        try:
+            from huggingface_hub import HfApi, hf_hub_download
+        except ImportError as error:
+            raise PreparationRefused(
+                "automatic imatrix download needs huggingface_hub; install .[gguf] or pass --imatrix"
+            ) from error
+        api = api or HfApi()
+        downloader = downloader or hf_hub_download
+
+    failures: list[str] = []
+    for repository in repositories:
+        try:
+            files = [
+                name for name in api.list_repo_files(repository)
+                if "imatrix" in Path(name).name.lower()
+                and (name.lower().endswith(".gguf") or name.lower().endswith(".imatrix"))
+            ]
+        except Exception as error:
+            failures.append(f"{repository}: {type(error).__name__}")
+            continue
+        if len(files) != 1:
+            reason = "no imatrix" if not files else f"{len(files)} imatrices"
+            failures.append(f"{repository}: {reason}")
+            continue
+        filename = _safe_remote_name(files[0])
+        cache = root / publisher / repository.split("/", 1)[1]
+        downloaded = Path(downloader(repo_id=repository, filename=filename, local_dir=str(cache)))
+        resolved = downloaded.resolve()
+        if not resolved.is_relative_to(cache.resolve()):
+            raise PreparationRefused(f"download landed outside the cache directory: {resolved}")
+        return resolved, {
+            "publisher": publisher,
+            "repository": repository,
+            "filename": filename,
+        }
+    raise PreparationRefused(
+        f"no {publisher} imatrix found for {base_model!r} ({'; '.join(failures)}); pass --imatrix"
+    )
+
+
+
+
+def _matrix_data(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    np, _types, _reader, _values, _writer = _deps()
+    reader = _open(path)
+    fields = _fields(reader)
+    if fields.get("general.type") != "imatrix":
+        raise PreparationRefused(f"{path} is not an imatrix GGUF (general.type={fields.get('general.type')!r})")
+    tensors = {str(tensor.name): np.asarray(tensor.data).copy() for tensor in reader.tensors}
+    if not any(name.endswith(".in_sum2") for name in tensors):
+        raise PreparationRefused(f"{path} has no imatrix statistics")
+    return fields, tensors
+
+
+def _target_layouts(path: Path) -> dict[str, tuple[int, int]]:
+    reader = _open(path)
+    result: dict[str, tuple[int, int]] = {}
+    for tensor in reader.tensors:
+        ne = _tensor_ne(tensor)
+        result[str(tensor.name)] = (ne[0], ne[2] if len(ne) > 2 else 1)
+    return result
+
+
+def _matrix_plan(
+    matrix_tensors: Mapping[str, Any],
+    target_layouts: Mapping[str, tuple[int, int]],
+    expect_append: int | None,
+) -> list[dict[str, Any]]:
+    plan: list[dict[str, Any]] = []
+    for statistic, values in matrix_tensors.items():
+        if not statistic.endswith(".in_sum2"):
+            continue
+        tensor = statistic.removesuffix(".in_sum2")
+        if tensor not in target_layouts:
+            raise PreparationRefused(f"target model has no tensor {tensor!r} named by the imatrix")
+        ne0, ne2 = target_layouts[tensor]
+        if values.ndim == 1:
+            before, after, axis = int(values.size), ne0 * ne2, 0
+        elif values.ndim == 2 and int(values.shape[0]) == ne2:
+            before, after, axis = int(values.shape[1]), ne0, 1
+        else:
+            raise PreparationRefused(
+                f"imatrix entry {tensor} has unsupported shape {tuple(values.shape)} for target ne2={ne2}"
+            )
+        if after < before:
+            raise PreparationRefused(f"imatrix entry {tensor} is wider than the target model ({before} > {after})")
+        if after > before:
+            if ne0 % QK_K:
+                raise PreparationRefused(f"target width {ne0} for {tensor} is not a multiple of {QK_K}")
+            added = (after - before) * (ne2 if values.ndim == 2 else 1)
+            if expect_append is not None and added != expect_append:
+                raise PreparationRefused(
+                    f"{tensor} grows by {added}, which does not equal --expect-append {expect_append}"
+                )
+            plan.append({
+                "tensor": tensor,
+                "statistic": statistic,
+                "axis": axis,
+                "before": before,
+                "after": after,
+                "added": added,
+            })
+    return plan
+
+
+def _copy_matrix_metadata(writer: Any, fields: Mapping[str, Any]) -> None:
+    for key, value in fields.items():
+        if key == "general.architecture":
+            continue
+        if isinstance(value, (list, tuple)):
+            writer.add_array(key, list(value))
+        else:
+            writer.add_key_value(key, value, _value_type(value))
+
+
+def adapt_matrix(
+    imatrix: Path | str,
+    target: Path | str,
+    out: Path | str,
+    *,
+    expect_append: int | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    imatrix, target, out = Path(imatrix), Path(target), Path(out)
+    if imatrix.resolve() == out.resolve():
+        raise PreparationRefused("the imatrix rewrite never writes over its source")
+    if _entry_exists(out):
+        raise PreparationRefused(f"output already exists: {out}")
+    fields, tensors = _matrix_data(imatrix)
+    plan = _matrix_plan(tensors, _target_layouts(target), expect_append)
+    receipt: dict[str, Any] = {
+        "source": str(imatrix),
+        "target": str(target),
+        "out": str(out),
+        "entries_total": sum(name.endswith(".in_sum2") for name in tensors),
+        "entries_grown": len(plan),
+        "entries_added": sum(item["added"] for item in plan),
+        "plan": plan,
+    }
+    if not plan:
+        receipt["reason"] = "imatrix already matches the target; output is a provenance copy"
+    if dry_run:
+        return receipt
+
+    np, _types, _reader, _values, writer_type = _deps()
+    by_name = {item["statistic"]: item for item in plan}
+    stage = _new_stage(out)
+    writer = writer_type(str(stage), "")
+    try:
+        _copy_matrix_metadata(writer, fields)
+        writer.add_string("apostate.quant_preparation.imatrix_from", str(imatrix))
+        writer.add_string("apostate.quant_preparation.target", str(target))
+        writer.add_string("apostate.quant_preparation.appended_value", "zero")
+        for name, values in tensors.items():
+            item = by_name.get(name)
+            if item is not None:
+                padding = [(0, 0)] * values.ndim
+                padding[item["axis"]] = (0, item["after"] - item["before"])
+                values = np.pad(values, padding, mode="constant")
+            writer.add_tensor(name, values)
+        writer.write_header_to_file()
+        writer.write_kv_data_to_file()
+        writer.write_tensors_to_file()
+        writer.close()
+        _publish_stage(stage, out)
+    except BaseException:
+        try:
+            writer.close()
+        finally:
+            _discard_stage(stage, out)
+        raise
+
+    _ignored_fields, written = _matrix_data(out)
+    remaining = _matrix_plan(written, _target_layouts(target), None)
+    if remaining:
+        out.unlink(missing_ok=True)
+        raise PreparationRefused("adapted imatrix still does not match the target model")
+    receipt["out_bytes"] = out.stat().st_size
+    return receipt
+
+
+def _planned_target_layouts(
+    reader: Any, model_plan: Mapping[str, Any]
+) -> dict[str, tuple[int, int]]:
+    """Imatrix layouts after applying a model plan, without creating the target GGUF."""
+    layouts: dict[str, tuple[int, int]] = {}
+    resized = {item["tensor"]: item for item in model_plan["plan"]}
+    for tensor in reader.tensors:
+        name = str(tensor.name)
+        ne = _tensor_ne(tensor)
+        ne0 = ne[0]
+        ne2 = ne[2] if len(ne) > 2 else 1
+        item = resized.get(name)
+        if item is not None and name.endswith("ffn_down.weight"):
+            ne0 = int(item["after"])
+        layouts[name] = (ne0, ne2)
+    return layouts
+
+
+def _matrix_preview(
+    imatrix: Path,
+    out: Path,
+    target: Path,
+    target_layouts: Mapping[str, tuple[int, int]],
+    expect_append: int | None,
+) -> dict[str, Any]:
+    if imatrix.resolve() == out.resolve():
+        raise PreparationRefused("the imatrix rewrite never writes over its source")
+    if _entry_exists(out):
+        raise PreparationRefused(f"output already exists: {out}")
+    _fields_value, tensors = _matrix_data(imatrix)
+    plan = _matrix_plan(tensors, target_layouts, expect_append)
+    preview: dict[str, Any] = {
+        "source": str(imatrix),
+        "target": str(target),
+        "out": str(out),
+        "entries_total": sum(name.endswith(".in_sum2") for name in tensors),
+        "entries_grown": len(plan),
+        "entries_added": sum(item["added"] for item in plan),
+        "plan": plan,
+    }
+    if not plan:
+        preview["reason"] = "imatrix already matches the target"
+    return preview
+
+
+def _check_receipt_path(receipt: Path, args: Any, resolved_imatrix: Path | None) -> None:
+    """A receipt is metadata: it may never land on an input or on a produced artifact."""
+    candidates = [args.model, args.out_model, args.out_imatrix, resolved_imatrix]
+    for other in candidates:
+        if other is not None and Path(other).expanduser().resolve() == receipt.expanduser().resolve():
+            raise PreparationRefused(f"receipt path collides with {other}")
+    if _entry_exists(receipt):
+        raise PreparationRefused(f"receipt already exists: {receipt}")
+
+
+def _write_receipt(path: Path, document: Mapping[str, Any]) -> None:
+    """Publish the receipt without replacing anything that already exists at its path."""
+    if _entry_exists(path):
+        raise PreparationRefused(f"receipt already exists: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    stage = _new_stage(path)
+    try:
+        stage.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        _publish_stage(stage, path)
+    except BaseException:
+        _discard_stage(stage, path)
+        raise
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="apostate prepare-quant",
+        description="Align an additive-diode BF16 GGUF and its imatrix for stock llama.cpp.",
+    )
+    parser.add_argument("--model", type=Path, required=True, help="unaligned BF16/F16/F32 GGUF")
+    parser.add_argument("--out-model", type=Path, required=True, help="aligned GGUF to create")
+    parser.add_argument("--to", type=int, required=True, help="target MLP width (normally the next multiple of 256)")
+    matrix_source = parser.add_mutually_exclusive_group()
+    matrix_source.add_argument("--imatrix", type=Path, help="local published imatrix to adapt")
+    matrix_source.add_argument(
+        "--imatrix-source",
+        choices=("mradermacher", "bartowski"),
+        help="discover and cache the base model's published imatrix",
+    )
+    parser.add_argument("--base-model", help="owner/model coordinates used with --imatrix-source")
+    parser.add_argument(
+        "--imatrix-cache",
+        type=Path,
+        default=Path("~/.cache/apostate/imatrix"),
+        help="published imatrix cache (default: ~/.cache/apostate/imatrix)",
+    )
+    parser.add_argument("--out-imatrix", type=Path, help="adapted imatrix to create")
+    parser.add_argument("--expect-append", type=int, help="exact statistic growth; catches a wrong base matrix")
+    parser.add_argument("--dry-run", action="store_true", help="validate and print the model plan without writing")
+    parser.add_argument("--receipt", type=Path, help="write the combined JSON receipt here")
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    has_matrix = args.imatrix is not None or args.imatrix_source is not None
+    if has_matrix != (args.out_imatrix is not None):
+        parser.error("--out-imatrix is required with --imatrix or --imatrix-source")
+    if args.imatrix_source is not None and not args.base_model:
+        parser.error("--base-model is required with --imatrix-source")
+    try:
+        source_reader = _open(args.model)
+        model_plan = _model_plan(source_reader, args.to)
+        if args.model.resolve() == args.out_model.resolve():
+            raise PreparationRefused("the model rewrite never writes over its input")
+        if _entry_exists(args.out_model):
+            raise PreparationRefused(f"output already exists: {args.out_model}")
+        model_preview = {"source": str(args.model), "out": str(args.out_model), **model_plan}
+        resolved_imatrix = args.imatrix
+        source_provenance = None
+        if args.imatrix_source is not None:
+            resolved_imatrix, source_provenance = resolve_published_imatrix(
+                args.imatrix_source, args.base_model, args.imatrix_cache
+            )
+        elif args.imatrix is not None:
+            source_provenance = {"publisher": "local", "path": str(args.imatrix)}
+        matrix_preview = None
+        if resolved_imatrix is not None:
+            matrix_preview = _matrix_preview(
+                resolved_imatrix,
+                args.out_imatrix,
+                args.out_model,
+                _planned_target_layouts(source_reader, model_plan),
+                args.expect_append,
+            )
+        if args.receipt is not None:
+            _check_receipt_path(args.receipt, args, resolved_imatrix)
+
+        created: list[Path] = []
+        if args.dry_run:
+            model, matrix = model_preview, matrix_preview
+        else:
+            try:
+                model = prepare_model(args.model, args.out_model, args.to)
+                created.append(args.out_model)
+                matrix = None
+                if resolved_imatrix is not None:
+                    matrix = adapt_matrix(
+                        resolved_imatrix,
+                        args.out_model,
+                        args.out_imatrix,
+                        expect_append=args.expect_append,
+                    )
+                    created.append(args.out_imatrix)
+            except BaseException:
+                # A half-prepared pair is worse than none: the no-overwrite rule would then block
+                # the identical retry that would have produced both artifacts.
+                for path in created:
+                    path.unlink(missing_ok=True)
+                raise
+        document = {
+            "schema": "apostate.quant-preparation.v1",
+            "dry_run": args.dry_run,
+            "model": model,
+            "imatrix": matrix,
+            "imatrix_source": source_provenance,
+        }
+        if args.receipt is not None and not args.dry_run:
+            try:
+                _write_receipt(args.receipt, document)
+            except BaseException:
+                for path in created:
+                    path.unlink(missing_ok=True)
+                raise
+        print(json.dumps(document, indent=2, sort_keys=True))
+        return 0
+    except PreparationRefused as error:
+        print(f"prepare-quant: refused: {error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

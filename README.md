@@ -183,6 +183,59 @@ apostate ablate \
 
 KCRN keeps its own flags (`--kcrn-strength`, `--kcrn-preserve-rank`, `--kcrn-harmful-rank`, and the safeguards above); its verified operating point is `--kcrn-strength 5`, harmful rank 16, preserve rank 64, last-position keys. For large models under either method, `--load-in-4bit` fits and evaluates in NF4 while the bake still loads fresh fp16 on host memory and saves an fp16 checkpoint, so KL stays a clean fp16-vs-fp16 comparison.
 
+## Quantize an additive diode with stock llama.cpp
+
+An additive diode appends one MLP neuron, so a base width such as 17408 becomes 17409. That width is
+not divisible by llama.cpp's 256-element K-quant block: stock `llama-quantize` warns and stores affected
+tensors as F16. A base-model importance matrix also has 17408 statistics for those tensors and is
+rejected against the wider model.
+
+Convert the baked Hugging Face checkpoint to an unquantized BF16 GGUF once, then prepare the model and
+matrix together:
+
+```bash
+apostate prepare-quant \
+  --model qwen-diode-bf16.gguf \
+  --out-model qwen-diode-bf16-mlp17664.gguf \
+  --to 17664 \
+  --imatrix-source mradermacher \
+  --base-model Qwen/Qwen3.8-27B \
+  --out-imatrix qwen-diode-mlp17664.imatrix.gguf \
+  --expect-append 256 \
+  --receipt quant-preparation.json
+```
+
+`--expect-append` must equal the growth exactly. The base matrix grows from 17408 to 17664, so 256 is
+correct; the baked model grows by 255 because its real diode neuron is already the 17409th value. An
+exact gate refuses a matrix from the wrong base instead of zero-filling genuine channels.
+
+`--imatrix-source` accepts `mradermacher` or `bartowski`. Apostate lists the publisher's candidate
+repository, discovers its sole imatrix file, downloads it through `huggingface_hub`, and reuses
+`~/.cache/apostate/imatrix` thereafter. It never invents a remote filename: current publishers differ
+even for the same base (`Qwen3.8-27B.imatrix.gguf` versus `Qwen3.8-27B-imatrix.gguf`). Use
+`--imatrix /path/to/imatrix.gguf` instead for an existing or custom matrix; the local and automatic
+forms are mutually exclusive.
+
+Use `--dry-run` first. Automatic discovery may populate the imatrix cache, but no model, adapted
+matrix, or receipt is written. The command validates both artifacts before writing either output. It
+pads only the decoder MLP tensors, leaves a GGUF draft/MTP block at its original width, appends zero
+importance to only the statistics that grew, and records provenance in both the artifacts and receipt.
+The model rewrite declares the final tensor table first and then streams each payload directly from
+source to destination; it does not make a model-sized temporary spool or repeat the multi-hour
+HF-to-GGUF conversion. The reverse operation (`--to` the unaligned width) strips only
+a region proven to contain all zeros, which provides a BF16-against-BF16 inertness baseline.
+
+The source must be an unquantized F32/F16/BF16 GGUF. Fused or ambiguous MLP layouts are refused rather
+than guessed. Each output path is first reserved with an exclusive create, so an existing file or a
+symlink is refused rather than followed, and the finished artifact is then committed with
+`os.replace`. That path needs no hard links, so it behaves the same on Windows and POSIX and on
+filesystems such as exFAT. A failure after the
+model is published removes the artifacts of that run, so an identical retry stays possible. A matrix
+that already matches the target is still written to `--out-imatrix` as a provenance copy, so a
+successful exit never leaves a requested artifact missing. This path uses the public `gguf-py` API and
+unmodified llama.cpp; install the optional tooling with `python -m pip install -e ".[gguf]"` when it is
+not already available from a llama.cpp checkout.
+
 ## Benchmark
 
 The benchmark path is built into the TUI. Open `apostate`, choose `Test`, pick the edited model and base model, then use the suite selector. Space toggles a suite and Enter runs the selected set. Suites are `humaneval`, `mbpp`, `gsm8k`, `refusal`, or `all`. The refusal suite uses `protectai/distilroberta-base-rejection-v1` by default; `--judge keyword` uses keyword scoring. Output is written to `benchcode.json` and `benchcode.md` and merged into the candidate report when present.

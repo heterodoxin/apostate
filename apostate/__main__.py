@@ -25,6 +25,7 @@ apostate kcrn   --model M --out D   build a projected fixed-weight KCRN checkpoi
 apostate ticv   --model D --out D2  bake soft-deflection removal (TICV) into an abliterated checkpoint
 apostate finetune --model M --out D [--data path.jsonl] [--steps N]  QLoRA finetune (train alias)
 apostate test   --model D --base M  benchmark (--suite humaneval,mbpp,gsm8k,refusal,all)
+apostate prepare-quant --model M.gguf --out-model M-aligned.gguf --to N [--imatrix I --out-imatrix O]
 apostate talk   --model D [--backend vllm]   chat
 apostate list       show cached hf models + local checkpoints
 """
@@ -109,6 +110,8 @@ def main(argv=None) -> int:
         return run_module(["-m", "apostate.benchcode", *args], f"apostate test {' '.join(args)}".strip())
     if cmd == "talk":
         return run_module(["-m", "apostate.chat", *args], f"apostate talk {' '.join(args)}".strip())
+    if cmd == "prepare-quant":
+        return run_module(["-m", "apostate.prepare_quant", *args], f"apostate prepare-quant {' '.join(args)}".strip())
     if cmd == "quantize":
         return run_module(["-m", "apostate.quant", *args])
     if cmd in ("train", "finetune"):
