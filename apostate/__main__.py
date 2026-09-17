@@ -31,6 +31,10 @@ apostate convert-tree --tree D --out M.gguf [--with-mtp] [--pad-mlp-to N] [--no-
 apostate quantize-gguf --source M.gguf --out Q.gguf --quantization Q4_K_M [--imatrix I] [--tensor-type name:TYPE] [--mtp-quantization T] [--quantizer PATH]
 apostate quantize-tree --tree D --out Q.gguf --quantization Q4_K_M [--mtp-quantization T] [--export-mmproj [--mmproj-source D] [--mmproj-quantization F16|Q8_0]] [--imatrix I | --imatrix-source mradermacher --base-model O/M] [--quantizer PATH]
 apostate list       show cached hf models + local checkpoints
+
+llama.cpp tools (llama-quantize, convert_hf_to_gguf.py) resolve from a flag first, then a variable, then PATH:
+  APOSTATE_LLAMA_QUANTIZE     path to llama-quantize       (--quantizer)
+  APOSTATE_LLAMA_CPP_SOURCE   llama.cpp checkout           (--llama-cpp-source)
 """
 
 

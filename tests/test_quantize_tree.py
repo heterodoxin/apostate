@@ -448,13 +448,15 @@ def test_export_mmproj_without_a_converter_names_both_places(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], quantizer: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """The fork bundles no llama.cpp: the refusal has to say where the converter could come from."""
-    monkeypatch.setattr(quantize_tree.shutil, "which", lambda _name: None)
+    monkeypatch.delenv(quantize_gguf.LLAMA_CPP_SOURCE_VARIABLE, raising=False)
+    monkeypatch.setattr(quantize_gguf.shutil, "which", lambda _name: None)
     _tree(tmp_path / "tree", vision=True)
 
     code, err = _invoke(capsys, _base(tmp_path, quantizer) + ["--export-mmproj"])
 
     assert code == 1
     assert "--llama-cpp-source" in err and "PATH" in err
+    assert quantize_gguf.LLAMA_CPP_SOURCE_VARIABLE in err, "the third mechanism is the one being asked for"
 
 
 def test_a_text_only_projector_source_is_refused_by_name(
@@ -584,6 +586,9 @@ def test_the_chain_converts_grows_quantizes_and_writes_one_receipt(
         {"pin": "output.weight:Q6_K", "origin": "--tensor-type"},
         {"pin": f"blk.{DRAFT_INDEX}.*:Q8_0", "origin": "--mtp-quantization"},
     ]
+    assert document["quantize"]["quantizer"] == {
+        "path": str(quantizer), "resolved_by": "--quantizer",
+    }, "the receipt names the binary that ran and which mechanism chose it"
     grown = Path(argv[argv.index("--imatrix") + 1])
     assert grown.name == "bake-Q4_K_M.imatrix.gguf"
     assert argv[-2:] == ["q4_k_m", "0"]
@@ -673,7 +678,9 @@ def test_export_mmproj_writes_the_f16_projector_and_the_hybrid_from_it(
     leg = document["mmproj"]
 
     assert code == 0
-    assert leg["converter"] == "convert_hf_to_gguf.py"
+    assert leg["converter"] == {
+        "path": str(converter / "convert_hf_to_gguf.py"), "resolved_by": "--llama-cpp-source",
+    }
     assert leg["f16"] == f16.name and leg["hybrid"] == hybrid.name
     assert leg["recipe"] == {"mechanism": "tensor-type-file", "entries": 3, "q8_0": 1}
     assert leg["quantize_argv"][-4:] == [str(f16), str(hybrid), "q8_0", "0"]
@@ -704,6 +711,128 @@ def test_export_mmproj_f16_is_the_deliverable_and_needs_no_recipe(
     assert leg["f16"] == f16.name and leg["hybrid"] is None and leg["recipe"] is None
     assert "quantize_argv" not in leg
     assert f16.exists()
+
+
+# --- the two llama.cpp tools: flag, variable, PATH ------------------------------------------------------
+
+
+def test_the_quantizer_variable_is_honoured_without_a_flag(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], quantizer: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """One variable, no flag: the machine names its llama-quantize and the receipt says which did."""
+    _tree(tmp_path / "tree")
+    monkeypatch.setenv(quantize_gguf.QUANTIZER_VARIABLE, str(quantizer))
+
+    code = quantize_tree.main([
+        "--tree", str(tmp_path / "tree"), "--out", str(tmp_path / "out.gguf"),
+        "--quantization", "Q4_K_M",
+        "--imatrix", str(_matrix(tmp_path / "published.imatrix.gguf", WIDTH)),
+        "--dry-run",
+    ])
+    plan = _printed(capsys.readouterr().out)
+
+    assert code == 0
+    assert plan["quantize"]["quantizer"] == {
+        "path": str(quantizer), "resolved_by": quantize_gguf.QUANTIZER_VARIABLE,
+    }
+    assert plan["quantize"]["argv"][0] == str(quantizer)
+
+
+def test_the_quantizer_flag_beats_the_variable(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], quantizer: Path, monkeypatch: pytest.MonkeyPatch
+):
+    named = tmp_path / "named.llama-quantize"
+    named.write_text("", encoding="utf-8")
+    _tree(tmp_path / "tree")
+    monkeypatch.setenv(quantize_gguf.QUANTIZER_VARIABLE, str(named))
+
+    code = quantize_tree.main(_base(tmp_path, quantizer) + ["--dry-run"])
+    plan = _printed(capsys.readouterr().out)
+
+    assert code == 0
+    assert plan["quantize"]["quantizer"] == {"path": str(quantizer), "resolved_by": "--quantizer"}
+
+
+def test_the_converter_variable_is_honoured_and_recorded(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], quantizer: Path, converter: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """`APOSTATE_LLAMA_CPP_SOURCE` mirrors `--llama-cpp-source`, checkout and all."""
+    _tree(tmp_path / "tree", vision=True)
+    monkeypatch.setenv(quantize_gguf.LLAMA_CPP_SOURCE_VARIABLE, str(converter))
+
+    code = quantize_tree.main(_base(tmp_path, quantizer) + ["--export-mmproj", "--dry-run"])
+    plan = _printed(capsys.readouterr().out)
+
+    assert code == 0
+    assert plan["mmproj"]["converter"] == {
+        "path": str(converter / "convert_hf_to_gguf.py"),
+        "resolved_by": quantize_gguf.LLAMA_CPP_SOURCE_VARIABLE,
+    }
+
+
+def test_the_checkout_flag_beats_the_converter_variable(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], quantizer: Path, converter: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "convert_hf_to_gguf.py").write_text("", encoding="utf-8")
+    _tree(tmp_path / "tree", vision=True)
+    monkeypatch.setenv(quantize_gguf.LLAMA_CPP_SOURCE_VARIABLE, str(elsewhere))
+
+    code = quantize_tree.main(
+        _base(tmp_path, quantizer) + ["--export-mmproj", "--llama-cpp-source", str(converter), "--dry-run"]
+    )
+    plan = _printed(capsys.readouterr().out)
+
+    assert code == 0
+    assert plan["mmproj"]["converter"] == {
+        "path": str(converter / "convert_hf_to_gguf.py"), "resolved_by": "--llama-cpp-source",
+    }
+
+
+def test_an_empty_converter_variable_counts_as_unset(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], quantizer: Path, converter: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Whitespace is a shell accident, not an instruction: PATH answers instead."""
+    on_path = converter / "convert_hf_to_gguf.py"
+    _tree(tmp_path / "tree", vision=True)
+    monkeypatch.setattr(quantize_gguf.shutil, "which", lambda _name: str(on_path))
+    monkeypatch.setenv(quantize_gguf.LLAMA_CPP_SOURCE_VARIABLE, "   ")
+
+    code = quantize_tree.main(_base(tmp_path, quantizer) + ["--export-mmproj", "--dry-run"])
+    plan = _printed(capsys.readouterr().out)
+
+    assert code == 0
+    assert plan["mmproj"]["converter"] == {"path": str(on_path), "resolved_by": "PATH"}
+
+
+def test_a_converter_variable_that_holds_no_converter_is_refused_not_fallen_through(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], quantizer: Path, converter: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A wrong checkout is refused by name, even though PATH holds a converter that would have run.
+
+    The PATH answer here is the fixture's real, runnable `convert_hf_to_gguf.py`, so a fallthrough would
+    have succeeded and produced a projector: the refusal is the proof it was not taken.
+    """
+    empty = tmp_path / "empty-checkout"
+    empty.mkdir()
+    _tree(tmp_path / "tree", vision=True)
+    monkeypatch.setattr(
+        quantize_gguf.shutil, "which", lambda _name: str(converter / "convert_hf_to_gguf.py")
+    )
+    monkeypatch.setenv(quantize_gguf.LLAMA_CPP_SOURCE_VARIABLE, str(empty))
+
+    code, err = _invoke(capsys, _base(tmp_path, quantizer) + ["--export-mmproj"])
+
+    assert code == 1
+    assert quantize_gguf.LLAMA_CPP_SOURCE_VARIABLE in err, err
+    assert str(empty) in err, err
+    assert "--llama-cpp-source" in err and "PATH" in err, "the refusal names all three mechanisms"
+    assert not (tmp_path / "out-mmproj-F16.gguf").exists()
 
 
 def test_an_existing_receipt_is_never_overwritten(
