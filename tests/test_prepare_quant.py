@@ -236,6 +236,78 @@ def test_combined_command_preflights_matrix_before_writing_model(
     assert not padded.exists()
 
 
+def test_matrix_only_mode_grows_a_matrix_for_an_already_aligned_model(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    """The common bake: `convert-tree` already padded the MLP, so only the matrix has anything to grow.
+
+    A published matrix is `base`-wide; an aligned trunk is not. Before this mode existed the only route
+    was to re-convert the whole tree with `--no-pad` to hand this command something broken to repair.
+    """
+    aligned = _write_model(tmp_path / "aligned.gguf", ALIGNED)
+    matrix = _write_imatrix(tmp_path / "published.imatrix.gguf", BASE)
+    out = tmp_path / "aligned.imatrix.gguf"
+
+    code = prepare_quant.main([
+        "--model", str(aligned),
+        "--imatrix", str(matrix),
+        "--out-imatrix", str(out),
+        "--allow-unweighted",
+    ])
+
+    assert code == 0, capsys.readouterr().err
+    assert out.exists()
+    assert _payloads(out)["blk.0.ffn_down.weight.in_sum2"].shape == (1, ALIGNED)
+
+
+def test_out_model_on_an_already_aligned_model_names_the_flag_that_resolves_it(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    """Nothing to repair is not an error, but asking for a repair of nothing is worth explaining."""
+    aligned = _write_model(tmp_path / "aligned.gguf", ALIGNED)
+    matrix = _write_imatrix(tmp_path / "published.imatrix.gguf", BASE)
+
+    code = prepare_quant.main([
+        "--model", str(aligned),
+        "--out-model", str(tmp_path / "repaired.gguf"),
+        "--imatrix", str(matrix),
+        "--out-imatrix", str(tmp_path / "aligned.imatrix.gguf"),
+    ])
+
+    assert code == 1
+    assert "Drop --out-model" in capsys.readouterr().err
+
+
+def test_an_unaligned_model_without_out_model_is_refused_not_skipped(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    """The dangerous reading of a matrix-only request: silently adapting a matrix for a model whose MLP
+    was never padded, which would ship the F16 fallback and a matrix that agrees with it."""
+    source = _write_model(tmp_path / "source.gguf", BASE)
+    matrix = _write_imatrix(tmp_path / "published.imatrix.gguf", BASE)
+
+    code = prepare_quant.main([
+        "--model", str(source),
+        "--imatrix", str(matrix),
+        "--out-imatrix", str(tmp_path / "adapted.imatrix.gguf"),
+    ])
+
+    assert code == 1
+    assert "--out-model is required" in capsys.readouterr().err
+
+
+def test_a_matrix_only_request_without_a_matrix_is_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    """`--model` plus nothing else has no work to do, and saying so beats writing no output silently."""
+    aligned = _write_model(tmp_path / "aligned.gguf", ALIGNED)
+
+    code = prepare_quant.main(["--model", str(aligned)])
+
+    assert code == 1
+    assert "nothing to do" in capsys.readouterr().err
+
+
 def test_dry_run_writes_nothing(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
     source = _write_model(tmp_path / "source.gguf", BASE)
     out = tmp_path / "padded.gguf"
