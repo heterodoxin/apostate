@@ -208,18 +208,31 @@ apostate convert-tree \
   --receipt qwen-diode-conversion.json
 ```
 
-`apostate prepare-quant` remains for an already-converted, unaligned BF16/F16/F32 GGUF. It pads the model
-and grows a published imatrix in one transaction. A published matrix has no draft-MTP statistics: the tool
-refuses that silent unweighted quantization unless `--allow-unweighted` explicitly records the choice.
+`apostate prepare-quant` repairs an already-converted, unaligned BF16/F16/F32 GGUF: it pads the model and
+grows a published imatrix in one transaction. When the model needs no repair — a tree that
+`convert-tree` already padded — omit `--out-model` and only the matrix is grown, with no model rewrite.
+
+A published matrix is written against the *base* model, so it carries no statistics for an additive draft
+(MTP) head. The run **proceeds** and names every tensor that will be quantized without weighted rounding in
+its receipt (`unweighted_draft_tensors`); pass `--refuse-unweighted` when the absence is itself the signal,
+i.e. a matrix collected from this model that should have covered the draft head.
 
 ```bash
+# the model still needs repair
 apostate prepare-quant \
   --model legacy-diode-bf16.gguf \
   --out-model legacy-diode-bf16-mlp17664.gguf \
   --imatrix-source mradermacher \
   --base-model Qwen/Qwen3.8-27B \
   --out-imatrix legacy-diode-mlp17664.imatrix.gguf \
-  --allow-unweighted \
+  --receipt quant-preparation.json
+
+# the model is already padded (the common case for a bake): grow the matrix only
+apostate prepare-quant \
+  --model qwen-diode-bf16-mlp17664.gguf \
+  --imatrix-source mradermacher \
+  --base-model Qwen/Qwen3.8-27B \
+  --out-imatrix qwen-diode-mlp17664.imatrix.gguf \
   --receipt quant-preparation.json
 ```
 
@@ -240,6 +253,34 @@ apostate quantize-gguf \
 The external command is printed before it runs; `--dry-run` prints it without invoking llama.cpp. Explicit
 `--tensor-type name:TYPE` pins are supported. Apostate does not yet ship Bartowski/Mradermacher's
 family-keyed override tables, so it does not claim automatic recipe parity.
+
+### One call from a bake's tree to a quantized GGUF
+
+The steps above are the pieces; `quantize-tree` runs them in order and writes one receipt for the whole
+chain — the tree and its index hash, the width decision, the matrix's publisher/revision/sha256 and its
+growth, the exact `llama-quantize` argv, the tensor-type pins, the unweighted draft tensors, and the
+output's hash and size.
+
+```bash
+apostate quantize-tree --tree qwen-diode-hf --out M-Q4_K_M.gguf --quantization Q4_K_M \
+                       --mtp-quantization Q8_0 \
+                       --imatrix-source mradermacher --base-model Qwen/Qwen3.8-27B \
+                       --receipt M-quantization.json
+```
+
+- **MTP is included by default** when the tree holds `mtp.*` (`--no-mtp` excludes it). `--mtp-quantization
+  Q8_0` pins the draft block with `--tensor-type blk.<draft>.*=Q8_0`, computed from the model's own
+  metadata and then **checked against the converted file's tensors** — a pin that names nothing is refused,
+  because llama-quantize accepts such a recipe silently. The block's 1-D norms stay F32, which is
+  llama.cpp's rule for 1-D tensors.
+- **Vision** is exported with llama.cpp's own converter: `--export-mmproj` (with `--mmproj-source` when the
+  baked tree is text-only) writes `<Model>-mmproj-F16.gguf` after preflighting the vision source, and
+  `--mmproj-quantization Q8_0` reproduces the hybrid rule as `<Model>-mmproj-hybrid-Q8_0-F16.gguf`.
+- `--dry-run` prints the whole plan — the width decision, the resolved matrix, the pins, the composed
+  argv — and writes nothing.
+- Refusals rather than downgrades: a base with no resolvable matrix is refused unless `--no-imatrix` says
+  you want a static build, and `--mtp-quantization` on a tree with no draft head is refused rather than
+  ignored.
 
 ## Benchmark
 
