@@ -786,6 +786,20 @@ def _elements(shape: Sequence[int]) -> int:
     return count
 
 
+
+
+def reserve_output(out: Path) -> Path:
+    """Claim a final path before conversion so a peer cannot publish over it."""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    reservation = out.with_name(f".{out.name}.apostate-reservation")
+    if out.exists():
+        raise ConversionRefused(f"{out} already exists; refusing to replace it")
+    try:
+        with reservation.open("x", encoding="utf-8") as handle:
+            handle.write(f"pid={os.getpid()}\n")
+    except FileExistsError as error:
+        raise ConversionRefused(f"{out} is reserved by another conversion: {reservation}") from error
+    return reservation
 def convert(
     tree: Path | str,
     out: Path | str,
@@ -835,10 +849,8 @@ def convert(
     if dry_run:
         return receipt
 
-    if out.exists():
-        raise ConversionRefused(f"{out} already exists; refusing to replace it")
+    reservation = reserve_output(out)
     started = time.time()
-    out.parent.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix=f".{out.name}.", dir=out.parent)) / out.name
     writer = None
     try:
@@ -877,8 +889,9 @@ def convert(
                 stage.parent.rmdir()
             except OSError:
                 pass
-            out.unlink(missing_ok=True)
+            reservation.unlink(missing_ok=True)
         raise
+    reservation.unlink(missing_ok=True)
     receipt.seconds = time.time() - started
     return receipt
 
@@ -901,6 +914,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.receipt is not None and not args.dry_run and args.receipt.exists():
+        print(f"convert-tree: receipt already exists: {args.receipt}", file=sys.stderr)
+        return 2
     try:
         receipt = convert(
             args.tree, args.out, pad_mlp_to=args.pad_mlp_to, with_mtp=args.with_mtp,
@@ -913,7 +929,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     document["dry_run"] = args.dry_run
     if args.receipt is not None and not args.dry_run:
         args.receipt.parent.mkdir(parents=True, exist_ok=True)
-        args.receipt.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        with args.receipt.open("x", encoding="utf-8") as handle:
+            handle.write(json.dumps(document, indent=2, sort_keys=True) + "\n")
     if not args.dry_run:
         print(
             f"convert-tree: {receipt.tensors} tensors, MLP {receipt.source_width} -> "

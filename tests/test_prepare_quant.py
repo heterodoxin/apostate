@@ -132,7 +132,7 @@ def test_imatrix_adaptation_grows_only_matching_statistics(tmp_path: Path):
     out = tmp_path / "adapted.imatrix.gguf"
 
     receipt = prepare_quant.adapt_matrix(
-        matrix, target, out, expect_append=ALIGNED - BASE
+        matrix, target, out, expect_append=ALIGNED - BASE, allow_unweighted=True
     )
 
     tensors = _payloads(out)
@@ -141,6 +141,15 @@ def test_imatrix_adaptation_grows_only_matching_statistics(tmp_path: Path):
     assert np.count_nonzero(tensors["blk.0.ffn_down.weight.in_sum2"][:, BASE:]) == 0
     assert tensors["blk.0.attn_q.weight.in_sum2"].shape == (1, HIDDEN)
 
+
+def test_imatrix_adaptation_refuses_an_unweighted_draft_by_default(tmp_path: Path):
+    source = _write_model(tmp_path / "source.gguf", BASE)
+    target = tmp_path / "padded.gguf"
+    prepare_quant.prepare_model(source, target, ALIGNED)
+    matrix = _write_imatrix(tmp_path / "source.imatrix.gguf", BASE)
+
+    with pytest.raises(prepare_quant.PreparationRefused, match="allow-unweighted"):
+        prepare_quant.adapt_matrix(matrix, target, tmp_path / "adapted.imatrix.gguf")
 
 def test_one_command_prepares_model_and_matrix_with_receipt(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
     source = _write_model(tmp_path / "source.gguf", BASE)
@@ -155,6 +164,7 @@ def test_one_command_prepares_model_and_matrix_with_receipt(tmp_path: Path, caps
         "--to", str(ALIGNED),
         "--imatrix", str(matrix),
         "--out-imatrix", str(adapted),
+        "--allow-unweighted",
         "--expect-append", str(ALIGNED - BASE),
         "--receipt", str(receipt),
     ])
@@ -188,6 +198,7 @@ def test_one_command_can_resolve_a_published_matrix(
         "--to", str(ALIGNED),
         "--imatrix-source", "mradermacher",
         "--base-model", "Qwen/Qwen3.8-27B",
+        "--allow-unweighted",
         "--out-imatrix", str(tmp_path / "adapted.imatrix.gguf"),
         "--expect-append", str(ALIGNED - BASE),
     ])
@@ -407,7 +418,8 @@ def test_expect_append_must_match_exactly(tmp_path: Path):
 
     with pytest.raises(prepare_quant.PreparationRefused, match="does not equal"):
         prepare_quant.adapt_matrix(
-            matrix, target, tmp_path / "adapted.gguf", expect_append=ALIGNED - BASE
+            matrix, target, tmp_path / "adapted.gguf", expect_append=ALIGNED - BASE,
+            allow_unweighted=True,
         )
 
 
@@ -416,7 +428,7 @@ def test_matching_imatrix_still_creates_the_requested_output(tmp_path: Path):
     matrix = _write_imatrix(tmp_path / "matching.imatrix.gguf", ALIGNED)
     out = tmp_path / "copied.imatrix.gguf"
 
-    receipt = prepare_quant.adapt_matrix(matrix, target, out)
+    receipt = prepare_quant.adapt_matrix(matrix, target, out, allow_unweighted=True)
 
     assert receipt["entries_grown"] == 0
     assert out.exists()
@@ -490,4 +502,3 @@ def test_published_output_is_a_plain_file_on_any_filesystem(
 
     assert out.is_file() and not out.is_symlink()
     assert out.stat().st_nlink == 1
-

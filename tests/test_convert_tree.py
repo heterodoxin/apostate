@@ -425,3 +425,25 @@ def test_a_refusal_exits_two_and_names_itself(tmp_path: Path, capsys):
 
     assert code == 2
     assert "convert-tree:" in capsys.readouterr().err
+
+def test_the_cli_refuses_to_overwrite_a_receipt(tmp_path: Path, tree: Path, capsys):
+    receipt = tmp_path / "receipt.json"
+    receipt.write_text("preserve me", encoding="utf-8")
+
+    code = convert_tree.main(["--tree", str(tree), "--out", str(tmp_path / "model.gguf"), "--receipt", str(receipt)])
+
+    assert code == 2
+    assert receipt.read_text(encoding="utf-8") == "preserve me"
+
+
+def test_the_cli_refuses_an_output_reserved_by_another_conversion(tmp_path: Path, tree: Path, capsys):
+    out = tmp_path / "model.gguf"
+    reservation = out.with_name(f".{out.name}.apostate-reservation")
+    reservation.write_text("other conversion", encoding="utf-8")
+
+    code = convert_tree.main(["--tree", str(tree), "--out", str(out)])
+
+    assert code == 2
+    assert not out.exists()
+    assert reservation.read_text(encoding="utf-8") == "other conversion"
+    assert "reserved" in capsys.readouterr().err
