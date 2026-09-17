@@ -344,6 +344,7 @@ Python 3.10+, Torch (CUDA or ROCm), Transformers, Accelerate, Datasets, Safetens
 
 Thanks to the people who have helped make Apostate better:
 
+- **nmorgowicz** for adding quant support to diode
 - **dreamfast** for benchmarking Apostate and adding Docker support.
 - **erm14254** for the packed-MoE expert compatibility shim.
 - **MelodicRecognition7** for detailed setup feedback: the missing `accelerate` dependency note, how to point at a local model, and the TUI / quantization edge cases.
