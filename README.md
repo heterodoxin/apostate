@@ -276,6 +276,11 @@ apostate quantize-tree --tree qwen-diode-hf --out M-Q4_K_M.gguf --quantization Q
 - **Vision** is exported with llama.cpp's own converter: `--export-mmproj` (with `--mmproj-source` when the
   baked tree is text-only) writes `<Model>-mmproj-F16.gguf` after preflighting the vision source, and
   `--mmproj-quantization Q8_0` reproduces the hybrid rule as `<Model>-mmproj-hybrid-Q8_0-F16.gguf`.
+- **Both llama.cpp tools are located, not bundled.** `llama-quantize` resolves from `PATH`, or from
+  `--quantizer /path/to/llama-quantize`; the vision export's `convert_hf_to_gguf.py` resolves from `PATH`,
+  or from `--llama-cpp-source /path/to/llama.cpp` (the checkout that holds it). Neither resolving is a
+  refusal that names the flag, never a fallback to a bundled copy — Apostate ships no llama.cpp source or
+  binaries, which is also why the quantize step is the only part of this chain that is not Python here.
 - `--dry-run` prints the whole plan — the width decision, the resolved matrix, the pins, the composed
   argv — and writes nothing.
 - Refusals rather than downgrades: a base with no resolvable matrix is refused unless `--no-imatrix` says
