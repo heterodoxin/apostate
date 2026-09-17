@@ -99,17 +99,6 @@ def _block_count(fields: Mapping[str, Any]) -> int | None:
     return _shared_block_count(fields, _integer, PreparationRefused)
 
 
-def _computed_width(reader: Any) -> int:
-    """The width to align to, computed from the model's own declaration -- never typed in.
-
-    An additive bake leaves `intermediate_size` at `base + 1`, which is 1 mod the k-quant block, so the
-    repair is the *next* multiple. Making a caller pass `--to 17664` is how a run ends up aligned to a
-    width that does not match the model it is padding, so the arithmetic lives here.
-    """
-    source_width, _keys = _declared_width(_fields(reader))
-    return aligned_width(source_width)
-
-
 def _draft_threshold(fields: Mapping[str, Any]) -> int | None:
     """The shared rule, refused as this command's own error."""
     return _shared_draft_threshold(fields, _integer, PreparationRefused)
@@ -751,7 +740,13 @@ def build_parser() -> argparse.ArgumentParser:
         description="Align an additive-diode BF16 GGUF and its imatrix for stock llama.cpp.",
     )
     parser.add_argument("--model", type=Path, required=True, help="unaligned BF16/F16/F32 GGUF")
-    parser.add_argument("--out-model", type=Path, required=True, help="aligned GGUF to create")
+    parser.add_argument(
+        "--out-model",
+        type=Path,
+        help="aligned GGUF to create. Omit it when the model needs no repair -- a tree converted by "
+             "`convert-tree` is already padded -- and only its imatrix has to be grown, which is the "
+             "common case for a bake",
+    )
     parser.add_argument(
         "--to",
         type=int,
@@ -794,13 +789,42 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--base-model is required with --imatrix-source")
     try:
         source_reader = _open(args.model)
-        target_width = args.to if args.to is not None else _computed_width(source_reader)
-        model_plan = _model_plan(source_reader, target_width)
-        if args.model.resolve() == args.out_model.resolve():
+        source_width, _width_keys = _declared_width(_fields(source_reader))
+        target_width = args.to if args.to is not None else aligned_width(source_width)
+        # Two accepted shapes, and each refusal names the flag that resolves it. A model the *tree
+        # conversion* already padded needs no repair: its MLP is at a block multiple and the only thing
+        # left to grow is the published matrix, which is why `--out-model` is optional. Requiring it
+        # there would be the reason an operator re-converts a 27B tree with `--no-pad` purely to hand
+        # this command something broken to fix.
+        already_aligned = source_width == target_width
+        if already_aligned and args.out_model is not None:
+            raise PreparationRefused(
+                f"{args.model} already declares {source_width}, which is a multiple of {QK_K}; there is "
+                "no width to repair. Drop --out-model to grow the imatrix against it, or pass --to to ask "
+                "for a different width"
+            )
+        if not already_aligned and args.out_model is None:
+            raise PreparationRefused(
+                f"{args.model} declares {source_width}, which is not a multiple of {QK_K}: the MLP has to "
+                f"be padded to {target_width} first, so --out-model is required. (A tree converted by "
+                "`convert-tree` is padded in the same pass and needs none of this.)"
+            )
+        if already_aligned and not has_matrix:
+            raise PreparationRefused(
+                "the model needs no repair and no imatrix was requested, so there is nothing to do; pass "
+                "--imatrix or --imatrix-source to grow a matrix, or --to to pad further"
+            )
+        model_plan = None if already_aligned else _model_plan(source_reader, target_width)
+        target_model = args.out_model or args.model
+        if model_plan is not None and args.model.resolve() == target_model.resolve():
             raise PreparationRefused("the model rewrite never writes over its input")
-        if _entry_exists(args.out_model):
+        if args.out_model is not None and _entry_exists(args.out_model):
             raise PreparationRefused(f"output already exists: {args.out_model}")
-        model_preview = {"source": str(args.model), "out": str(args.out_model), **model_plan}
+        model_preview = (
+            {"source": str(args.model), "out": str(args.out_model), **model_plan}
+            if model_plan is not None
+            else None
+        )
         resolved_imatrix = args.imatrix
         source_provenance = None
         if args.imatrix_source is not None:
@@ -814,8 +838,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             matrix_preview = _matrix_preview(
                 resolved_imatrix,
                 args.out_imatrix,
-                args.out_model,
-                _planned_target_layouts(source_reader, model_plan),
+                target_model,
+                # With no repair the target's layout is the model's own, so the plan is empty and every
+                # statistic is checked against the widths the file already declares.
+                _planned_target_layouts(source_reader, model_plan or {"plan": []}),
                 args.expect_append,
             )
         if args.receipt is not None:
@@ -826,13 +852,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             model, matrix = model_preview, matrix_preview
         else:
             try:
-                model = prepare_model(args.model, args.out_model, args.to)
-                created.append(args.out_model)
+                model = None
+                if model_plan is not None:
+                    model = prepare_model(args.model, args.out_model, args.to)
+                    created.append(args.out_model)
                 matrix = None
                 if resolved_imatrix is not None:
                     matrix = adapt_matrix(
                         resolved_imatrix,
-                        args.out_model,
+                        target_model,
                         args.out_imatrix,
                         expect_append=args.expect_append,
                         allow_unweighted=args.allow_unweighted,
