@@ -1,4 +1,4 @@
-"""Convert a Qwen3.5/3.8-family safetensors tree straight to BF16 GGUF, with the diode's width fixed.
+"""Convert a safetensors tree straight to BF16 GGUF, with the diode's width fixed.
 
 `apostate prepare-quant` starts from a GGUF that already exists. A bake does not produce one: it produces
 an HF tree whose `intermediate_size` is `base + 1` (17408 -> 17409 on Qwen3.8-27B), which no k-quant
@@ -14,23 +14,15 @@ dtype conversion at all**. Upstream routes bf16 -> float32 -> BF16 through `quan
 16 bits reinterpreted as `uint16` measured 834 MB/s end to end. The whole conversion, padding included,
 took 82 s on the real tree.
 
-Three per-architecture transforms separate a bf16 tree from a bf16 GGUF. Each was read off upstream's
-Qwen3.5 model class (`Qwen3NextModel.modify_tensors` and `_LinearAttentionVReorderBase`) and then
-confirmed byte-for-byte against a GGUF upstream produced from the same tree, which is also how the
-tokenizer details below were settled:
+What varies by architecture does not live here. This module is the engine -- read the tree, decide every
+job, write the bytes -- plus the CLI, and it asks `apostate.conversion` for the family that owns the
+tree's `model_type`. The transforms that family applies to values, and why each was measured, are
+documented with the family that applies them (`apostate/conversion/qwen35.py`), because they are that
+family's and not the engine's.
 
-* **RMSNorm.** This family stores `w - 1`, so every `*norm.weight` **except** `linear_attn.norm.weight`
-  is written `w + 1`, in float32.
-* **`ssm_a`.** The tree holds `A_log`; the GGUF holds `-exp(A_log)` in float32. Computed with torch
-  rather than numpy, because the two disagree in the last ulp on 18 of the 48 values of a real layer.
-* **V-head order.** HF groups the linear-attention V heads by K head, ggml broadcasts them tiled, so
-  `attn_qkv` (V rows only), `attn_gate`, `ssm_alpha`, `ssm_beta`, `ssm_a`, `ssm_dt.bias`, `ssm_conv1d`
-  (V channels only) and `ssm_out` (columns) are permuted. A permutation, so it runs before the bf16
-  reinterpretation and costs nothing.
-
-Refuses rather than guessing: an architecture outside this family, a tensor with no mapping, a shard the
-index names but the tree does not have, a linear-attention geometry whose V heads do not divide into the
-K heads, a shape that contradicts the config, and an output path that already exists.
+Refuses rather than guessing: an architecture no family claims, a tensor with no mapping, a shard the
+index names but the tree does not have, a geometry the family cannot define a permutation on, a shape
+that contradicts the config, and an output path that already exists.
 """
 
 from __future__ import annotations
@@ -38,15 +30,25 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import sys
 import tempfile
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
+# `ConversionRefused` is the one refusal type a caller catches, the registry resolves the family that owns
+# a tree, and the int readers are shared because a family reads its own geometry fields with them. The
+# float readers below are the engine's own: families do not write metadata.
+from .conversion import (
+    ConversionRefused,
+    Family,
+    _need,
+    _need_int,
+    _optional_int,
+    family_for_config,
+)
 from .gguf_layout import (
     MLP_AXIS,
     QK_K,
@@ -56,84 +58,8 @@ from .gguf_layout import (
     unaligned_note,
 )
 
-#: `model_type` in the tree's config.json -> the GGUF architecture name.
-SUPPORTED = {"qwen3_5": "qwen35", "qwen3_5_text": "qwen35"}
 #: 32 is MOSTLY_BF16 in llama.cpp's LlamaFileType enum.
 FILE_TYPE_BF16 = 32
-VISION_PREFIX = "model.visual."
-DRAFT_PREFIX = "mtp."
-
-
-class ConversionRefused(RuntimeError):
-    """A refusal is information: name what is wrong and what would fix it."""
-
-
-# Tensor name mapping, measured from a real tree against the GGUF upstream produced from it. Each entry
-# is (pattern, gguf name); `{b}` is the block index and every pattern is anchored.
-_DECODER_RULES: tuple[tuple[str, str], ...] = (
-    (r"^model\.language_model\.layers\.(\d+)\.input_layernorm\.weight$", "blk.{b}.attn_norm.weight"),
-    (r"^model\.language_model\.layers\.(\d+)\.post_attention_layernorm\.weight$", "blk.{b}.post_attention_norm.weight"),
-    (r"^model\.language_model\.layers\.(\d+)\.mlp\.gate_proj\.weight$", "blk.{b}.ffn_gate.weight"),
-    (r"^model\.language_model\.layers\.(\d+)\.mlp\.up_proj\.weight$", "blk.{b}.ffn_up.weight"),
-    (r"^model\.language_model\.layers\.(\d+)\.mlp\.down_proj\.weight$", "blk.{b}.ffn_down.weight"),
-    (r"^model\.language_model\.layers\.(\d+)\.self_attn\.q_proj\.weight$", "blk.{b}.attn_q.weight"),
-    (r"^model\.language_model\.layers\.(\d+)\.self_attn\.k_proj\.weight$", "blk.{b}.attn_k.weight"),
-    (r"^model\.language_model\.layers\.(\d+)\.self_attn\.v_proj\.weight$", "blk.{b}.attn_v.weight"),
-    (r"^model\.language_model\.layers\.(\d+)\.self_attn\.o_proj\.weight$", "blk.{b}.attn_output.weight"),
-    (r"^model\.language_model\.layers\.(\d+)\.self_attn\.q_norm\.weight$", "blk.{b}.attn_q_norm.weight"),
-    (r"^model\.language_model\.layers\.(\d+)\.self_attn\.k_norm\.weight$", "blk.{b}.attn_k_norm.weight"),
-    # The linear-attention (SSM) layers; `in_proj_z` is the output gate and `out_proj` the writer, both
-    # confirmed by shape against the reference GGUF rather than by name.
-    (r"^model\.language_model\.layers\.(\d+)\.linear_attn\.in_proj_qkv\.weight$", "blk.{b}.attn_qkv.weight"),
-    (r"^model\.language_model\.layers\.(\d+)\.linear_attn\.in_proj_z\.weight$", "blk.{b}.attn_gate.weight"),
-    (r"^model\.language_model\.layers\.(\d+)\.linear_attn\.out_proj\.weight$", "blk.{b}.ssm_out.weight"),
-    (r"^model\.language_model\.layers\.(\d+)\.linear_attn\.in_proj_a\.weight$", "blk.{b}.ssm_alpha.weight"),
-    (r"^model\.language_model\.layers\.(\d+)\.linear_attn\.in_proj_b\.weight$", "blk.{b}.ssm_beta.weight"),
-    (r"^model\.language_model\.layers\.(\d+)\.linear_attn\.conv1d\.weight$", "blk.{b}.ssm_conv1d.weight"),
-    (r"^model\.language_model\.layers\.(\d+)\.linear_attn\.norm\.weight$", "blk.{b}.ssm_norm.weight"),
-    (r"^model\.language_model\.layers\.(\d+)\.linear_attn\.A_log$", "blk.{b}.ssm_a"),
-    (r"^model\.language_model\.layers\.(\d+)\.linear_attn\.dt_bias$", "blk.{b}.ssm_dt.bias"),
-)
-
-_GLOBAL_RULES: tuple[tuple[str, str], ...] = (
-    (r"^model\.language_model\.embed_tokens\.weight$", "token_embd.weight"),
-    (r"^model\.language_model\.norm\.weight$", "output_norm.weight"),
-    (r"^lm_head\.weight$", "output.weight"),
-)
-
-# The draft (MTP) block, written only with `--with-mtp`. Its layer index is the trunk's block count --
-# llama.cpp's dummy block -- and its four MTP-only weights take the `nextn` names every MTP-bearing GGUF
-# in this project carries (`blk.<trunk>.nextn.{eh_proj,enorm,hnorm,shared_head_norm}.weight`), which is
-# what upstream's `_QwenMtpMixin` remaps `mtp.*` onto.
-_DRAFT_RULES: tuple[tuple[str, str], ...] = (
-    (r"^mtp\.fc\.weight$", "blk.{d}.nextn.eh_proj.weight"),
-    (r"^mtp\.norm\.weight$", "blk.{d}.nextn.shared_head_norm.weight"),
-    (r"^mtp\.pre_fc_norm_embedding\.weight$", "blk.{d}.nextn.enorm.weight"),
-    (r"^mtp\.pre_fc_norm_hidden\.weight$", "blk.{d}.nextn.hnorm.weight"),
-    (r"^mtp\.layers\.(\d+)\.input_layernorm\.weight$", "blk.{d}.attn_norm.weight"),
-    (r"^mtp\.layers\.(\d+)\.post_attention_layernorm\.weight$", "blk.{d}.post_attention_norm.weight"),
-    (r"^mtp\.layers\.(\d+)\.mlp\.gate_proj\.weight$", "blk.{d}.ffn_gate.weight"),
-    (r"^mtp\.layers\.(\d+)\.mlp\.up_proj\.weight$", "blk.{d}.ffn_up.weight"),
-    (r"^mtp\.layers\.(\d+)\.mlp\.down_proj\.weight$", "blk.{d}.ffn_down.weight"),
-    (r"^mtp\.layers\.(\d+)\.self_attn\.q_proj\.weight$", "blk.{d}.attn_q.weight"),
-    (r"^mtp\.layers\.(\d+)\.self_attn\.k_proj\.weight$", "blk.{d}.attn_k.weight"),
-    (r"^mtp\.layers\.(\d+)\.self_attn\.v_proj\.weight$", "blk.{d}.attn_v.weight"),
-    (r"^mtp\.layers\.(\d+)\.self_attn\.o_proj\.weight$", "blk.{d}.attn_output.weight"),
-    (r"^mtp\.layers\.(\d+)\.self_attn\.q_norm\.weight$", "blk.{d}.attn_q_norm.weight"),
-    (r"^mtp\.layers\.(\d+)\.self_attn\.k_norm\.weight$", "blk.{d}.attn_k_norm.weight"),
-)
-
-# Tensors llama.cpp keeps at F32 whatever the file type: every 1-D tensor, every norm, and the 2-D SSM
-# state upstream names explicitly.
-_F32_SUFFIXES = ("_norm.weight", "norm.weight", ".ssm_a", ".ssm_dt.bias", ".ssm_conv1d.weight")
-# The one norm this family stores as a plain weight, plus the two draft names whose HF spelling does not
-# end in `norm.weight` but whose remapped one (`enorm`/`hnorm`) does.
-_PLAIN_NORM = "linear_attn.norm.weight"
-_UNIT_OFFSET_ALIASES = ("mtp.pre_fc_norm_embedding.weight", "mtp.pre_fc_norm_hidden.weight")
-# `SpecialVocab`'s types in the order upstream resolves them: a name in `tokenizer_config.json` beats an
-# id in `config.json`, and the first source to set a type keeps it.
-_SPECIAL_TOKENS = ("bos", "eos", "unk", "sep", "pad", "cls", "mask")
-_SPACE_MARKER = "\u2581"
 
 
 def _deps():
@@ -150,71 +76,14 @@ def _deps():
     return np, torch, GGMLQuantizationType, GGUFWriter, safe_open
 
 
-def _is_f32(name: str, out_shape: Sequence[int]) -> bool:
-    """Upstream's dtype rule: `n_dims <= 1 or new_name.endswith("_norm.weight")`, plus the SSM state."""
-    return len(out_shape) <= 1 or any(name.endswith(suffix) for suffix in _F32_SUFFIXES)
-
-
-def _unit_offset(source: str) -> bool:
-    """True for the RMSNorms this family stores as `w - 1`."""
-    if source.endswith(_PLAIN_NORM):
-        return False
-    return source.endswith("norm.weight") or source in _UNIT_OFFSET_ALIASES
-
-
-@dataclass(frozen=True)
-class LinearAttention:
-    """The SSM geometry the V-head reorder is defined against."""
-
-    key_heads: int
-    value_heads: int
-    key_dim: int
-    value_dim: int
-
-    @property
-    def per_key(self) -> int:
-        return self.value_heads // self.key_heads
-
-    def order(self, dim: int, head_dim: int, split: int | None = None) -> "VHeadOrder | None":
-        """The permutation for one tensor, or None when upstream reorders nothing (equal head counts)."""
-        if self.key_heads == self.value_heads:
-            return None
-        return VHeadOrder(dim, head_dim, self.key_heads, self.per_key, split)
-
-
-@dataclass(frozen=True)
-class VHeadOrder:
-    """Grouped V heads -> tiled, on one axis (upstream's `_reorder_v_heads`).
-
-    HF stores the V heads grouped by K head -- `[G0_v0..v{r-1}, G1_v0..v{r-1}, ...]` -- while ggml
-    broadcasts them tiled -- `[K0, K1, ..., K0, K1, ...]`. `split` is the length of the leading run that
-    is left alone (`attn_qkv`'s q|k rows, `ssm_conv1d`'s q|k channels); `dim` 1 is `ssm_out`'s input
-    columns, the one tensor reordered along its second axis.
-    """
-
-    dim: int
-    head_dim: int
-    key_heads: int
-    per_key: int
-    split: int | None = None
-
-
-@dataclass(frozen=True)
-class Transform:
-    """What has to happen to a tensor's values before they are written."""
-
-    unit_offset: bool = False
-    negate_exp: bool = False
-    reorder: VHeadOrder | None = None
-
-    @property
-    def needs_float32(self) -> bool:
-        return self.unit_offset or self.negate_exp
-
-
 @dataclass(frozen=True)
 class Job:
-    """One source tensor and where it lands, decided before a byte is written."""
+    """One source tensor and where it lands, decided before a byte is written.
+
+    `transform` is the family's own value: the engine carries it from `Family.plan_transform` to
+    `Family.apply_transform` untouched, and reads only `needs_float32` off it -- a transform that has to
+    do float32 arithmetic cannot be written into a bf16 file.
+    """
 
     source: str
     target: str
@@ -222,9 +91,9 @@ class Job:
     shape: tuple[int, ...]
     out_shape: tuple[int, ...]
     f32: bool
+    transform: Any
     pad_axis: int | None = None
     squeeze: bool = False
-    transform: Transform = Transform()
 
 
 @dataclass
@@ -281,35 +150,12 @@ def text_config(config: Mapping[str, Any]) -> dict[str, Any]:
     return dict(nested) if isinstance(nested, dict) else dict(config)
 
 
-def _need(text: Mapping[str, Any], key: str) -> Any:
-    if key not in text:
-        raise ConversionRefused(f"config.json (text_config) is missing {key!r}; cannot write metadata")
-    return text[key]
-
-
-def _need_int(text: Mapping[str, Any], key: str) -> int:
-    value = _need(text, key)
-    try:
-        return int(value)
-    except (TypeError, ValueError) as error:
-        raise ConversionRefused(f"config.json field {key!r} is not an integer: {value!r}") from error
-
-
 def _need_float(text: Mapping[str, Any], key: str) -> float:
     value = _need(text, key)
     try:
         return float(value)
     except (TypeError, ValueError) as error:
         raise ConversionRefused(f"config.json field {key!r} is not a number: {value!r}") from error
-
-
-def _optional_int(value: Any, default: int, label: str) -> int:
-    if value is None:
-        return default
-    try:
-        return int(value)
-    except (TypeError, ValueError) as error:
-        raise ConversionRefused(f"config field {label!r} is not an integer: {value!r}") from error
 
 
 def _optional_float(value: Any, default: float, label: str) -> float:
@@ -322,14 +168,12 @@ def _optional_float(value: Any, default: float, label: str) -> float:
 
 
 def resolve_architecture(config: Mapping[str, Any]) -> str:
-    model_type = str(config.get("model_type") or text_config(config).get("model_type") or "")
-    architecture = SUPPORTED.get(model_type)
-    if architecture is None:
-        raise ConversionRefused(
-            f"model_type {model_type!r} is not supported by this converter "
-            f"(supported: {', '.join(sorted(SUPPORTED))}); use llama.cpp's own converter"
-        )
-    return architecture
+    """The GGUF architecture name for this tree: whichever family the registry resolves.
+
+    The lookup itself -- which `model_type` values are supported, and what to say when one is not --
+    belongs to the registry, so this is the name out of the family it returns.
+    """
+    return family_for_config(config).arch
 
 
 def resolve_widths(text: Mapping[str, Any], pad_mlp_to: int | None, no_pad: bool) -> tuple[int, int, str]:
@@ -354,92 +198,19 @@ def resolve_widths(text: Mapping[str, Any], pad_mlp_to: int | None, no_pad: bool
     return source_width, aligned_width(source_width), "auto"
 
 
-def linear_attention(text: Mapping[str, Any]) -> LinearAttention:
-    """The SSM head geometry, refusing a ratio the V-head reorder cannot be defined on."""
-    key_heads = _need_int(text, "linear_num_key_heads")
-    value_heads = _need_int(text, "linear_num_value_heads")
-    if key_heads <= 0 or value_heads <= 0:
-        raise ConversionRefused(
-            f"linear_num_key_heads/linear_num_value_heads must be positive, got {key_heads}/{value_heads}"
-        )
-    if value_heads % key_heads:
-        raise ConversionRefused(
-            f"linear_num_value_heads ({value_heads}) is not a multiple of linear_num_key_heads "
-            f"({key_heads}); the linear-attention V-head order is undefined"
-        )
-    return LinearAttention(
-        key_heads=key_heads,
-        value_heads=value_heads,
-        key_dim=_need_int(text, "linear_key_head_dim"),
-        value_dim=_need_int(text, "linear_value_head_dim"),
-    )
-
-
-def _expect_axis(source: str, shape: Sequence[int], axis: int, size: int) -> None:
-    """Refuse a tensor whose shape contradicts the geometry its permutation is defined against."""
-    if len(shape) <= axis or shape[axis] != size:
-        raise ConversionRefused(
-            f"{source} has shape {tuple(shape)}, which does not carry {size} on axis {axis} as the "
-            "linear-attention geometry requires; refusing to permute a tensor this converter cannot place"
-        )
-
-
-def plan_transform(source: str, shape: Sequence[int], linear: LinearAttention) -> Transform:
-    """Every value transform upstream applies to this tensor, decided by name and shape.
-
-    Upstream decides this by name in `modify_tensors`, on the name *after* `mtp.*` has been remapped onto
-    the dummy layer -- which is why the draft head's two pre-norm weights count as `norm.weight` here
-    even though their HF spelling does not end that way. The shapes are checked rather than trusted: a
-    permutation applied to the wrong axis produces a file that loads and is wrong.
-    """
-    if source.endswith(".linear_attn.A_log"):
-        _expect_axis(source, shape, 0, linear.value_heads)
-        return Transform(negate_exp=True, reorder=linear.order(0, 1))
-    if source.endswith(".linear_attn.dt_bias"):
-        _expect_axis(source, shape, 0, linear.value_heads)
-        return Transform(reorder=linear.order(0, 1))
-    if source.endswith(".linear_attn.in_proj_qkv.weight"):
-        qk = 2 * linear.key_heads * linear.key_dim
-        _expect_axis(source, shape, 0, qk + linear.value_heads * linear.value_dim)
-        return Transform(reorder=linear.order(0, linear.value_dim, split=qk))
-    if source.endswith(".linear_attn.in_proj_z.weight"):
-        _expect_axis(source, shape, 0, linear.value_heads * linear.value_dim)
-        return Transform(reorder=linear.order(0, linear.value_dim))
-    if source.endswith((".linear_attn.in_proj_a.weight", ".linear_attn.in_proj_b.weight")):
-        _expect_axis(source, shape, 0, linear.value_heads)
-        return Transform(reorder=linear.order(0, 1))
-    if source.endswith(".linear_attn.conv1d.weight"):
-        qk = 2 * linear.key_heads * linear.key_dim
-        _expect_axis(source, shape, 0, qk + linear.value_heads * linear.value_dim)
-        return Transform(reorder=linear.order(0, linear.value_dim, split=qk))
-    if source.endswith(".linear_attn.out_proj.weight"):
-        _expect_axis(source, shape, 1, linear.value_heads * linear.value_dim)
-        return Transform(reorder=linear.order(1, linear.value_dim))
-    return Transform(unit_offset=_unit_offset(source))
-
-
-def _map_name(source: str, block_count: int, draft: bool) -> str | None:
-    rules = _DRAFT_RULES if draft else _DECODER_RULES + _GLOBAL_RULES
-    for pattern, template in rules:
-        match = re.match(pattern, source)
-        if match is None:
-            continue
-        if "{b}" in template:
-            return template.format(b=int(match.group(1)))
-        if "{d}" in template:
-            # the MTP layer index, or 0 for the four head weights that sit on the first dummy layer
-            index = int(match.group(1)) if match.groups() else 0
-            return template.format(d=block_count + index)
-        return template
-    return None
-
-
 def plan_tensors(
-    tree: Path, *, block_count: int, hidden_size: int, target_width: int,
-    linear: LinearAttention, with_mtp: bool,
+    tree: Path, *, family: Family, text: Mapping[str, Any], block_count: int, hidden_size: int,
+    target_width: int, with_mtp: bool,
 ) -> tuple[list[Job], int]:
-    """Every tensor to write, with its final shape. Reads safetensors headers only."""
+    """Every tensor to write, with its final shape. Reads safetensors headers only.
+
+    The family answers every question the tree's spelling decides -- which sources are skipped, what each
+    name becomes, what dtype it needs and what has to happen to its values -- so this loop is the same
+    whichever family the registry resolved. `text` is the language stack's config, which is where a family
+    reads its own geometry.
+    """
     np, _torch, _types, _writer, safe_open = _deps()
+    linear = family.linear_attention(text)
     index_path = tree / "model.safetensors.index.json"
     if not index_path.is_file():
         raise ConversionRefused(
@@ -462,13 +233,13 @@ def plan_tensors(
     jobs: list[Job] = []
     vision_skipped = 0
     for source in sorted(weight_map):
-        if source.startswith(VISION_PREFIX):
+        if source.startswith(family.vision_prefix):
             vision_skipped += 1
             continue
-        is_draft = source.startswith(DRAFT_PREFIX)
+        is_draft = source.startswith(family.draft_prefix)
         if is_draft and not with_mtp:
             continue
-        target = _map_name(source, block_count, is_draft)
+        target = family.map_name(source, block_count, is_draft)
         if target is None:
             raise ConversionRefused(
                 f"no mapping for tensor {source!r}; refusing to guess (add a rule or skip the tensor "
@@ -477,8 +248,8 @@ def plan_tensors(
         shape = shapes[source]
         squeeze = target.endswith("ssm_conv1d.weight") and len(shape) == 3 and shape[1] == 1
         out_shape = (shape[0], shape[2]) if squeeze else shape
-        f32 = _is_f32(target, out_shape)
-        transform = plan_transform(source, shape, linear)
+        f32 = family.is_f32(target, out_shape)
+        transform = family.plan_transform(source, shape, linear)
         if transform.needs_float32 and not f32:
             raise ConversionRefused(
                 f"{target} ({source}) needs float32 arithmetic but is not written as F32"
@@ -524,44 +295,17 @@ def plan_tensors(
     return jobs, vision_skipped
 
 
-def _reorder(tensor: Any, order: VHeadOrder) -> Any:
-    """One axis, grouped V heads -> tiled (upstream's `_reorder_v_heads`)."""
-    import torch
+def payload(handle: Any, job: Job, family: Family) -> Any:
+    """The tensor's bytes in the dtype the writer expects, transformed and copied once.
 
-    body = tensor if order.split is None else tensor[order.split :]
-    if order.dim == 0:
-        view = body.reshape((order.key_heads, order.per_key, order.head_dim) + tuple(body.shape[1:]))
-        tiled = view.transpose(0, 1).reshape(body.shape)
-    else:
-        view = body.reshape((body.shape[0], order.key_heads, order.per_key, order.head_dim))
-        tiled = view.transpose(1, 2).reshape(body.shape)
-    tiled = tiled.contiguous()  # the writer reinterprets this tensor as uint16 for a bf16 target
-    if order.split is None:
-        return tiled
-    return torch.cat((tensor[: order.split], tiled), dim=0)
-
-
-def _transformed(tensor: Any, transform: Transform) -> Any:
-    """Apply the value transforms, in the order upstream applies them."""
-    import torch
-
-    if transform.reorder is not None:
-        tensor = _reorder(tensor, transform.reorder)
-    if transform.negate_exp:
-        # torch, not numpy: the two disagree in the last ulp on 18 of the 48 values of a real layer.
-        return -torch.exp(tensor.float())
-    if transform.unit_offset:
-        return tensor.float() + 1.0
-    return tensor
-
-
-def payload(handle: Any, job: Job) -> Any:
-    """The tensor's bytes in the dtype the writer expects, transformed and copied once."""
+    The value transforms belong to the family, so they are applied by it -- here, at the one point where
+    the tensor's values are in hand and before the bf16 reinterpretation.
+    """
     np, torch, _types, _writer, _open = _deps()
     tensor = handle.get_tensor(job.source)
     if job.squeeze:
         tensor = tensor.squeeze(1)
-    tensor = _transformed(tensor, job.transform)
+    tensor = family.apply_transform(tensor, job.transform)
     if job.f32:
         array = tensor.float().numpy()
     elif tensor.dtype in (torch.bfloat16, torch.float16):
@@ -576,36 +320,8 @@ def payload(handle: Any, job: Job) -> Any:
     return np.ascontiguousarray(array)
 
 
-def recurrent_layers(block_count: int, interval: int, draft_layers: int = 0) -> list[bool]:
-    """Which layers are linear-attention; the draft (MTP) layers are full attention."""
-    if interval <= 0:
-        raise ConversionRefused(f"full_attention_interval must be positive, got {interval}")
-    return [((index + 1) % interval) != 0 for index in range(block_count)] + [False] * draft_layers
-
-
-def draft_layer_count(text: Mapping[str, Any], sources: Iterable[str]) -> int:
-    """How many MTP layers the tree holds; the tree and the config must agree.
-
-    The tree is the artifact and the config is a claim, but together they decide both the dummy block
-    index and the block count, so a disagreement would place tensors outside the model's own block count.
-    """
-    indices = {
-        int(match.group(1))
-        for source in sources
-        if (match := re.match(r"^mtp\.layers\.(\d+)\.", source)) is not None
-    }
-    observed = max(indices, default=-1) + 1
-    declared = _optional_int(text.get("mtp_num_hidden_layers"), 0, "mtp_num_hidden_layers")
-    if declared and observed and declared != observed:
-        raise ConversionRefused(
-            f"config.json declares mtp_num_hidden_layers {declared} but the tree holds {observed} "
-            "draft layers; the block count and the tensor indices would disagree"
-        )
-    return observed or declared
-
-
 def set_metadata(
-    writer: Any, *, arch: str, config: Mapping[str, Any], generation: Mapping[str, Any],
+    writer: Any, *, family: Family, config: Mapping[str, Any], generation: Mapping[str, Any],
     target_width: int, name: str, draft_layers: int,
 ) -> None:
     """The `<arch>.*` keys llama.cpp reads, refusing a missing one rather than writing a default."""
@@ -650,8 +366,11 @@ def set_metadata(
     writer.add_ssm_inner_size(
         _need_int(text, "linear_num_value_heads") * _need_int(text, "linear_value_head_dim")
     )
-    writer.add_array(f"{arch}.attention.recurrent_layers", recurrent_layers(block_count, interval, draft_layers))
-    writer.add_uint32(f"{arch}.full_attention_interval", interval)
+    writer.add_array(
+        f"{family.arch}.attention.recurrent_layers",
+        family.recurrent_layers(block_count, interval, draft_layers),
+    )
+    writer.add_uint32(f"{family.arch}.full_attention_interval", interval)
     if draft_layers:
         writer.add_nextn_predict_layers(draft_layers)
     writer.add_file_type(FILE_TYPE_BF16)
@@ -703,12 +422,13 @@ def _merge_entries(merges: Sequence[Any]) -> list[str]:
 
 
 def special_token_ids(
-    tokenizer_config: Mapping[str, Any], added: Mapping[int, Any], config: Mapping[str, Any]
+    family: Family, tokenizer_config: Mapping[str, Any], added: Mapping[int, Any],
+    config: Mapping[str, Any],
 ) -> dict[str, int]:
     """The special-token ids, resolved the way llama.cpp's `SpecialVocab` resolves them."""
     by_content = {str(entry.get("content")): index for index, entry in added.items()}
     ids: dict[str, int] = {}
-    for token_type in _SPECIAL_TOKENS:
+    for token_type in family.special_tokens:
         entry = tokenizer_config.get(f"{token_type}_token")
         content = entry if isinstance(entry, str) else None
         if content is None and isinstance(entry, dict):
@@ -716,7 +436,7 @@ def special_token_ids(
         if isinstance(content, str) and content in by_content:
             ids[token_type] = by_content[content]
     text = text_config(config)
-    for token_type in _SPECIAL_TOKENS:
+    for token_type in family.special_tokens:
         if token_type in ids:
             continue
         value = config.get(f"{token_type}_token_id")
@@ -727,7 +447,7 @@ def special_token_ids(
     return ids
 
 
-def set_vocab(writer: Any, tree: Path, arch_pre: str, config: Mapping[str, Any]) -> None:
+def set_vocab(writer: Any, tree: Path, family: Family, config: Mapping[str, Any]) -> None:
     """The gpt2-style vocabulary, read from tokenizer.json rather than a tokenizer library."""
     from gguf import TokenType
 
@@ -767,22 +487,22 @@ def set_vocab(writer: Any, tree: Path, arch_pre: str, config: Mapping[str, Any])
             types[index] = TokenType.CONTROL
         else:
             types[index] = TokenType.USER_DEFINED
-            token = token.replace(_SPACE_MARKER, " ")
+            token = token.replace(family.space_marker, " ")
         tokens[index] = token
 
     writer.add_tokenizer_model("gpt2")
-    writer.add_tokenizer_pre(arch_pre)
+    writer.add_tokenizer_pre(family.arch)
     writer.add_token_list(tokens)
     writer.add_token_types(types)
     writer.add_token_merges(_merge_entries(model.get("merges") or []))
 
     tokenizer_config_path = tree / "tokenizer_config.json"
     tokenizer_config = _read_json(tokenizer_config_path) if tokenizer_config_path.is_file() else {}
-    for token_type, token_id in special_token_ids(tokenizer_config, added, config).items():
+    for token_type, token_id in special_token_ids(family, tokenizer_config, added, config).items():
         adder = getattr(writer, f"add_{token_type}_token_id", None)
         if adder is not None:  # `cls` has no handler in gguf, exactly as upstream
             adder(token_id)
-    for token_type in _SPECIAL_TOKENS:
+    for token_type in family.special_tokens:
         value = tokenizer_config.get(f"add_{token_type}_token")
         adder = getattr(writer, f"add_add_{token_type}_token", None)
         if isinstance(value, bool) and adder is not None:
@@ -834,22 +554,23 @@ def convert(
         raise ConversionRefused(f"{tree} is not a directory")
 
     config = _read_json(tree / "config.json")
-    arch = resolve_architecture(config)
+    family = family_for_config(config)
+    arch = family.arch
     text = text_config(config)
     block_count = _need_int(text, "num_hidden_layers")
     source_width, target_width, pad_mode = resolve_widths(text, pad_mlp_to, no_pad)
     jobs, vision_skipped = plan_tensors(
-        tree, block_count=block_count, hidden_size=_need_int(text, "hidden_size"),
-        target_width=target_width, linear=linear_attention(text), with_mtp=with_mtp,
+        tree, family=family, text=text, block_count=block_count,
+        hidden_size=_need_int(text, "hidden_size"), target_width=target_width, with_mtp=with_mtp,
     )
-    if with_mtp and not any(job.source.startswith(DRAFT_PREFIX) for job in jobs):
-        raise ConversionRefused(f"--with-mtp but {tree} holds no {DRAFT_PREFIX}* tensors")
-    draft_layers = draft_layer_count(text, (job.source for job in jobs)) if with_mtp else 0
+    if with_mtp and not any(job.source.startswith(family.draft_prefix) for job in jobs):
+        raise ConversionRefused(f"--with-mtp but {tree} holds no {family.draft_prefix}* tensors")
+    draft_layers = family.draft_layer_count(text, (job.source for job in jobs)) if with_mtp else 0
     receipt = Receipt(
         tree=str(tree), out=str(out), architecture=arch, block_count=block_count + draft_layers,
         source_width=source_width, target_width=target_width, padded=pad_mode, tensors=len(jobs),
         padded_tensors=sum(1 for job in jobs if job.pad_axis is not None),
-        draft_tensors=sum(1 for job in jobs if job.source.startswith(DRAFT_PREFIX)),
+        draft_tensors=sum(1 for job in jobs if job.source.startswith(family.draft_prefix)),
         vision_tensors_skipped=vision_skipped,
     )
     if pad_mode == "none" and source_width % QK_K:
@@ -870,11 +591,11 @@ def convert(
         generation_path = tree / "generation_config.json"
         writer = writer_type(str(stage), arch)
         set_metadata(
-            writer, arch=arch, config=config,
+            writer, family=family, config=config,
             generation=_read_json(generation_path) if generation_path.is_file() else {},
             target_width=target_width, name=tree.name, draft_layers=draft_layers,
         )
-        set_vocab(writer, tree, arch, config)
+        set_vocab(writer, tree, family, config)
         for job in jobs:
             dtype = np.float32 if job.f32 else np.uint16
             raw = types.F32 if job.f32 else types.BF16
@@ -887,7 +608,7 @@ def convert(
         writer.write_ti_data_to_file()
         for job in jobs:
             with safe_open(str(tree / job.shard), framework="pt") as handle:
-                array = payload(handle, job)
+                array = payload(handle, job, family)
             writer.write_tensor_data(array)
             receipt.bytes_written += int(array.nbytes)
         writer.close()
