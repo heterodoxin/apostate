@@ -47,9 +47,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
-#: The k-quant block. A tensor whose `ne[0]` is not a multiple of this cannot be stored as a k-quant,
-#: and llama.cpp falls back to F16 for it -- the +6.97 GiB this project measured on a 27B.
-QK_K = 256
+from .gguf_layout import (
+    MLP_AXIS,
+    QK_K,
+    aligned_width,
+    is_mlp_weight,
+    projection_of,
+    unaligned_note,
+)
+
 #: `model_type` in the tree's config.json -> the GGUF architecture name.
 SUPPORTED = {"qwen3_5": "qwen35", "qwen3_5_text": "qwen35"}
 #: 32 is MOSTLY_BF16 in llama.cpp's LlamaFileType enum.
@@ -345,7 +351,7 @@ def resolve_widths(text: Mapping[str, Any], pad_mlp_to: int | None, no_pad: bool
         return source_width, pad_mlp_to, "explicit"
     if source_width % QK_K == 0:
         return source_width, source_width, "none"
-    return source_width, source_width + (-source_width % QK_K), "auto"
+    return source_width, aligned_width(source_width), "auto"
 
 
 def linear_attention(text: Mapping[str, Any]) -> LinearAttention:
@@ -478,7 +484,7 @@ def plan_tensors(
                 f"{target} ({source}) needs float32 arithmetic but is not written as F32"
             )
         pad_axis = None
-        if target.endswith(("ffn_down.weight", "ffn_gate.weight", "ffn_up.weight")):
+        if is_mlp_weight(target):
             # The requested width binds *every* MLP, the draft block included: llama.cpp allocates every
             # block, `nextn` included, from `feed_forward_length`, and a draft head left at its own
             # width makes the file unloadable. The appended zeros are inert.
@@ -489,6 +495,16 @@ def plan_tensors(
                     f"{hidden_size} (shape {out_shape})"
                 )
             axis = axes[0]
+            # The GGUF-level repair in `prepare-quant` pads along the *pinned* axis from the shared
+            # table. Two answers to "which axis is intermediate" is how one command silently transposes
+            # a projection the other pads, so the derived axis must agree with the pinned one.
+            pinned = MLP_AXIS.get(projection_of(target))
+            if pinned is not None and pinned != axis:
+                raise ConversionRefused(
+                    f"{source} ({target}) carries its intermediate dimension on axis {axis} by shape, "
+                    f"but llama.cpp's pinned layout for {projection_of(target)} puts it on axis "
+                    f"{pinned}; refusing to pad along a different axis than the repair would"
+                )
             if out_shape[axis] > target_width:
                 raise ConversionRefused(
                     f"{source} is {out_shape[axis]} wide, wider than the target {target_width}"
@@ -837,10 +853,7 @@ def convert(
         vision_tensors_skipped=vision_skipped,
     )
     if pad_mode == "none" and source_width % QK_K:
-        receipt.warnings.append(
-            f"the tree's width {source_width} is not a multiple of {QK_K}: every k-quant will store "
-            f"those tensors as F16. Drop --no-pad to pad to {source_width + (-source_width % QK_K)}"
-        )
+        receipt.warnings.append(f"the tree's {unaligned_note(source_width)} (drop --no-pad to pad it)")
     if pad_mode != "none":
         receipt.warnings.append(
             f"MLP padded {source_width} -> {target_width} ({pad_mode}); the draft (MTP) block moves with "

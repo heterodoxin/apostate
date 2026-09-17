@@ -25,15 +25,20 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
 
 
-QK_K = 256
+from .gguf_layout import (
+    MLP_AXIS,
+    QK_K,
+    aligned_width,
+    block_count as _shared_block_count,
+    declared_width as _shared_declared_width,
+    draft_threshold as _shared_draft_threshold,
+    is_draft,
+    is_mlp_weight,
+    mlp_axis,
+    projection_of,
+)
+
 _MODEL_TYPES = {"F32", "F16", "BF16"}
-_MLP_SUFFIXES = ("ffn_down.weight", "ffn_gate.weight", "ffn_up.weight")
-#: Which *array* axis carries the intermediate dimension, per projection. gguf-py hands arrays back in
-#: reversed `ne` order -- the same reversal the writer applies on the way out -- so `ffn_down`'s
-#: intermediate (`ne[0]`, the fastest axis) is the array's last one, while `ffn_gate`/`ffn_up` carry it
-#: on `ne[1]`, i.e. the array's first axis.
-_MLP_AXIS = {"ffn_gate": 0, "ffn_up": 0, "ffn_down": 1}
-_BLOCK = re.compile(r"^blk\.(\d+)\.")
 # A published importance matrix for a 27B model is ~14 MB. A ceiling well above that still refuses a
 # repository that would turn one CLI flag into unbounded download and an in-memory copy.
 IMATRIX_MAX_BYTES = 1024 * 1024 * 1024
@@ -86,29 +91,12 @@ def _integer(value: Any, label: str) -> int:
 
 
 def _declared_width(fields: Mapping[str, Any]) -> tuple[int, tuple[str, ...]]:
-    keys = tuple(name for name in fields if name.endswith(".feed_forward_length"))
-    if not keys:
-        raise PreparationRefused("model has no *.feed_forward_length metadata")
-    values: set[int] = set()
-    for key in keys:
-        value = fields[key]
-        if isinstance(value, (list, tuple)):
-            values.update(_integer(item, key) for item in value)
-        else:
-            values.add(_integer(value, key))
-    if len(values) != 1:
-        raise PreparationRefused(f"feed-forward metadata disagrees: {sorted(values)}")
-    return values.pop(), keys
+    """The shared rule, refused as this command's own error."""
+    return _shared_declared_width(fields, _integer, PreparationRefused)
 
 
 def _block_count(fields: Mapping[str, Any]) -> int | None:
-    values = [fields[name] for name in fields if name.endswith(".block_count")]
-    if not values:
-        return None
-    parsed = {_integer(value, "block_count") for value in values}
-    if len(parsed) != 1:
-        raise PreparationRefused(f"block-count metadata disagrees: {sorted(parsed)}")
-    return parsed.pop()
+    return _shared_block_count(fields, _integer, PreparationRefused)
 
 
 def _computed_width(reader: Any) -> int:
@@ -119,34 +107,12 @@ def _computed_width(reader: Any) -> int:
     width that does not match the model it is padding, so the arithmetic lives here.
     """
     source_width, _keys = _declared_width(_fields(reader))
-    if source_width % QK_K == 0:
-        return source_width
-    return source_width + (QK_K - source_width % QK_K)
+    return aligned_width(source_width)
 
 
 def _draft_threshold(fields: Mapping[str, Any]) -> int | None:
-    """The first `blk.<n>` index belonging to the draft (MTP) block, or None when there is none.
-
-    `block_count` spells the draft block two ways: a *trunk* declares only the decoder layers (the draft
-    sits at exactly `block_count`), while an MTP-bearing file declares the draft layer as a block too
-    (65 for a 64-layer trunk with one MTP layer, with the draft at 64). Subtracting
-    `nextn_predict_layers` gives the one index that is right for both -- testing `index >= block_count`
-    alone misses the draft on every file that counts it.
-    """
-    block_count = _block_count(fields)
-    if block_count is None:
-        return None
-    nextn = 0
-    for name, value in fields.items():
-        if name.endswith(".nextn_predict_layers"):
-            nextn = _integer(value, "nextn_predict_layers")
-            break
-    return block_count - nextn if nextn > 0 else block_count
-
-
-def _is_draft(name: str, block_count: int | None) -> bool:
-    match = _BLOCK.match(name)
-    return block_count is not None and match is not None and int(match.group(1)) >= block_count
+    """The shared rule, refused as this command's own error."""
+    return _shared_draft_threshold(fields, _integer, PreparationRefused)
 
 
 def _tensor_ne(tensor: Any) -> tuple[int, ...]:
@@ -181,8 +147,7 @@ def _model_plan(reader: Any, target_width: int) -> dict[str, Any]:
     for tensor in reader.tensors:
         array = _raw_tensor(tensor)
         name = str(tensor.name)
-        matching_suffix = next((suffix for suffix in _MLP_SUFFIXES if name.endswith(suffix)), None)
-        if matching_suffix is None:
+        if not is_mlp_weight(name):
             continue
         # The draft (MTP) block moves with the decoder. An additive edit never touches the head, so its
         # own width is one below the trunk's -- but llama.cpp allocates *every* block, `nextn` included,
@@ -193,17 +158,10 @@ def _model_plan(reader: Any, target_width: int) -> dict[str, Any]:
         #
         # The zeros appended there are inert (a zero gate row contributes nothing, and the down
         # projection column it feeds is zero), so the head's own weights survive untouched.
-        is_draft = _is_draft(name, draft_from)
-        if is_draft:
+        is_draft_block = is_draft(name, draft_from)
+        if is_draft_block:
             draft.append(name)
-        axis = _MLP_AXIS.get(name.rpartition(".")[0].rpartition(".")[2])
-        if axis is None:
-            axes = [index for index, size in enumerate(array.shape) if int(size) == source_width]
-            if len(axes) != 1:
-                raise PreparationRefused(
-                    f"{name} does not expose exactly one axis at declared width {source_width}; fused or expert layouts need an explicit implementation"
-                )
-            axis = axes[0]
+        axis = mlp_axis(name, array.shape, source_width, PreparationRefused)
         before = int(array.shape[axis])
         if before == target_width:
             continue
@@ -213,15 +171,15 @@ def _model_plan(reader: Any, target_width: int) -> dict[str, Any]:
             "before": before,
             "after": target_width,
             "dtype": str(array.dtype),
-            "draft": is_draft,
+            "draft": is_draft_block,
         })
     if not plan:
         raise PreparationRefused("no MLP tensors needed resizing; the model is already aligned")
     suspicious = [
         str(tensor.name) for tensor in reader.tensors
         if "ffn" in str(tensor.name) and str(tensor.name).endswith(".weight")
-        and not _is_draft(str(tensor.name), block_count)
-        and not any(str(tensor.name).endswith(suffix) for suffix in _MLP_SUFFIXES)
+        and not is_draft(str(tensor.name), block_count)
+        and not is_mlp_weight(str(tensor.name))
         and source_width in _tensor_ne(tensor)
     ]
     if suspicious:
@@ -631,8 +589,8 @@ def _unweighted_draft_mlp_tensors(target: Path, matrix_tensors: Mapping[str, Any
     return sorted(
         str(tensor.name)
         for tensor in reader.tensors
-        if _is_draft(str(tensor.name), threshold)
-        and str(tensor.name).endswith(_MLP_SUFFIXES)
+        if is_draft(str(tensor.name), threshold)
+        and is_mlp_weight(str(tensor.name))
         and str(tensor.name) not in statistics
     )
 
@@ -726,7 +684,11 @@ def _planned_target_layouts(
         ne0 = ne[0]
         ne2 = ne[2] if len(ne) > 2 else 1
         item = resized.get(name)
-        if item is not None and name.endswith("ffn_down.weight"):
+        # The intermediate dimension sits on `ne[0]` for a projection whose pinned array axis is the
+        # last one (`ffn_down`), and on `ne[1]` for the gated pair -- where the matrix entry's own width
+        # already carries the change. Reading that from the shared table rather than from a hardcoded
+        # name keeps this in step with what the repair padded.
+        if item is not None and MLP_AXIS.get(projection_of(name)) == len(ne) - 1:
             ne0 = int(item["after"])
         layouts[name] = (ne0, ne2)
     return layouts
