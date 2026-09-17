@@ -28,6 +28,11 @@ from typing import Any, Mapping, Sequence
 QK_K = 256
 _MODEL_TYPES = {"F32", "F16", "BF16"}
 _MLP_SUFFIXES = ("ffn_down.weight", "ffn_gate.weight", "ffn_up.weight")
+#: Which *array* axis carries the intermediate dimension, per projection. gguf-py hands arrays back in
+#: reversed `ne` order -- the same reversal the writer applies on the way out -- so `ffn_down`'s
+#: intermediate (`ne[0]`, the fastest axis) is the array's last one, while `ffn_gate`/`ffn_up` carry it
+#: on `ne[1]`, i.e. the array's first axis.
+_MLP_AXIS = {"ffn_gate": 0, "ffn_up": 0, "ffn_down": 1}
 _BLOCK = re.compile(r"^blk\.(\d+)\.")
 # A published importance matrix for a 27B model is ~14 MB. A ceiling well above that still refuses a
 # repository that would turn one CLI flag into unbounded download and an in-memory copy.
@@ -106,6 +111,39 @@ def _block_count(fields: Mapping[str, Any]) -> int | None:
     return parsed.pop()
 
 
+def _computed_width(reader: Any) -> int:
+    """The width to align to, computed from the model's own declaration -- never typed in.
+
+    An additive bake leaves `intermediate_size` at `base + 1`, which is 1 mod the k-quant block, so the
+    repair is the *next* multiple. Making a caller pass `--to 17664` is how a run ends up aligned to a
+    width that does not match the model it is padding, so the arithmetic lives here.
+    """
+    source_width, _keys = _declared_width(_fields(reader))
+    if source_width % QK_K == 0:
+        return source_width
+    return source_width + (QK_K - source_width % QK_K)
+
+
+def _draft_threshold(fields: Mapping[str, Any]) -> int | None:
+    """The first `blk.<n>` index belonging to the draft (MTP) block, or None when there is none.
+
+    `block_count` spells the draft block two ways: a *trunk* declares only the decoder layers (the draft
+    sits at exactly `block_count`), while an MTP-bearing file declares the draft layer as a block too
+    (65 for a 64-layer trunk with one MTP layer, with the draft at 64). Subtracting
+    `nextn_predict_layers` gives the one index that is right for both -- testing `index >= block_count`
+    alone misses the draft on every file that counts it.
+    """
+    block_count = _block_count(fields)
+    if block_count is None:
+        return None
+    nextn = 0
+    for name, value in fields.items():
+        if name.endswith(".nextn_predict_layers"):
+            nextn = _integer(value, "nextn_predict_layers")
+            break
+    return block_count - nextn if nextn > 0 else block_count
+
+
 def _is_draft(name: str, block_count: int | None) -> bool:
     match = _BLOCK.match(name)
     return block_count is not None and match is not None and int(match.group(1)) >= block_count
@@ -139,29 +177,46 @@ def _model_plan(reader: Any, target_width: int) -> dict[str, Any]:
     block_count = _block_count(fields)
     plan: list[dict[str, Any]] = []
     draft: list[str] = []
+    draft_from = _draft_threshold(fields)
     for tensor in reader.tensors:
         array = _raw_tensor(tensor)
         name = str(tensor.name)
         matching_suffix = next((suffix for suffix in _MLP_SUFFIXES if name.endswith(suffix)), None)
         if matching_suffix is None:
             continue
-        if _is_draft(name, block_count):
+        # The draft (MTP) block moves with the decoder. An additive edit never touches the head, so its
+        # own width is one below the trunk's -- but llama.cpp allocates *every* block, `nextn` included,
+        # from `feed_forward_length`, and a draft head left behind makes the file unloadable:
+        #
+        #   check_tensor_dims: tensor 'blk.64.ffn_gate.weight' has wrong shape;
+        #   expected 5120, 17664, got 5120, 17408
+        #
+        # The zeros appended there are inert (a zero gate row contributes nothing, and the down
+        # projection column it feeds is zero), so the head's own weights survive untouched.
+        is_draft = _is_draft(name, draft_from)
+        if is_draft:
             draft.append(name)
+        axis = _MLP_AXIS.get(name.rpartition(".")[0].rpartition(".")[2])
+        if axis is None:
+            axes = [index for index, size in enumerate(array.shape) if int(size) == source_width]
+            if len(axes) != 1:
+                raise PreparationRefused(
+                    f"{name} does not expose exactly one axis at declared width {source_width}; fused or expert layouts need an explicit implementation"
+                )
+            axis = axes[0]
+        before = int(array.shape[axis])
+        if before == target_width:
             continue
-        axes = [axis for axis, size in enumerate(array.shape) if int(size) == source_width]
-        if len(axes) != 1:
-            raise PreparationRefused(
-                f"{name} does not expose exactly one axis at declared width {source_width}; fused or expert layouts need an explicit implementation"
-            )
         plan.append({
             "tensor": name,
-            "axis": axes[0],
-            "before": source_width,
+            "axis": axis,
+            "before": before,
             "after": target_width,
             "dtype": str(array.dtype),
+            "draft": is_draft,
         })
     if not plan:
-        raise PreparationRefused("no decoder MLP tensors matched the declared feed-forward width")
+        raise PreparationRefused("no MLP tensors needed resizing; the model is already aligned")
     suspicious = [
         str(tensor.name) for tensor in reader.tensors
         if "ffn" in str(tensor.name) and str(tensor.name).endswith(".weight")
@@ -179,7 +234,7 @@ def _model_plan(reader: Any, target_width: int) -> dict[str, Any]:
         "direction": direction,
         "feed_forward_length_keys": list(width_keys),
         "tensors_resized": len(plan),
-        "draft_tensors_left_alone": sorted(draft),
+        "draft_tensors_resized": sorted(draft),
         "plan": plan,
     }
 
@@ -710,7 +765,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--model", type=Path, required=True, help="unaligned BF16/F16/F32 GGUF")
     parser.add_argument("--out-model", type=Path, required=True, help="aligned GGUF to create")
-    parser.add_argument("--to", type=int, required=True, help="target MLP width (normally the next multiple of 256)")
+    parser.add_argument(
+        "--to",
+        type=int,
+        help="target MLP width; omit it and the width is computed as the next multiple of 256 above the "
+             "model's own declared width, which is what an additive bake's `base + 1` needs",
+    )
     matrix_source = parser.add_mutually_exclusive_group()
     matrix_source.add_argument("--imatrix", type=Path, help="local published imatrix to adapt")
     matrix_source.add_argument(
@@ -742,7 +802,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--base-model is required with --imatrix-source")
     try:
         source_reader = _open(args.model)
-        model_plan = _model_plan(source_reader, args.to)
+        target_width = args.to if args.to is not None else _computed_width(source_reader)
+        model_plan = _model_plan(source_reader, target_width)
         if args.model.resolve() == args.out_model.resolve():
             raise PreparationRefused("the model rewrite never writes over its input")
         if _entry_exists(args.out_model):
