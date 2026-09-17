@@ -104,7 +104,11 @@ def test_model_padding_streams_directly_and_round_trips(tmp_path: Path, monkeypa
 
     assert receipt["direction"] == "pad"
     assert _shapes(padded)["blk.0.ffn_down.weight"] == (ALIGNED, HIDDEN)
-    assert _shapes(padded)[f"blk.{LAYERS}.ffn_down.weight"] == (BASE, HIDDEN)
+    # The dummy (MTP) block moves with the decoder: llama.cpp sizes every block, `nextn` included, from
+    # `feed_forward_length`, so a draft head left at the source width makes the file unloadable. The
+    # round trip below still returns the source's bytes, because what the draft gains here is zeros.
+    assert _shapes(padded)[f"blk.{LAYERS}.ffn_down.weight"] == (ALIGNED, HIDDEN)
+    assert receipt["draft_tensors_resized"], "the draft block is reported as resized, not exempt"
     before, after = _payloads(source), _payloads(stripped)
     assert before.keys() == after.keys()
     assert all(np.array_equal(before[name], after[name]) for name in before)
