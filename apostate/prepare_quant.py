@@ -621,12 +621,29 @@ def _copy_matrix_metadata(writer: Any, fields: Mapping[str, Any]) -> None:
             writer.add_key_value(key, value, _value_type(value))
 
 
+def _unweighted_draft_mlp_tensors(target: Path, matrix_tensors: Mapping[str, Any]) -> list[str]:
+    """Draft MLP weights missing imatrix statistics, which llama.cpp would quantize unweighted."""
+    reader = _open(target)
+    threshold = _draft_threshold(_fields(reader))
+    statistics = {
+        name.removesuffix(".in_sum2") for name in matrix_tensors if name.endswith(".in_sum2")
+    }
+    return sorted(
+        str(tensor.name)
+        for tensor in reader.tensors
+        if _is_draft(str(tensor.name), threshold)
+        and str(tensor.name).endswith(_MLP_SUFFIXES)
+        and str(tensor.name) not in statistics
+    )
+
+
 def adapt_matrix(
     imatrix: Path | str,
     target: Path | str,
     out: Path | str,
     *,
     expect_append: int | None = None,
+    allow_unweighted: bool = False,
     dry_run: bool = False,
 ) -> dict[str, Any]:
     imatrix, target, out = Path(imatrix), Path(target), Path(out)
@@ -635,6 +652,13 @@ def adapt_matrix(
     if _entry_exists(out):
         raise PreparationRefused(f"output already exists: {out}")
     fields, tensors = _matrix_data(imatrix)
+    unweighted_draft = _unweighted_draft_mlp_tensors(target, tensors)
+    if unweighted_draft and not allow_unweighted:
+        raise PreparationRefused(
+            f"{len(unweighted_draft)} draft MLP tensor(s) have no imatrix statistics: "
+            f"{', '.join(unweighted_draft[:4])}. llama.cpp would quantize them unweighted; "
+            "pass --allow-unweighted to accept that explicitly"
+        )
     plan = _matrix_plan(tensors, _target_layouts(target), expect_append)
     receipt: dict[str, Any] = {
         "source": str(imatrix),
@@ -644,6 +668,7 @@ def adapt_matrix(
         "entries_grown": len(plan),
         "entries_added": sum(item["added"] for item in plan),
         "plan": plan,
+        "unweighted_draft_tensors": unweighted_draft,
     }
     if not plan:
         receipt["reason"] = "imatrix already matches the target; output is a provenance copy"
@@ -787,6 +812,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--out-imatrix", type=Path, help="adapted imatrix to create")
     parser.add_argument("--expect-append", type=int, help="exact statistic growth; catches a wrong base matrix")
+    parser.add_argument(
+        "--allow-unweighted",
+        action="store_true",
+        help="accept draft MLP tensors absent from the matrix being quantized unweighted",
+    )
     parser.add_argument("--dry-run", action="store_true", help="validate and print the model plan without writing")
     parser.add_argument("--receipt", type=Path, help="write the combined JSON receipt here")
     return parser
@@ -843,6 +873,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         args.out_model,
                         args.out_imatrix,
                         expect_append=args.expect_append,
+                        allow_unweighted=args.allow_unweighted,
                     )
                     created.append(args.out_imatrix)
             except BaseException:
