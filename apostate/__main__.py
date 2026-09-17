@@ -29,6 +29,7 @@ apostate test   --model D --base M  benchmark (--suite humaneval,mbpp,gsm8k,refu
 apostate prepare-quant --model M.gguf --out-model M-aligned.gguf [--imatrix I --out-imatrix O]
 apostate convert-tree --tree D --out M.gguf [--with-mtp] [--pad-mlp-to N] [--no-pad]
 apostate quantize-gguf --source M.gguf --out Q.gguf --quantization Q4_K_M [--quantizer PATH]
+apostate quantize-tree --tree D --out Q.gguf --quantization Q4_K_M [--imatrix I | --imatrix-source mradermacher --base-model O/M] [--mtp-quantization T] [--export-mmproj [--mmproj-source D] [--mmproj-quantization F16|Q8_0]] [--quantizer PATH]
 apostate list       show cached hf models + local checkpoints
 """
 
@@ -121,6 +122,13 @@ def main(argv=None) -> int:
     if cmd == "quantize-gguf":
         return run_module(
             ["-m", "apostate.quantize_gguf", *args], f"apostate quantize-gguf {' '.join(args)}".strip()
+        )
+    if cmd == "quantize-tree":
+        # The whole chain -- convert, grow the matrix, export the projector, quantize -- so an operator
+        # does not glue three receipts together and, on the way, lose the MTP and projector options the
+        # tooling repo already had.
+        return run_module(
+            ["-m", "apostate.quantize_tree", *args], f"apostate quantize-tree {' '.join(args)}".strip()
         )
     if cmd == "quantize":
         return run_module(["-m", "apostate.quant", *args])
