@@ -131,25 +131,43 @@ def test_imatrix_adaptation_grows_only_matching_statistics(tmp_path: Path):
     matrix = _write_imatrix(tmp_path / "source.imatrix.gguf", BASE)
     out = tmp_path / "adapted.imatrix.gguf"
 
-    receipt = prepare_quant.adapt_matrix(
-        matrix, target, out, expect_append=ALIGNED - BASE, allow_unweighted=True
-    )
+    receipt = prepare_quant.adapt_matrix(matrix, target, out, expect_append=ALIGNED - BASE)
 
     tensors = _payloads(out)
     assert receipt["entries_grown"] == LAYERS
+    assert receipt["unweighted_draft_tensors"], "the draft block is named, not silently unweighted"
     assert tensors["blk.0.ffn_down.weight.in_sum2"].shape == (1, ALIGNED)
     assert np.count_nonzero(tensors["blk.0.ffn_down.weight.in_sum2"][:, BASE:]) == 0
     assert tensors["blk.0.attn_q.weight.in_sum2"].shape == (1, HIDDEN)
 
 
-def test_imatrix_adaptation_refuses_an_unweighted_draft_by_default(tmp_path: Path):
+def test_imatrix_adaptation_proceeds_by_default_and_names_the_unweighted_tensors(tmp_path: Path):
+    """The default contract: a published matrix is written against the base model, so it can never carry
+    the additive draft head's statistics. The run proceeds -- the operator has no other matrix to use --
+    and the receipt names every tensor llama.cpp will quantize without them."""
     source = _write_model(tmp_path / "source.gguf", BASE)
     target = tmp_path / "padded.gguf"
     prepare_quant.prepare_model(source, target, ALIGNED)
     matrix = _write_imatrix(tmp_path / "source.imatrix.gguf", BASE)
 
-    with pytest.raises(prepare_quant.PreparationRefused, match="allow-unweighted"):
-        prepare_quant.adapt_matrix(matrix, target, tmp_path / "adapted.imatrix.gguf")
+    receipt = prepare_quant.adapt_matrix(matrix, target, tmp_path / "adapted.imatrix.gguf")
+
+    assert receipt["unweighted_draft_tensors"]
+    assert all(name.startswith("blk.") for name in receipt["unweighted_draft_tensors"])
+
+
+def test_imatrix_adaptation_refuses_an_unweighted_draft_when_asked(tmp_path: Path):
+    """Opt-in strictness, for the case where the absence *is* the signal: a matrix collected from this
+    model should have covered the draft head, so a gap means the wrong matrix."""
+    source = _write_model(tmp_path / "source.gguf", BASE)
+    target = tmp_path / "padded.gguf"
+    prepare_quant.prepare_model(source, target, ALIGNED)
+    matrix = _write_imatrix(tmp_path / "source.imatrix.gguf", BASE)
+
+    with pytest.raises(prepare_quant.PreparationRefused, match="refuse-unweighted"):
+        prepare_quant.adapt_matrix(
+            matrix, target, tmp_path / "adapted.imatrix.gguf", refuse_unweighted=True
+        )
 
 def test_one_command_prepares_model_and_matrix_with_receipt(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
     source = _write_model(tmp_path / "source.gguf", BASE)
@@ -164,7 +182,6 @@ def test_one_command_prepares_model_and_matrix_with_receipt(tmp_path: Path, caps
         "--to", str(ALIGNED),
         "--imatrix", str(matrix),
         "--out-imatrix", str(adapted),
-        "--allow-unweighted",
         "--expect-append", str(ALIGNED - BASE),
         "--receipt", str(receipt),
     ])
@@ -198,7 +215,6 @@ def test_one_command_can_resolve_a_published_matrix(
         "--to", str(ALIGNED),
         "--imatrix-source", "mradermacher",
         "--base-model", "Qwen/Qwen3.8-27B",
-        "--allow-unweighted",
         "--out-imatrix", str(tmp_path / "adapted.imatrix.gguf"),
         "--expect-append", str(ALIGNED - BASE),
     ])
@@ -252,7 +268,6 @@ def test_matrix_only_mode_grows_a_matrix_for_an_already_aligned_model(
         "--model", str(aligned),
         "--imatrix", str(matrix),
         "--out-imatrix", str(out),
-        "--allow-unweighted",
     ])
 
     assert code == 0, capsys.readouterr().err
@@ -491,7 +506,6 @@ def test_expect_append_must_match_exactly(tmp_path: Path):
     with pytest.raises(prepare_quant.PreparationRefused, match="does not equal"):
         prepare_quant.adapt_matrix(
             matrix, target, tmp_path / "adapted.gguf", expect_append=ALIGNED - BASE,
-            allow_unweighted=True,
         )
 
 
@@ -500,7 +514,7 @@ def test_matching_imatrix_still_creates_the_requested_output(tmp_path: Path):
     matrix = _write_imatrix(tmp_path / "matching.imatrix.gguf", ALIGNED)
     out = tmp_path / "copied.imatrix.gguf"
 
-    receipt = prepare_quant.adapt_matrix(matrix, target, out, allow_unweighted=True)
+    receipt = prepare_quant.adapt_matrix(matrix, target, out)
 
     assert receipt["entries_grown"] == 0
     assert out.exists()
