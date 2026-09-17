@@ -247,11 +247,14 @@ apostate quantize-gguf \
   --quantization Q4_K_M \
   --imatrix qwen-diode-mlp17664.imatrix.gguf \
   --quantizer /path/to/llama-quantize \
-  --tensor-type blk.64.ffn_down.weight:Q8_0
+  --mtp-quantization Q8_0 \
 ```
 
 The external command is printed before it runs; `--dry-run` prints it without invoking llama.cpp. Explicit
-`--tensor-type name:TYPE` pins are supported. Apostate does not yet ship Bartowski/Mradermacher's
+`--mtp-quantization TYPE` derives the draft-block pin from the source file's own metadata -- the block's
+index is `block_count - nextn_predict_layers`, so you never state it, and the pin is refused when it names
+no tensor rather than handed to llama-quantize to ignore. `--tensor-type name:TYPE` remains for arbitrary
+pins and composes with it. Apostate does not yet ship Bartowski/Mradermacher's
 family-keyed override tables, so it does not claim automatic recipe parity.
 
 ### One call from a bake's tree to a quantized GGUF
