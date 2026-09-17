@@ -590,7 +590,7 @@ def adapt_matrix(
     out: Path | str,
     *,
     expect_append: int | None = None,
-    allow_unweighted: bool = False,
+    refuse_unweighted: bool = False,
     dry_run: bool = False,
 ) -> dict[str, Any]:
     imatrix, target, out = Path(imatrix), Path(target), Path(out)
@@ -600,11 +600,18 @@ def adapt_matrix(
         raise PreparationRefused(f"output already exists: {out}")
     fields, tensors = _matrix_data(imatrix)
     unweighted_draft = _unweighted_draft_mlp_tensors(target, tensors)
-    if unweighted_draft and not allow_unweighted:
+    # Default to proceeding. Every published matrix is written against the *base* model, so it carries no
+    # statistics for the additive draft head -- and an operator who has only that matrix has no other
+    # action available. A gate they must pass on every run is a gate they learn to pass blind, which is
+    # how a guardrail stops guarding. The degradation is bounded (the draft block, never the trunk, and
+    # `_unweighted_draft_mlp_tensors` looks only there) and every affected tensor is named in the
+    # receipt, which is printed. `--refuse-unweighted` is for the case where the absence *is* the signal:
+    # a matrix that was collected from this model and should therefore have covered the draft head.
+    if unweighted_draft and refuse_unweighted:
         raise PreparationRefused(
             f"{len(unweighted_draft)} draft MLP tensor(s) have no imatrix statistics: "
-            f"{', '.join(unweighted_draft[:4])}. llama.cpp would quantize them unweighted; "
-            "pass --allow-unweighted to accept that explicitly"
+            f"{', '.join(unweighted_draft[:4])}. llama.cpp would quantize them unweighted; drop "
+            "--refuse-unweighted to accept that, or collect a matrix that covers the draft head"
         )
     plan = _matrix_plan(tensors, _target_layouts(target), expect_append)
     receipt: dict[str, Any] = {
@@ -770,9 +777,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out-imatrix", type=Path, help="adapted imatrix to create")
     parser.add_argument("--expect-append", type=int, help="exact statistic growth; catches a wrong base matrix")
     parser.add_argument(
-        "--allow-unweighted",
+        "--refuse-unweighted",
         action="store_true",
-        help="accept draft MLP tensors absent from the matrix being quantized unweighted",
+        help="refuse when draft MLP tensors are absent from the matrix. Off by default: no published "
+             "matrix covers the additive draft head, so the usual run quantizes that block unweighted "
+             "and says which tensors in the receipt. Pass this when a matrix that should have covered "
+             "the draft head does not",
     )
     parser.add_argument("--dry-run", action="store_true", help="validate and print the model plan without writing")
     parser.add_argument("--receipt", type=Path, help="write the combined JSON receipt here")
@@ -863,7 +873,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         target_model,
                         args.out_imatrix,
                         expect_append=args.expect_append,
-                        allow_unweighted=args.allow_unweighted,
+                        refuse_unweighted=args.refuse_unweighted,
                     )
                     created.append(args.out_imatrix)
             except BaseException:
