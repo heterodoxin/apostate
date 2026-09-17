@@ -24,6 +24,7 @@ apostate ccv   --model M --out D   build a predictive/contrastive co-vector chec
 apostate kcrn   --model M --out D   build a projected fixed-weight KCRN checkpoint
 apostate ticv   --model D --out D2  bake soft-deflection removal (TICV) into an abliterated checkpoint
 apostate finetune --model M --out D [--data path.jsonl] [--steps N]  QLoRA finetune (train alias)
+apostate talk   --model D [--backend vllm]   chat
 apostate test   --model D --base M  benchmark (--suite humaneval,mbpp,gsm8k,refusal,all)
 apostate prepare-quant --model M.gguf --out-model M-aligned.gguf [--imatrix I --out-imatrix O]
 apostate convert-tree --tree D --out M.gguf [--with-mtp] [--pad-mlp-to N] [--no-pad]
