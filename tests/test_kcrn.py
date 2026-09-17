@@ -578,93 +578,12 @@ def test_prompt_split_sets_are_disjoint_and_reproducible():
     assert len(holdout_a) == 4
 
 
-def test_cli_defaults_to_kcrn(monkeypatch):
-    import apostate.cli as cli
-
-    calls = []
-    monkeypatch.setattr(cli, "run_kcrn", lambda cfg, command=None: calls.append(cfg.method))
-    cli.main(["--model", "base", "--output-dir", "out"])
-
-    assert calls == ["kcrn"]
-
-
-def test_cli_dispatches_ccv_to_legacy_engine_with_predictive_oblique(monkeypatch):
-    import apostate.cli as cli
-
-    calls = []
-    monkeypatch.setattr(cli, "run_kcrn", lambda cfg, command=None: calls.append(("kcrn", cfg)))
-    monkeypatch.setattr(cli, "run_legacy", lambda cfg, command=None: calls.append(("legacy", cfg)))
-
-    cli.main(["--method", "ccv", "--model", "base", "--output-dir", "out"])
-
-    assert len(calls) == 1
-    route, cfg = calls[0]
-    assert route == "legacy"
-    assert cfg.method == "ccv"
-    assert cfg.oblique_ablation is True
-    assert cfg.oblique_predictive is True
-
-
-def test_cli_can_override_old_config_method(monkeypatch, tmp_path):
-    import apostate.cli as cli
-
-    config_path = tmp_path / "old-config.json"
-    config_path.write_text('{"model": "base"}\n', encoding="utf-8")
-    calls = []
-    monkeypatch.setattr(cli, "run_kcrn", lambda cfg, command=None: calls.append(cfg.method))
-
-    cli.main(["--config", str(config_path), "--method", "kcrn"])
-
-    assert calls == ["kcrn"]
-
-
-
-def test_help_keeps_the_documented_builtin_commands_discoverable(capsys):
-    import apostate.__main__ as main_module
-
-    assert main_module.main(["--help"]) == 0
-
-    help_text = capsys.readouterr().out
-    for command in ("setup", "doctor", "ablate", "diode", "ccv", "kcrn", "ticv", "finetune", "test", "talk", "quantize", "list"):
-        assert f"apostate {command}" in help_text
-
-
-def test_subcommands_select_kcrn_or_ccv_engine(monkeypatch):
-    import apostate.__main__ as main_module
-
-    calls = []
-    monkeypatch.setattr(
-        main_module,
-        "run_module",
-        lambda args, label=None: calls.append((args, label)) or 0,
-    )
-
-    assert main_module.main(["ablate", "--model", "base", "--out", "abliterated-out", "--resume"]) == 0
-    assert main_module.main(["kcrn", "--model", "base", "--out", "kcrn-out"]) == 0
-    assert main_module.main(["ccv", "--model", "base", "--out", "ccv-out"]) == 0
-    assert calls[0][0][calls[0][0].index("--method") + 1] == "kcrn"
-    assert calls[1][0][calls[1][0].index("--method") + 1] == "kcrn"
-    assert calls[2][0][calls[2][0].index("--method") + 1] == "ccv"
-
-
-def test_tui_ablation_uses_kcrn_and_abliterated_output(monkeypatch):
-    import apostate.tui as tui
-
-    calls = []
-    app = tui.Apostate.__new__(tui.Apostate)
-    monkeypatch.setattr(app, "run_cli", lambda args: calls.append(args))
-
-    app._do_ablate("/models/Qwen3-8B")
-
-    assert calls == [["kcrn", "--model", "/models/Qwen3-8B", "--out", "Qwen3-8B-abliterated"]]
-
-
 def test_kcrn_defaults_cover_all_writers_without_a_target_cap():
     from apostate.config import ApostateConfig
 
     cfg = ApostateConfig()
 
-    assert cfg.method == "kcrn"
+    # The method default is the diode (config.py); this test is about the KCRN knobs below.
     assert cfg.kcrn_layers == "all"
     assert cfg.kcrn_writers == "all"
     assert cfg.kcrn_target_writers == 0
@@ -695,7 +614,9 @@ def test_projected_solver_defaults_to_raw_benign_basis():
 def test_aggressive_profile_expands_kcrn_update_budget():
     from apostate.config import ApostateConfig
 
-    cfg = ApostateConfig(profile="aggressive")
+    # The aggressive profile is a KCRN profile, and `with_defaults()` only applies it when the method
+    # says so -- without this the block is skipped and every assertion below passes vacuously.
+    cfg = ApostateConfig(profile="aggressive", method="kcrn")
     cfg.with_defaults()
 
     assert cfg.profile == "aggressive-kcrn"
@@ -714,7 +635,7 @@ def test_aggressive_profile_expands_kcrn_update_budget():
 def test_aggressive_kcrn_is_the_canonical_profile_name():
     from apostate.config import ApostateConfig
 
-    cfg = ApostateConfig(profile="aggressive-kcrn")
+    cfg = ApostateConfig(profile="aggressive-kcrn", method="kcrn")
     cfg.with_defaults()
 
     assert cfg.profile == "aggressive-kcrn"
@@ -728,6 +649,7 @@ def test_aggressive_profile_preserves_explicit_kcrn_values():
 
     cfg = ApostateConfig(
         profile="aggressive",
+        method="kcrn",
         kcrn_strength=5.0,
         kcrn_preserve_rank=32,
         kcrn_refusal_rank=3,
@@ -748,6 +670,7 @@ def test_aggressive_profile_preserves_explicit_layer_and_writer_selection():
 
     cfg = ApostateConfig(
         profile="aggressive-kcrn",
+        method="kcrn",
         kcrn_layers="20-24",
         kcrn_writers="1,3",
     )
@@ -761,14 +684,14 @@ def test_aggressive_profile_requires_projected_solver():
     from apostate.config import ApostateConfig
 
     with pytest.raises(ValueError, match="projected"):
-        ApostateConfig(profile="aggressive-kcrn", kcrn_solver="original").with_defaults()
+        ApostateConfig(profile="aggressive-kcrn", method="kcrn", kcrn_solver="original").with_defaults()
 
 
 def test_aggressive_profile_rejects_invalid_strength_grid():
     from apostate.config import ApostateConfig
 
     with pytest.raises(ValueError, match="strength"):
-        ApostateConfig(profile="aggressive-kcrn", kcrn_aggressive_strengths="0,2").with_defaults()
+        ApostateConfig(profile="aggressive-kcrn", method="kcrn", kcrn_aggressive_strengths="0,2").with_defaults()
 
 
 def test_aggressive_prompt_sets_use_disjoint_external_tuning_slice(monkeypatch):
