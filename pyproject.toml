@@ -12,6 +12,9 @@ dependencies = ["textual>=0.80"]
 # Heavy ML dependencies are installed separately
 [project.optional-dependencies]
 gguf = ["numpy", "gguf", "huggingface_hub"]
+# `apostate convert-tree` turns a bake's own HF tree into a BF16 GGUF (with the appended neuron's width
+# repaired in the same pass), which needs the safetensors stack on top of the gguf one.
+convert = ["numpy", "gguf", "torch", "safetensors"]
 
 
 [project.scripts]
