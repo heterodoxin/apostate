@@ -183,65 +183,63 @@ apostate ablate \
 
 KCRN keeps its own flags (`--kcrn-strength`, `--kcrn-preserve-rank`, `--kcrn-harmful-rank`, and the safeguards above); its verified operating point is `--kcrn-strength 5`, harmful rank 16, preserve rank 64, last-position keys. For large models under either method, `--load-in-4bit` fits and evaluates in NF4 while the bake still loads fresh fp16 on host memory and saves an fp16 checkpoint, so KL stays a clean fp16-vs-fp16 comparison.
 
-## Quantize an additive diode with stock llama.cpp
+## Export a diode as GGUF
 
-An additive diode appends one MLP neuron, so a base width such as 17408 becomes 17409. That width is
-not divisible by llama.cpp's 256-element K-quant block: stock `llama-quantize` warns and stores affected
-tensors as F16. A base-model importance matrix also has 17408 statistics for those tensors and is
-rejected against the wider model.
+**Apostate bake support and direct GGUF-export support are different contracts.** The direct converter is
+currently validated only for the Qwen3.5/3.8 dense/hybrid family used by the measured 27B diode build.
+It does not yet support Qwen3.6-35B-A3B MoE, Gemma 4, or every architecture Apostate itself can bake.
+Those families remain hard refusals until each has an upstream-converter byte oracle and real load proof.
 
-Convert the baked Hugging Face checkpoint to an unquantized BF16 GGUF once, then prepare the model and
-matrix together:
+Install the export dependencies:
+
+```bash
+python -m pip install -e ".[convert]"
+```
+
+For the supported family, convert the baked HF tree directly. This is the fast path: it preserves BF16
+payloads, applies the family-specific GGUF transforms, and computes the next 256-wide MLP boundary itself.
+Pass `--with-mtp` only when the tree contains a draft head; its MLP moves with the decoder.
+
+```bash
+apostate convert-tree \
+  --tree qwen-diode-hf \
+  --out qwen-diode-bf16-mlp17664.gguf \
+  --with-mtp \
+  --receipt qwen-diode-conversion.json
+```
+
+`apostate prepare-quant` remains for an already-converted, unaligned BF16/F16/F32 GGUF. It pads the model
+and grows a published imatrix in one transaction. A published matrix has no draft-MTP statistics: the tool
+refuses that silent unweighted quantization unless `--allow-unweighted` explicitly records the choice.
 
 ```bash
 apostate prepare-quant \
-  --model qwen-diode-bf16.gguf \
-  --out-model qwen-diode-bf16-mlp17664.gguf \
-  --to 17664 \
+  --model legacy-diode-bf16.gguf \
+  --out-model legacy-diode-bf16-mlp17664.gguf \
   --imatrix-source mradermacher \
   --base-model Qwen/Qwen3.8-27B \
-  --out-imatrix qwen-diode-mlp17664.imatrix.gguf \
-  --expect-append 256 \
+  --out-imatrix legacy-diode-mlp17664.imatrix.gguf \
+  --allow-unweighted \
   --receipt quant-preparation.json
 ```
 
-`--expect-append` must equal the growth exactly. The base matrix grows from 17408 to 17664, so 256 is
-correct; the baked model grows by 255 because its real diode neuron is already the 17409th value. An
-exact gate refuses a matrix from the wrong base instead of zero-filling genuine channels.
+K-quants, imatrix-weighted rounding, and published tensor-upcast recipes are llama.cpp operations. Apostate
+does not bundle llama.cpp source or binaries. Install a compatible llama.cpp distribution and either put
+`llama-quantize` on `PATH` or pass it explicitly:
 
-`--imatrix-source` accepts `mradermacher` or `bartowski`. Apostate asks the Hub for the publisher's
-candidate repository, requires exactly one imatrix file, pins the commit it found, downloads that
-revision through `huggingface_hub`, and reuses `~/.cache/apostate/imatrix` thereafter. It never
-invents a remote filename: current publishers differ even for the same base
-(`Qwen3.8-27B.imatrix.gguf` versus `Qwen3.8-27B-imatrix.gguf`). The receipt records the repository,
-filename, pinned commit, and SHA-256 of the matrix that was actually used, and marks a cache hit as
-such with no commit, because a cached file cannot prove which revision produced it. An implausibly
-large remote matrix is refused rather than downloaded. Use `--imatrix /path/to/imatrix.gguf` for an
-existing or custom matrix; the local and automatic forms are mutually exclusive.
+```bash
+apostate quantize-gguf \
+  --source qwen-diode-bf16-mlp17664.gguf \
+  --out qwen-diode-Q4_K_M.gguf \
+  --quantization Q4_K_M \
+  --imatrix qwen-diode-mlp17664.imatrix.gguf \
+  --quantizer /path/to/llama-quantize \
+  --tensor-type blk.64.ffn_down.weight:Q8_0
+```
 
-Use `--dry-run` first. Automatic discovery may populate the imatrix cache, but no model, adapted
-matrix, or receipt is written. The command validates both artifacts before writing either output. It
-pads only the decoder MLP tensors, leaves a GGUF draft/MTP block at its original width, appends zero
-importance to only the statistics that grew, and records provenance in both the artifacts and receipt.
-The model rewrite declares the final tensor table first and then streams each payload directly from
-source to destination; it does not make a model-sized temporary spool or repeat the multi-hour
-HF-to-GGUF conversion. The reverse operation (`--to` the unaligned width) strips only
-a region proven to contain all zeros, which provides a BF16-against-BF16 inertness baseline.
-
-The source must be an unquantized F32/F16/BF16 GGUF. Fused or ambiguous MLP layouts are refused rather
-than guessed. Each output path is first reserved with an exclusive create, so an existing file or a
-symlink is refused rather than followed, and the finished artifact is then committed with
-`os.replace`. That path needs no hard links, so it behaves the same on Windows and POSIX and on
-filesystems such as exFAT. A failure after the model is published removes the artifacts of that run,
-so an identical retry stays possible. A matrix
-that already matches the target is still written to `--out-imatrix` as a provenance copy, so a
-successful exit never leaves a requested artifact missing. This path uses the public `gguf-py` API and
-unmodified llama.cpp; install the optional tooling with `python -m pip install -e ".[gguf]"` when it is
-not already available from a llama.cpp checkout.
-
-Both produced artifacts record the basename of their inputs, not absolute paths, because they are
-meant to be quantized and published. Full local paths stay in the receipt, which stays on the
-machine that ran the command.
+The external command is printed before it runs; `--dry-run` prints it without invoking llama.cpp. Explicit
+`--tensor-type name:TYPE` pins are supported. Apostate does not yet ship Bartowski/Mradermacher's
+family-keyed override tables, so it does not claim automatic recipe parity.
 
 ## Benchmark
 
