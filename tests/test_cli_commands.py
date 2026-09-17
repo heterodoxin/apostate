@@ -35,6 +35,7 @@ DOCUMENTED_COMMANDS = (
     "prepare-quant",
     "convert-tree",
     "quantize-gguf",
+    "quantize-tree",
     "quantize",
     "list",
 )

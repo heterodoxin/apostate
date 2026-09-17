@@ -741,6 +741,49 @@ def _write_receipt(path: Path, document: Mapping[str, Any]) -> None:
         raise
 
 
+# --- the seam `apostate quantize-tree` composes through -------------------------------------------------
+#
+# `quantize-tree` runs this module's work rather than a copy of it: it grows the same matrix against the
+# trunk it has just converted, reads headers with the same reader, hashes artifacts the same way and
+# writes its one receipt under the same exclusive-create rule. These are the names that seam needs, each
+# a re-export rather than a second implementation -- two answers to "how does a matrix grow" is exactly
+# the divergence the shared `gguf_layout` module exists to prevent.
+
+
+def open_gguf(path: Path | str) -> Any:
+    """A GGUF reader for `path`, refused as this command's own error."""
+    return _open(Path(path))
+
+
+def gguf_fields(reader: Any) -> dict[str, Any]:
+    """An open GGUF's metadata, without the `GGUF.*` layout keys."""
+    return _fields(reader)
+
+
+def sha256(path: Path | str) -> str:
+    """A file's SHA-256, streamed; the digest a receipt records."""
+    return _sha256(Path(path))
+
+
+def entry_exists(path: Path | str) -> bool:
+    """True when something occupies `path` -- including a symlink `Path.exists` would follow away."""
+    return _entry_exists(Path(path))
+
+
+def unweighted_draft_mlp_tensors(target: Path | str, matrix_tensors: Mapping[str, Any]) -> list[str]:
+    """Draft MLP weights with no statistics in `matrix_tensors`.
+
+    `adapt_matrix` returns these for the matrix it grew; `quantize-tree` passes an empty mapping to ask
+    the same question of a trunk it quantized with no matrix at all.
+    """
+    return _unweighted_draft_mlp_tensors(Path(target), matrix_tensors)
+
+
+def write_receipt(path: Path | str, document: Mapping[str, Any]) -> None:
+    """Publish a JSON receipt, refusing to replace anything already at `path`."""
+    _write_receipt(Path(path), document)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="apostate prepare-quant",

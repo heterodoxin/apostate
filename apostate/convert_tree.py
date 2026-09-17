@@ -626,6 +626,12 @@ def convert(
             reservation.unlink(missing_ok=True)
         raise
     reservation.unlink(missing_ok=True)
+    # The stage was a file inside its own private directory, and moving it out leaves the directory
+    # behind: an empty `.<name>.<random>` beside every artifact this command produces.
+    try:
+        stage.parent.rmdir()
+    except OSError:
+        pass
     receipt.seconds = time.time() - started
     return receipt
 
