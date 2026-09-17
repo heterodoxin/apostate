@@ -536,8 +536,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     conversion = convert_tree.convert(tree, trunk, with_mtp=with_mtp, dry_run=args.dry_run)
     if args.dry_run:
         return _plan(
-            args=args, tree=tree, out=out, trunk=trunk, matrix_out=matrix_out, projectors=projectors,
-            conversion=conversion, draft_sources=draft_sources, mtp_kind=mtp_kind, with_mtp=with_mtp,
+            args=args, tree=tree, out=out, trunk=trunk, matrix=resolved, matrix_out=matrix_out,
+            projectors=projectors, conversion=conversion, draft_sources=draft_sources, mtp_kind=mtp_kind,
+            with_mtp=with_mtp,
             provenance=provenance, projector_preflight=projector_preflight, projector_source=projector_source,
             quantizer=quantizer, converter=converter, seconds=time.time() - started,
         )
@@ -673,12 +674,36 @@ def _matrix_reference(
     }
 
 
+def _planned_matrix_growth(
+    conversion: convert_tree.Receipt, matrix: Path | None
+) -> dict[str, Any]:
+    """Use the dry-run tensor plan to forecast matrix growth without writing artifacts."""
+    deferred = {
+        "entries_grown": None,
+        "entries_added": None,
+        "reason": "deferred until the converted trunk and matrix compatibility are validated",
+    }
+    if matrix is None or conversion.target_layouts is None:
+        return deferred
+    try:
+        _, tensors = prepare_quant._matrix_data(matrix)
+        plan = prepare_quant._matrix_plan(tensors, conversion.target_layouts, None)
+    except prepare_quant.PreparationRefused:
+        return deferred
+    return {
+        "entries_grown": len(plan),
+        "entries_added": sum(int(item["added"]) for item in plan),
+        "reason": "computed from the converted tensor plan",
+    }
+
+
 def _plan(
     *,
     args: argparse.Namespace,
     tree: Path,
     out: Path,
     trunk: Path,
+    matrix: Path | None,
     matrix_out: Path,
     projectors: Mapping[str, Path],
     conversion: convert_tree.Receipt,
@@ -696,9 +721,9 @@ def _plan(
 
     Every decision the run makes is here: which width the conversion will pad to, which draft index the
     pin will name, which matrix was resolved and from which revision, how the projector recipe will be
-    fed to llama-quantize, and the exact trunk argv. What a plan cannot know without doing the work --
-    the matrix growth against a trunk that does not exist yet, and the file's own tensor names -- is
-    named as such instead of guessed.
+    fed to llama-quantize, and the exact trunk argv. Matrix growth is computed from the planned converted
+    tensor layouts when the supplied matrix is compatible; malformed or mismatched matrix inputs remain
+    deferred instead of being guessed.
     """
     index = predicted_draft_index(_read_json(tree / "config.json")) if mtp_kind is not None else None
     derived = f"blk.{index}.*:{mtp_kind}" if index is not None else None
@@ -725,7 +750,7 @@ def _plan(
             {
                 "source": dict(provenance),
                 "grown": _basename(matrix_out),
-                "growth": "computed against the converted trunk; a plan has no trunk to grow against yet",
+                "growth": _planned_matrix_growth(conversion, matrix),
             }
             if provenance is not None
             else None

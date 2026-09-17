@@ -114,6 +114,7 @@ class Receipt:
     bytes_written: int = 0
     seconds: float = 0.0
     warnings: list[str] = field(default_factory=list)
+    target_layouts: dict[str, tuple[int, int]] | None = field(default=None, repr=False, compare=False)
 
     def document(self) -> dict[str, Any]:
         return {
@@ -133,6 +134,17 @@ class Receipt:
             "seconds": round(self.seconds, 2),
             "warnings": list(self.warnings),
         }
+
+
+def _gguf_layout(shape: Sequence[int]) -> tuple[int, int]:
+    """Return the GGUF `ne[0]` and `ne[2]` dimensions for an array shape."""
+    ne = tuple(reversed(shape))
+    return ne[0], ne[2] if len(ne) > 2 else 1
+
+
+def _target_layouts(jobs: Sequence[Job]) -> dict[str, tuple[int, int]]:
+    """Capture the planned GGUF layouts while the dry-run has the tensor plan in hand."""
+    return {job.target: _gguf_layout(job.out_shape) for job in jobs}
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -572,6 +584,7 @@ def convert(
         padded_tensors=sum(1 for job in jobs if job.pad_axis is not None),
         draft_tensors=sum(1 for job in jobs if job.source.startswith(family.draft_prefix)),
         vision_tensors_skipped=vision_skipped,
+        target_layouts=_target_layouts(jobs) if dry_run else None,
     )
     if pad_mode == "none" and source_width % QK_K:
         receipt.warnings.append(f"the tree's {unaligned_note(source_width)} (drop --no-pad to pad it)")

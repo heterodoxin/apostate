@@ -208,6 +208,43 @@ apostate convert-tree \
   --receipt qwen-diode-conversion.json
 ```
 
+The bake mode changes the preparation geometry, not the quantizer command. The
+CLI exposes both modes as `--diode-additive` and `--no-diode-additive`:
+
+| Bake mode | HF tree width | `convert-tree` behavior | Matrix handling |
+| --- | ---: | --- | --- |
+| `--diode-additive` | base + 1 | Pads every MLP, including the MTP block, to the next 256-wide boundary | Grows the published base matrix to the padded width |
+| `--no-diode-additive` | base | Keeps the base width; an already aligned base needs no padding | A compatible base matrix needs no adaptation; dry-run reports zero growth |
+
+After the tree exists, both modes use the same `quantize-tree` or
+`quantize-gguf` invocation. The command reads the tree's declared geometry and
+the converted GGUF's metadata; no additive-mode flag is needed at quantization
+time:
+
+```bash
+apostate quantize-tree \
+  --tree qwen-diode-hf \
+  --out qwen-diode-Q4_K_M.gguf \
+  --quantization Q4_K_M \
+  --imatrix qwen-diode-mlp.imatrix.gguf \
+  --mtp-quantization Q8_0 \
+  --receipt qwen-diode-quantization.json
+```
+
+`--no-pad` is a conversion-geometry override, not a synonym for
+`--no-diode-additive`. Do not use it for an additive bake intended for
+K-quantization: preserving the unaligned base + 1 width causes the same
+F16-fallback problem that `convert-tree` normally repairs. For an overwrite
+bake, an aligned tree already produces `padding: "none"` without the override.
+`prepare-quant --out-model` is likewise unnecessary for that aligned case; use
+the compatible original-width matrix, or let `quantize-tree` create its
+provenance copy. The `quantize-tree --dry-run` receipt exposes this
+distinction: when the supplied matrix matches the planned tensor layouts,
+aligned source and target widths report `entries_grown: 0` and
+`entries_added: 0`. Matrix shapes or tensor names that cannot be proven
+compatible remain deferred rather than guessed; the real run validates them
+before quantization.
+
 `apostate prepare-quant` repairs an already-converted, unaligned BF16/F16/F32 GGUF: it pads the model and
 grows a published imatrix in one transaction. When the model needs no repair — a tree that
 `convert-tree` already padded — omit `--out-model` and only the matrix is grown, with no model rewrite.
