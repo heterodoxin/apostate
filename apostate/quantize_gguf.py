@@ -1,7 +1,16 @@
 """Quantize a prepared GGUF through an external llama-quantize executable.
 
-This module never bundles llama.cpp. Apostate owns model and imatrix preparation;
-llama.cpp owns K-quant and imatrix-weighted quantization.
+This module never bundles llama.cpp. Apostate owns model and imatrix preparation; llama.cpp owns K-quant
+and imatrix-weighted quantization, so the executable is *located*, never vendored: `--quantizer` first,
+then `APOSTATE_LLAMA_QUANTIZE`, then PATH. The variable exists because the other two mechanisms each cost
+something -- a flag must be retyped on every invocation and bakes one machine's absolute path into the
+argv, while PATH requires the binary to be name-resolvable at all, which a release tarball or a
+per-project checkout is not -- and an ambient variable can be set once in a shell profile, a CI variable
+or a systemd unit. An empty or whitespace-only variable counts as *unset*; a variable that names no
+binary is refused by name rather than fallen through to PATH, so a typo cannot quietly select a different
+build. Whichever mechanism won is recorded with the resolved path (`Resolved.record`): in `quantize-gguf`'s
+console note, and in `quantize-tree`'s receipt -- including for the converter,
+`--llama-cpp-source` / `APOSTATE_LLAMA_CPP_SOURCE`, which resolves through the same rule.
 
 It also owns the two argv shapes that are llama.cpp's rather than this project's: the trunk's, where a
 tensor-type pin is one `--tensor-type name=TYPE`, and the vision projector's, where the same recipe is a
@@ -32,11 +41,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Callable, NoReturn, Sequence
+from typing import Any, Callable, NamedTuple, NoReturn, Sequence
 
 from . import gguf_layout, prepare_quant
 
@@ -45,17 +55,102 @@ class QuantizationRefused(RuntimeError):
     """The requested external quantization cannot be run safely."""
 
 
-def resolve_quantizer(explicit: str) -> Path:
-    if explicit:
-        path = Path(explicit).expanduser()
-        if not path.is_file():
-            raise QuantizationRefused(f"llama-quantize not found: {path}")
-        return path
-    found = shutil.which("llama-quantize")
+#: The two environment variables that stand in for the two flags that point at llama.cpp, one per flag so
+#: the mapping is the flag's own name: `APOSTATE_LLAMA_QUANTIZE` for `--quantizer`, and
+#: `APOSTATE_LLAMA_CPP_SOURCE` for `--llama-cpp-source`. Ambient and machine-scoped, so a profile, a CI
+#: variable or a systemd unit can name this machine's llama.cpp once -- and `APOSTATE_COMMAND`, which
+#: `apostate.cli` already reads, is the same convention rather than an invented one.
+QUANTIZER_VARIABLE = "APOSTATE_LLAMA_QUANTIZE"
+LLAMA_CPP_SOURCE_VARIABLE = "APOSTATE_LLAMA_CPP_SOURCE"
+
+
+class Resolved(NamedTuple):
+    """One external llama.cpp tool: where it is, and which mechanism named it.
+
+    The two travel together because the second is what makes the first auditable -- a machine with an old
+    build exported in its profile must be visible in the artifact, not merely a path someone can compare
+    against their own muscle memory. `mechanism` is literally the mechanism's name: the flag
+    (`--quantizer`), the variable (`APOSTATE_LLAMA_QUANTIZE`), or `PATH`.
+    """
+
+    path: Path
+    mechanism: str
+
+    def record(self) -> dict[str, str]:
+        """The receipt's shape for this tool -- the same shape for both llama.cpp tools."""
+        return {"path": str(self.path), "resolved_by": self.mechanism}
+
+    def note(self) -> str:
+        """The console's one-line version of the same fact, for a command that writes no receipt."""
+        return f"# {self.path.name} resolved from {self.mechanism}: {self.path}"
+
+
+def resolve_tool(
+    *,
+    flag: str,
+    explicit: str,
+    variable: str,
+    program: str,
+    usage: str,
+    target: str,
+    member: str | None = None,
+    context: str = "",
+    refusal: type[Exception] = QuantizationRefused,
+) -> Resolved:
+    """One external llama.cpp tool by explicit flag, then environment variable, then PATH.
+
+    The order is precedence and it is deliberate. A flag is the operator's statement for *this*
+    invocation and always wins. A variable is the same statement for a machine, so a checkout that is not
+    -- and should not be -- on PATH can still be named once. PATH is the ambient last resort.
+
+    An empty or whitespace-only variable is treated as *unset*, because `export APOSTATE_LLAMA_QUANTIZE=`
+    in a shell profile is a mistake rather than an instruction, and refusing every run over a variable the
+    operator believes they never set would be the wrong trade. A variable with a *value* that names no
+    tool is the opposite case: it is refused, naming the variable, rather than ignored and fallen through
+    to PATH, because the fallback would silently run a different build than the one this machine asked
+    for -- and a recorded path nobody chose is worse than a refusal.
+
+    `member` is the file inside the named directory, for a tool that is a checkout rather than a binary.
+    `program`, `usage` and `target` are the refusal's vocabulary, so that a reader who has just learned
+    from a failure that the variable exists also learns the flag and the PATH option in the same sentence.
+    """
+    problem = "which is not a file" if member is None else f"which holds no {member}"
+    for mechanism, value in ((flag, explicit), (variable, os.environ.get(variable, ""))):
+        if not value.strip():
+            continue
+        pointed = Path(value).expanduser()
+        candidate = pointed if member is None else pointed / member
+        if candidate.is_file():
+            # Absolute, because the receipt outlives the working directory it was written from: a run
+            # started in a checkout must still name the binary it ran when read a month later.
+            return Resolved(candidate.absolute(), mechanism)
+        raise refusal(
+            f"{program} was not found{context}: {mechanism} names {pointed}, {problem}, so it is refused "
+            f"rather than fallen through to PATH. Pass {flag} {usage}, set {variable} to {target}, or put "
+            f"{program} on PATH"
+        )
+    found = shutil.which(program)
     if found:
-        return Path(found)
-    raise QuantizationRefused(
-        "llama-quantize was not found on PATH; install llama.cpp or pass --quantizer /path/to/llama-quantize"
+        return Resolved(Path(found).absolute(), "PATH")
+    raise refusal(
+        f"{program} was not found{context}: pass {flag} {usage}, set {variable} to {target}, or put "
+        f"{program} on PATH"
+    )
+
+
+def resolve_quantizer(explicit: str) -> Resolved:
+    """The llama-quantize build to run: `--quantizer`, then `APOSTATE_LLAMA_QUANTIZE`, then PATH.
+
+    Which binary ran is provenance, not trivia: a build without `--tensor-type-file`, or of a different
+    commit, is a different program, so the resolved path and the mechanism are both handed back.
+    """
+    return resolve_tool(
+        flag="--quantizer",
+        explicit=explicit,
+        variable=QUANTIZER_VARIABLE,
+        program="llama-quantize",
+        usage="/path/to/llama-quantize",
+        target="a llama-quantize binary",
     )
 
 
@@ -266,7 +361,12 @@ def main(argv: Sequence[str] | None = None) -> int:
              "tensor in the draft block is the one that wins",
     )
     parser.add_argument("--threads", type=int, default=0, help="llama-quantize threads; 0 lets llama.cpp choose")
-    parser.add_argument("--quantizer", default="", help="external llama-quantize path; default resolves PATH")
+    parser.add_argument(
+        "--quantizer",
+        default="",
+        help="external llama-quantize path; overrides APOSTATE_LLAMA_QUANTIZE, and both override PATH. An "
+             "empty variable counts as unset; a wrong one is refused by name, not fallen through to PATH",
+    )
     parser.add_argument("--dry-run", action="store_true", help="print the command without invoking it")
     args = parser.parse_args(argv)
     try:
@@ -284,8 +384,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             # answer to a tensor the block-wide pin would also have covered.
             pins.append(mtp_pin(args.source, args.mtp_quantization))
         invocation = command(
-            quantizer, args.source, args.out, args.quantization, args.imatrix, pins, args.threads
+            quantizer.path, args.source, args.out, args.quantization, args.imatrix, pins, args.threads
         )
+        # This command writes no receipt document, so the resolution -- which mechanism named the binary,
+        # and which absolute path it resolved to -- is stated on the trail the argv is printed on.
+        print(quantizer.note())
         print("+ " + render_command(invocation))
         if args.dry_run:
             return 0

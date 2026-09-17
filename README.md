@@ -237,18 +237,29 @@ apostate prepare-quant \
 ```
 
 K-quants, imatrix-weighted rounding, and published tensor-upcast recipes are llama.cpp operations. Apostate
-does not bundle llama.cpp source or binaries. Install a compatible llama.cpp distribution and either put
-`llama-quantize` on `PATH` or pass it explicitly:
+does not bundle llama.cpp source or binaries. Install a compatible llama.cpp distribution and put
+`llama-quantize` on `PATH`, name it once with `APOSTATE_LLAMA_QUANTIZE`, or pass it explicitly:
 
 ```bash
+export APOSTATE_LLAMA_QUANTIZE=/path/to/llama-quantize   # once, in a profile or a CI variable
+
 apostate quantize-gguf \
   --source qwen-diode-bf16-mlp17664.gguf \
   --out qwen-diode-Q4_K_M.gguf \
   --quantization Q4_K_M \
   --imatrix qwen-diode-mlp17664.imatrix.gguf \
-  --quantizer /path/to/llama-quantize \
   --mtp-quantization Q8_0 \
 ```
+
+A flag is not needed when the variable is set, and a flag still wins when both are: resolution is
+`--quantizer` > `APOSTATE_LLAMA_QUANTIZE` > `PATH`. The variable is worth preferring to a flag because it
+is ambient — set once, no absolute path retyped on every invocation and none baked into the argv — and
+worth preferring to `PATH` when the binary is a release tarball or a per-project checkout that is not, and
+should not be, name-resolvable. An empty or whitespace-only variable counts as unset; a variable with a
+value that names no binary is refused **naming the variable** rather than silently falling back to `PATH`,
+because a typo'd export must not quietly run a different build. The path a run actually resolved is printed
+with the mechanism that named it (`# llama-quantize resolved from APOSTATE_LLAMA_QUANTIZE: /path/to/...`),
+so the trail says which build ran.
 
 The external command is printed before it runs; `--dry-run` prints it without invoking llama.cpp. Explicit
 `--mtp-quantization TYPE` derives the draft-block pin from the source file's own metadata -- the block's
@@ -261,8 +272,8 @@ family-keyed override tables, so it does not claim automatic recipe parity.
 
 The steps above are the pieces; `quantize-tree` runs them in order and writes one receipt for the whole
 chain — the tree and its index hash, the width decision, the matrix's publisher/revision/sha256 and its
-growth, the exact `llama-quantize` argv, the tensor-type pins, the unweighted draft tensors, and the
-output's hash and size.
+growth, the two resolved llama.cpp tools and the mechanism that named each, the exact `llama-quantize`
+argv, the tensor-type pins, the unweighted draft tensors, and the output's hash and size.
 
 ```bash
 apostate quantize-tree --tree qwen-diode-hf --out M-Q4_K_M.gguf --quantization Q4_K_M \
@@ -279,11 +290,23 @@ apostate quantize-tree --tree qwen-diode-hf --out M-Q4_K_M.gguf --quantization Q
 - **Vision** is exported with llama.cpp's own converter: `--export-mmproj` (with `--mmproj-source` when the
   baked tree is text-only) writes `<Model>-mmproj-F16.gguf` after preflighting the vision source, and
   `--mmproj-quantization Q8_0` reproduces the hybrid rule as `<Model>-mmproj-hybrid-Q8_0-F16.gguf`.
-- **Both llama.cpp tools are located, not bundled.** `llama-quantize` resolves from `PATH`, or from
-  `--quantizer /path/to/llama-quantize`; the vision export's `convert_hf_to_gguf.py` resolves from `PATH`,
-  or from `--llama-cpp-source /path/to/llama.cpp` (the checkout that holds it). Neither resolving is a
-  refusal that names the flag, never a fallback to a bundled copy — Apostate ships no llama.cpp source or
-  binaries, which is also why the quantize step is the only part of this chain that is not Python here.
+- **Both llama.cpp tools are located, not bundled.** Each resolves from its flag, then its own variable,
+  then `PATH` — in that order:
+
+  | tool | flag | variable | what the path names |
+  | --- | --- | --- | --- |
+  | `llama-quantize` | `--quantizer` | `APOSTATE_LLAMA_QUANTIZE` | the binary |
+  | `convert_hf_to_gguf.py` | `--llama-cpp-source` | `APOSTATE_LLAMA_CPP_SOURCE` | the llama.cpp checkout that holds it |
+
+  An empty or whitespace-only variable counts as unset (a shell exporting an empty variable is a mistake,
+  not an instruction); a variable whose value names no binary, or no checkout holding the converter, is
+  **refused naming the variable** rather than silently falling through to `PATH`, so a typo'd export
+  cannot quietly select a different build. Neither resolving is a fallback to a bundled copy — Apostate
+  ships no llama.cpp source or binaries, which is also why the quantize step is the only part of this chain
+  that is not Python here. The receipt records, for each tool, the resolved absolute path **and** the
+  mechanism that named it (`quantize.quantizer` and `mmproj.converter`: `{"path": …, "resolved_by":
+  "--quantizer" | "APOSTATE_LLAMA_QUANTIZE" | "PATH"}`), because a machine with an old build exported in
+  its profile must be visible in the artifact rather than merely suspected.
 - `--dry-run` prints the whole plan — the width decision, the resolved matrix, the pins, the composed
   argv — and writes nothing.
 - Refusals rather than downgrades: a base with no resolvable matrix is refused unless `--no-imatrix` says

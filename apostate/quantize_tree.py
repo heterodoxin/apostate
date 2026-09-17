@@ -42,14 +42,19 @@ This fork has no donor-head graft: the converter writes the tree's *own* `mtp.*`
 something quietly missing here.
 
 **Vision.** `--export-mmproj` needs llama.cpp's `convert_hf_to_gguf.py`, resolved from
-`--llama-cpp-source` or PATH, and the projector source (the tree, else `--mmproj-source`) must index a
-vision tower before any conversion work. `F16` exports the projector as it stands; `Q8_0` reproduces the
-tooling repository's hybrid rule exactly (2-D weights whose `ne[0]` is a multiple of 32 -> `Q8_0`,
-everything else left at its source type) and quantizes *from* the F16 export, which is kept only with
-`--keep-intermediate`. The receipt records whether llama-quantize read the recipe as a file or as flags.
+`--llama-cpp-source`, else `APOSTATE_LLAMA_CPP_SOURCE` (the checkout that holds it, for a machine that
+should not have llama.cpp on PATH), else PATH, and the projector source (the tree, else `--mmproj-source`)
+must index a vision tower before any conversion work. `F16` exports the projector as it stands; `Q8_0`
+reproduces the tooling repository's hybrid rule exactly (2-D weights whose `ne[0]` is a multiple of 32 ->
+`Q8_0`, everything else left at its source type) and quantizes *from* the F16 export, which is kept only
+with `--keep-intermediate`. The receipt records whether llama-quantize read the recipe as a file or as
+flags, and which mechanism named each of the two llama.cpp tools.
 
 **Paths.** The receipt names artifacts by basename, because it is the document that leaves the machine;
-the argv is the one place a local path is needed to reproduce a run.
+the argv is the one place a local path is needed to reproduce a run. The two deliberate exceptions are the
+resolved llama.cpp tools (`mmproj.converter`, `quantize.quantizer`): there the absolute path *is* the
+fact, because "which binary ran" is provenance this project names, and a machine whose profile still
+exports an old build must be visible in the artifact rather than merely suspected.
 """
 
 from __future__ import annotations
@@ -58,7 +63,6 @@ import argparse
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -71,6 +75,11 @@ from . import convert_tree, prepare_quant, quantize_gguf
 from .conversion import ConversionRefused, _need_int, family_for_config
 
 SCHEMA = "apostate.tree-quantization.v1"
+
+#: llama.cpp's own converter: the one file a `--llama-cpp-source` checkout -- or an
+#: `APOSTATE_LLAMA_CPP_SOURCE` -- must hold. Named once so the flag's help, the refusal and the PATH
+#: lookup all speak about the same script.
+CONVERTER = "convert_hf_to_gguf.py"
 
 #: The published-imatrix cache `prepare-quant` uses; one cache, so a chain and a one-off run share it.
 IMATRIX_CACHE = Path("~/.cache/apostate/imatrix")
@@ -192,28 +201,24 @@ def preflight_mmproj(source: Path) -> dict[str, Any]:
     }
 
 
-def resolve_converter(llama_cpp_source: str) -> Path:
-    """llama.cpp's own HF-to-GGUF converter, from `--llama-cpp-source` or PATH.
+def resolve_converter(llama_cpp_source: str) -> quantize_gguf.Resolved:
+    """llama.cpp's own HF-to-GGUF converter: `--llama-cpp-source`, then `APOSTATE_LLAMA_CPP_SOURCE`, PATH.
 
     The fork bundles no llama.cpp, and the projector is the one leg that needs it: this project's own
-    converter cannot write an mmproj. The refusal names both places that were tried, because either one
-    is the fix.
+    converter cannot write an mmproj. Resolution is `quantize_gguf.resolve_tool`'s, so both llama.cpp
+    tools share one rule and one shape of provenance -- the difference between them is only that this
+    one's flag and variable name a *checkout* and the tool is `convert_hf_to_gguf.py` inside it.
     """
-    if llama_cpp_source.strip():
-        candidate = Path(llama_cpp_source).expanduser() / "convert_hf_to_gguf.py"
-        if candidate.is_file():
-            return candidate
-        raise TreeQuantizationRefused(
-            f"{candidate} is not a file: --llama-cpp-source takes the llama.cpp checkout that holds "
-            "convert_hf_to_gguf.py, or leave it out to resolve the converter from PATH"
-        )
-    found = shutil.which("convert_hf_to_gguf.py")
-    if found:
-        return Path(found)
-    raise TreeQuantizationRefused(
-        "convert_hf_to_gguf.py was not found, so --export-mmproj cannot run: pass "
-        "--llama-cpp-source /path/to/llama.cpp (the checkout that holds convert_hf_to_gguf.py) or put "
-        "that script on PATH"
+    return quantize_gguf.resolve_tool(
+        flag="--llama-cpp-source",
+        explicit=llama_cpp_source,
+        variable=quantize_gguf.LLAMA_CPP_SOURCE_VARIABLE,
+        program=CONVERTER,
+        usage="/path/to/llama.cpp (the checkout that holds convert_hf_to_gguf.py)",
+        target="that checkout",
+        member=CONVERTER,
+        context=", so --export-mmproj cannot run",
+        refusal=TreeQuantizationRefused,
     )
 
 
@@ -308,11 +313,11 @@ def _recipe_beside(projector: Path, recipe: Sequence[tuple[str, str]]) -> Path:
 
 
 def export_projector(
-    converter: Path,
+    converter: quantize_gguf.Resolved,
     source: Path,
     paths: Mapping[str, Path],
     quantization: str,
-    quantizer: Path,
+    quantizer: quantize_gguf.Resolved,
     threads: int,
 ) -> tuple[dict[str, Any], list[Path]]:
     """Export the projector with llama.cpp's converter, then quantize it when asked.
@@ -320,17 +325,22 @@ def export_projector(
     Returns the receipt leg and every path this leg created. The F16 export is always written first --
     even when only the hybrid is wanted, because the hybrid is quantized *from* it -- so a `Q8_0` run
     leaves an F16 projector behind too, which the caller keeps or deletes with its other intermediates.
+
+    `converter` is the resolved tool, not a bare path: the leg records where the converter is *and* which
+    mechanism named it, so an operator reading the receipt later can tell a `--dry-run` from a run against
+    the wrong checkout.
     """
     f16 = paths["f16"]
     export_argv = [
-        sys.executable, str(converter), str(source), "--mmproj", "--outtype", "f16", "--outfile", str(f16)
+        sys.executable, str(converter.path), str(source), "--mmproj", "--outtype", "f16",
+        "--outfile", str(f16),
     ]
     created = [f16]
     try:
         _run(export_argv)
         leg: dict[str, Any] = {
             "source": source.name,
-            "converter": converter.name,
+            "converter": converter.record(),
             "export_argv": export_argv,
             "f16": f16.name,
             "hybrid": None,
@@ -340,10 +350,12 @@ def export_projector(
             hybrid = paths["hybrid"]
             recipe = quantize_gguf.hybrid_recipe(prepare_quant.open_gguf(f16))
             recipe_file = (
-                _recipe_beside(f16, recipe) if quantize_gguf.supports_tensor_type_file(quantizer) else None
+                _recipe_beside(f16, recipe)
+                if quantize_gguf.supports_tensor_type_file(quantizer.path)
+                else None
             )
             argv = quantize_gguf.projector_command(
-                quantizer, f16, hybrid, "Q8_0", recipe, threads, recipe_file=recipe_file
+                quantizer.path, f16, hybrid, "Q8_0", recipe, threads, recipe_file=recipe_file
             )
             try:
                 _run(argv)
@@ -432,11 +444,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="projector quantization: F16 exports it as converted, Q8_0 adds the tooling repository's "
              "hybrid (2-D weights whose ne[0] is a multiple of 32 -> Q8_0, the rest at their source type)",
     )
-    parser.add_argument("--quantizer", default="", help="external llama-quantize path; default resolves PATH")
+    parser.add_argument(
+        "--quantizer",
+        default="",
+        help="external llama-quantize path; overrides APOSTATE_LLAMA_QUANTIZE, and both override PATH. An "
+             "empty variable counts as unset; a wrong one is refused by name, not fallen through to PATH",
+    )
     parser.add_argument(
         "--llama-cpp-source",
         default="",
-        help="llama.cpp checkout holding convert_hf_to_gguf.py; default resolves that script from PATH",
+        help="llama.cpp checkout holding convert_hf_to_gguf.py; overrides APOSTATE_LLAMA_CPP_SOURCE, and "
+             "both override PATH. An empty variable counts as unset; a checkout that holds no converter "
+             "is refused by name, not fallen through to PATH",
     )
     parser.add_argument("--threads", type=int, default=0, help="llama-quantize threads; 0 lets llama.cpp choose")
     parser.add_argument(
@@ -548,7 +567,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         derived = draft_pin(trunk, mtp_kind) if mtp_kind is not None else None
         pins = pin_entries(derived, args.tensor_type)
         argv = quantize_gguf.command(
-            quantizer, trunk, out, args.quantization, matrix_out if resolved is not None else None,
+            quantizer.path, trunk, out, args.quantization, matrix_out if resolved is not None else None,
             [entry["pin"] for entry in pins], args.threads,
         )
         _run(argv)
@@ -576,6 +595,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "quantize": {
                 "argv": argv,
                 "pins": pins,
+                "quantizer": quantizer.record(),
                 "output": out.name,
                 "threads": args.threads,
             },
@@ -668,8 +688,8 @@ def _plan(
     provenance: Mapping[str, Any] | None,
     projector_preflight: Mapping[str, Any] | None,
     projector_source: Path,
-    quantizer: Path,
-    converter: Path | None,
+    quantizer: quantize_gguf.Resolved,
+    converter: quantize_gguf.Resolved | None,
     seconds: float,
 ) -> dict[str, Any]:
     """The whole plan, spelled the way the real run would spell it, and nothing written.
@@ -684,7 +704,7 @@ def _plan(
     derived = f"blk.{index}.*:{mtp_kind}" if index is not None else None
     pins = pin_entries(derived, args.tensor_type)
     argv = quantize_gguf.command(
-        quantizer, trunk, out, args.quantization, matrix_out if provenance is not None else None,
+        quantizer.path, trunk, out, args.quantization, matrix_out if provenance is not None else None,
         [entry["pin"] for entry in pins], args.threads,
     )
     return {
@@ -714,9 +734,9 @@ def _plan(
             {
                 "source": projector_preflight["source"],
                 "tensors": projector_preflight["tensors"],
-                "converter": converter.name,
+                "converter": converter.record(),
                 "export_argv": [
-                    sys.executable, str(converter), str(projector_source), "--mmproj",
+                    sys.executable, str(converter.path), str(projector_source), "--mmproj",
                     "--outtype", "f16", "--outfile", str(projectors["f16"]),
                 ],
                 "f16": _basename(projectors["f16"]),
@@ -724,7 +744,7 @@ def _plan(
                 "recipe": (
                     "one name=type line per projector tensor, 2-D with ne[0] a multiple of 32 -> Q8_0, "
                     "the rest at their source type; fed as --tensor-type-file when this build documents "
-                    f"it, else as repeated --tensor-type flags ({_basename(quantizer)})"
+                    f"it, else as repeated --tensor-type flags ({_basename(quantizer.path)})"
                 )
                 if args.mmproj_quantization == "Q8_0"
                 else None,
@@ -732,7 +752,13 @@ def _plan(
             if projector_preflight is not None
             else None
         ),
-        "quantize": {"argv": argv, "pins": pins, "output": out.name, "threads": args.threads},
+        "quantize": {
+            "argv": argv,
+            "pins": pins,
+            "quantizer": quantizer.record(),
+            "output": out.name,
+            "threads": args.threads,
+        },
         # A fact about a converted trunk, and a plan has none: the trunk's own tensor names are what say
         # which draft MLP weights the matrix does not cover.
         "unweighted_draft_tensors": None,
