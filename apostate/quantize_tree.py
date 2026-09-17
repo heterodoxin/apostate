@@ -16,9 +16,9 @@ invocation:
   (e) print one receipt, and write it if asked.
 
 No leg is re-implemented here: the conversion is `apostate.convert_tree`, the matrix work is
-`apostate.prepare_quant`, the argv is `apostate.quantize_gguf`, and every layout fact is
-`apostate.gguf_layout`. That is the point of the command -- one place decides the order, and each step
-still refuses in its own name.
+`apostate.prepare_quant`, the argv and the draft pin are `apostate.quantize_gguf`, and every layout fact is
+`apostate.gguf_layout`, reached through those legs and never re-derived here. That is the point of the
+command -- one place decides the order, and each step still refuses in its own name.
 
 **MTP.** `--mtp-quantization TYPE` pins the draft block with `blk.<draft>.*=TYPE`, where the draft index
 is `block_count - nextn_predict_layers` read out of the *converted file's* own header (a trunk of 64
@@ -28,8 +28,14 @@ llama-quantize matches `--tensor-type` patterns with `std::regex_search` and say
 pattern matches no tensor: measured against the build in `D:\\AI\\loaders\\llamacpp`
 (`0.4.0-dev, build 10845, commit dbeb37548`), a recipe entry matching nothing exits 0, prints no
 warning, and quantizes every tensor as if it had not been passed. A pin landing one block past the draft
-would therefore ship a draft block at the base type in silence. llama.cpp stores every 1-D tensor -- the
-block's norms -- as F32 whatever the pin says; that is expected and not a bug.
+would therefore ship a draft block at the base type in silence.
+
+The derived pin is composed *after* any explicit `--tensor-type`, because llama-quantize applies the
+first pattern that matches a tensor name and then stops: an explicit pin for a tensor inside the block is
+the narrower, deliberate statement and wins, while the derived pin still covers the block's other
+tensors -- a default, not an override. The receipt records the pins in the order they were sent, each
+with the flag that asked for it, so a reader can see which one won. llama.cpp stores every 1-D tensor --
+the block's norms -- as F32 whatever the pin says; that is expected and not a bug.
 
 This fork has no donor-head graft: the converter writes the tree's *own* `mtp.*` head, so there is no
 `--mtp-source`, and a draft head taken from a different checkpoint is a separate feature rather than
@@ -59,7 +65,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from . import convert_tree, gguf_layout, prepare_quant, quantize_gguf
+from . import convert_tree, prepare_quant, quantize_gguf
 # `_need_int` is the shared config reader the registry hands out for exactly this: a command that is not
 # the engine still has to read a tree's own geometry the same way the engine does.
 from .conversion import ConversionRefused, _need_int, family_for_config
@@ -84,22 +90,6 @@ PROJECTOR_QUANTIZATIONS = ("F16", "Q8_0")
 
 class TreeQuantizationRefused(RuntimeError):
     """The chain cannot be run safely. Every leg's refusal reaches the operator as this command's own."""
-
-
-def _layout_integer(value: Any, label: str) -> int:
-    """`gguf_layout`'s integer reader, refused as this command's own error.
-
-    Not `prepare-quant`'s reader: the operator typed *this* command, so its refusals carry its name.
-    Zero is accepted, because a file may declare `nextn_predict_layers` as 0 and `draft_threshold` reads
-    that as "no draft head"; a negative is a corrupt header and is not.
-    """
-    try:
-        result = int(value)
-    except (TypeError, ValueError) as error:
-        raise TreeQuantizationRefused(f"{label} is not an integer: {value!r}") from error
-    if result < 0:
-        raise TreeQuantizationRefused(f"{label} is negative: {result}")
-    return result
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -244,33 +234,31 @@ def projector_paths(out: Path, quantization: str) -> dict[str, Path]:
 
 
 def draft_pin(converted: Path, kind: str) -> str:
-    """`blk.<draft>.*:TYPE` for a converted trunk, refused when it names no tensor in it.
+    """`blk.<draft>.*:TYPE` for a converted trunk, refused as this command's own error.
 
-    The index comes from the file's own `block_count` and `nextn_predict_layers` through the shared
-    `gguf_layout` rule, so a family that counts its draft layer as a block and one that does not both
-    land on the right block.
-
-    The check is the point of the function: llama-quantize applies a `--tensor-type` pattern with
-    `std::regex_search` and reports a pattern that matched nothing with complete silence, so a pin that
-    lands one block past the draft would ship the draft block at the base quantization without a word.
+    The derivation is `quantize_gguf.mtp_pin`'s -- one implementation for both commands, and the one that
+    checks the pin against the file's own tensor names. What this name adds is the refusal type: an
+    operator who typed `quantize-tree` is not told that `quantize-gguf` refused.
     """
-    reader = prepare_quant.open_gguf(converted)
-    threshold = gguf_layout.draft_threshold(
-        prepare_quant.gguf_fields(reader), _layout_integer, TreeQuantizationRefused
-    )
-    if threshold is None:
-        raise TreeQuantizationRefused(
-            f"{converted.name} declares no block_count, so the draft (MTP) index cannot be read from it; "
-            "quantize a file a converter wrote, or drop --mtp-quantization"
-        )
-    if not any(re.search(f"blk.{threshold}.*", str(tensor.name)) for tensor in reader.tensors):
-        raise TreeQuantizationRefused(
-            f"--mtp-quantization {kind} pins blk.{threshold}.*, but {converted.name} has no tensor in "
-            f"block {threshold}: llama-quantize would apply the pin to nothing and quantize the draft "
-            "block at the base type without a word. Convert with the draft block (the tree's mtp.* "
-            "tensors, and no --no-mtp), or drop --mtp-quantization"
-        )
-    return f"blk.{threshold}.*:{kind}"
+    return quantize_gguf.mtp_pin(converted, kind, TreeQuantizationRefused)
+
+
+def pin_entries(derived: str | None, explicit: Sequence[str]) -> list[dict[str, str]]:
+    """The tensor-type pins in the order llama-quantize will see them, each with the flag that asked.
+
+    Order is precedence, not presentation: llama-quantize walks the patterns in argv order and stops at
+    the first that matches a tensor name, so the *derived* draft pin goes last and an explicit
+    `--tensor-type` for a tensor inside the draft block is the one that wins -- a computed, block-wide
+    default must not silently beat a deliberate, narrower statement. The derived pin still covers every
+    other tensor of the block, which is what makes it a default rather than an override.
+
+    The names are spelled here so the receipt can say which pin came from where; the argv wants only the
+    pins themselves.
+    """
+    entries = [{"pin": value, "origin": "--tensor-type"} for value in explicit]
+    if derived is not None:
+        entries.append({"pin": derived, "origin": "--mtp-quantization"})
+    return entries
 
 
 def resolve_matrix(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
@@ -557,13 +545,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 intermediates.append(projectors["f16"])
         intermediates.append(trunk)
 
-        pins: list[str] = []
-        if mtp_kind is not None:
-            pins.append(draft_pin(trunk, mtp_kind))
-        pins.extend(args.tensor_type)
+        derived = draft_pin(trunk, mtp_kind) if mtp_kind is not None else None
+        pins = pin_entries(derived, args.tensor_type)
         argv = quantize_gguf.command(
             quantizer, trunk, out, args.quantization, matrix_out if resolved is not None else None,
-            pins, args.threads,
+            [entry["pin"] for entry in pins], args.threads,
         )
         _run(argv)
         created.append(out)
@@ -583,7 +569,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "converted": with_mtp,
                 "tensors": len(draft_sources),
                 "quantization": mtp_kind,
-                "pin": pins[0] if mtp_kind is not None else None,
+                "pin": derived,
             },
             "imatrix": _matrix_reference(matrix_out, provenance, growth),
             "mmproj": projector_leg,
@@ -695,11 +681,11 @@ def _plan(
     named as such instead of guessed.
     """
     index = predicted_draft_index(_read_json(tree / "config.json")) if mtp_kind is not None else None
-    pins = [f"blk.{index}.*:{mtp_kind}"] if index is not None else []
-    pins.extend(args.tensor_type)
+    derived = f"blk.{index}.*:{mtp_kind}" if index is not None else None
+    pins = pin_entries(derived, args.tensor_type)
     argv = quantize_gguf.command(
         quantizer, trunk, out, args.quantization, matrix_out if provenance is not None else None,
-        pins, args.threads,
+        [entry["pin"] for entry in pins], args.threads,
     )
     return {
         "schema": SCHEMA,
@@ -712,7 +698,7 @@ def _plan(
             "tensors": len(draft_sources),
             "quantization": mtp_kind,
             "draft_index": index,
-            "pin": pins[0] if index is not None else None,
+            "pin": derived,
             "checked_against": "the converted file's block_count and nextn_predict_layers at run time",
         },
         "imatrix": (

@@ -560,7 +560,9 @@ def test_the_chain_converts_grows_quantizes_and_writes_one_receipt(
     code = quantize_tree.main([
         "--tree", str(tree), "--out", str(out), "--quantization", "Q4_K_M",
         "--imatrix", str(matrix), "--quantizer", str(quantizer),
-        "--mtp-quantization", "Q8_0", "--tensor-type", "output.weight:Q6_K", "--receipt", str(receipt),
+        "--mtp-quantization", "Q8_0",
+        "--tensor-type", f"blk.{DRAFT_INDEX}.ffn_down.weight:Q6_K", "--tensor-type", "output.weight:Q6_K",
+        "--receipt", str(receipt),
     ])
     printed = _printed(capsys.readouterr().out)
     document = json.loads(receipt.read_text(encoding="utf-8"))
@@ -569,7 +571,19 @@ def test_the_chain_converts_grows_quantizes_and_writes_one_receipt(
     assert printed == document, "the printed receipt and the written one are the same document"
     argv = _recorded(quantizer)
     pins = [argv[index + 1] for index, value in enumerate(argv) if value == "--tensor-type"]
-    assert pins == [f"blk.{DRAFT_INDEX}.*=Q8_0", "output.weight=Q6_K"]
+    # llama-quantize applies the first pattern that matches a tensor name and then stops, so the narrow,
+    # deliberate pin for a draft tensor is composed first and gets the say...
+    assert pins[:2] == [f"blk.{DRAFT_INDEX}.ffn_down.weight=Q6_K", "output.weight=Q6_K"], (
+        "an explicit pin for a tensor inside the draft block must win over the computed default"
+    )
+    # ...while the derived pin stays block-wide, so it still covers the block's *other* tensors: it is a
+    # default, not an override of what the operator asked for by name.
+    assert pins[-1] == f"blk.{DRAFT_INDEX}.*=Q8_0", "the derived pin covers the rest of the draft block"
+    assert document["quantize"]["pins"] == [
+        {"pin": f"blk.{DRAFT_INDEX}.ffn_down.weight:Q6_K", "origin": "--tensor-type"},
+        {"pin": "output.weight:Q6_K", "origin": "--tensor-type"},
+        {"pin": f"blk.{DRAFT_INDEX}.*:Q8_0", "origin": "--mtp-quantization"},
+    ]
     grown = Path(argv[argv.index("--imatrix") + 1])
     assert grown.name == "bake-Q4_K_M.imatrix.gguf"
     assert argv[-2:] == ["q4_k_m", "0"]

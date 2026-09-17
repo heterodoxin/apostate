@@ -28,7 +28,7 @@ apostate talk   --model D [--backend vllm]   chat
 apostate test   --model D --base M  benchmark (--suite humaneval,mbpp,gsm8k,refusal,all)
 apostate prepare-quant --model M.gguf [--out-model M-aligned.gguf] [--imatrix I | --imatrix-source mradermacher --base-model O/M --out-imatrix O]
 apostate convert-tree --tree D --out M.gguf [--with-mtp] [--pad-mlp-to N] [--no-pad]
-apostate quantize-gguf --source M.gguf --out Q.gguf --quantization Q4_K_M [--imatrix I] [--tensor-type name:TYPE] [--quantizer PATH]
+apostate quantize-gguf --source M.gguf --out Q.gguf --quantization Q4_K_M [--imatrix I] [--tensor-type name:TYPE] [--mtp-quantization T] [--quantizer PATH]
 apostate quantize-tree --tree D --out Q.gguf --quantization Q4_K_M [--mtp-quantization T] [--export-mmproj [--mmproj-source D] [--mmproj-quantization F16|Q8_0]] [--imatrix I | --imatrix-source mradermacher --base-model O/M] [--quantizer PATH]
 apostate list       show cached hf models + local checkpoints
 """
