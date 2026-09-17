@@ -25,9 +25,9 @@ apostate kcrn   --model M --out D   build a projected fixed-weight KCRN checkpoi
 apostate ticv   --model D --out D2  bake soft-deflection removal (TICV) into an abliterated checkpoint
 apostate finetune --model M --out D [--data path.jsonl] [--steps N]  QLoRA finetune (train alias)
 apostate test   --model D --base M  benchmark (--suite humaneval,mbpp,gsm8k,refusal,all)
-apostate prepare-quant --model M.gguf --out-model M-aligned.gguf [--to N] [--imatrix I --out-imatrix O]
+apostate prepare-quant --model M.gguf --out-model M-aligned.gguf [--imatrix I --out-imatrix O]
 apostate convert-tree --tree D --out M.gguf [--with-mtp] [--pad-mlp-to N] [--no-pad]
-apostate talk   --model D [--backend vllm]   chat
+apostate quantize-gguf --source M.gguf --out Q.gguf --quantization Q4_K_M [--quantizer PATH]
 apostate list       show cached hf models + local checkpoints
 """
 
@@ -117,6 +117,10 @@ def main(argv=None) -> int:
         # The bake's own output is an HF tree, not a GGUF: this is the step that turns it into one, with
         # the appended neuron's width repaired in the same pass so `prepare-quant` has nothing left to fix.
         return run_module(["-m", "apostate.convert_tree", *args], f"apostate convert-tree {' '.join(args)}".strip())
+    if cmd == "quantize-gguf":
+        return run_module(
+            ["-m", "apostate.quantize_gguf", *args], f"apostate quantize-gguf {' '.join(args)}".strip()
+        )
     if cmd == "quantize":
         return run_module(["-m", "apostate.quant", *args])
     if cmd in ("train", "finetune"):
