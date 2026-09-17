@@ -59,7 +59,7 @@ def _bf16(*shape: int, start: float = 1.0):
     return (torch.arange(count, dtype=torch.float32).reshape(shape) + start).to(torch.bfloat16)
 
 
-def _config(*, with_draft: bool = True) -> dict:
+def _config(*, with_draft: bool = True, width: int = WIDTH) -> dict:
     return {
         "architectures": ["Qwen3_5ForConditionalGeneration"],
         "model_type": "qwen3_5",
@@ -67,7 +67,7 @@ def _config(*, with_draft: bool = True) -> dict:
             "model_type": "qwen3_5_text",
             "num_hidden_layers": LAYERS,
             "hidden_size": HIDDEN,
-            "intermediate_size": WIDTH,
+            "intermediate_size": width,
             "max_position_embeddings": 128,
             "num_attention_heads": HEADS,
             "num_key_value_heads": KV_HEADS,
@@ -90,7 +90,14 @@ def _config(*, with_draft: bool = True) -> dict:
     }
 
 
-def _tree(path: Path, *, with_draft: bool = True, vision: bool = False) -> Path:
+def _tree(
+    path: Path,
+    *,
+    with_draft: bool = True,
+    vision: bool = False,
+    width: int = WIDTH,
+    draft_width: int = DRAFT_WIDTH,
+) -> Path:
     """A miniature bake: one decoder layer and, on request, the draft head and a vision tower."""
     path.mkdir(parents=True, exist_ok=True)
     prefix = "model.language_model.layers.0"
@@ -100,9 +107,9 @@ def _tree(path: Path, *, with_draft: bool = True, vision: bool = False) -> Path:
         "lm_head.weight": _bf16(VOCAB, HIDDEN, start=50.0),
         f"{prefix}.input_layernorm.weight": _bf16(HIDDEN),
         f"{prefix}.post_attention_layernorm.weight": _bf16(HIDDEN),
-        f"{prefix}.mlp.gate_proj.weight": _bf16(WIDTH, HIDDEN),
-        f"{prefix}.mlp.up_proj.weight": _bf16(WIDTH, HIDDEN),
-        f"{prefix}.mlp.down_proj.weight": _bf16(HIDDEN, WIDTH),
+        f"{prefix}.mlp.gate_proj.weight": _bf16(width, HIDDEN),
+        f"{prefix}.mlp.up_proj.weight": _bf16(width, HIDDEN),
+        f"{prefix}.mlp.down_proj.weight": _bf16(HIDDEN, width),
         f"{prefix}.self_attn.q_proj.weight": _bf16(HEADS * HEAD_DIM, HIDDEN),
         f"{prefix}.self_attn.k_proj.weight": _bf16(KV_HEADS * HEAD_DIM, HIDDEN),
         f"{prefix}.self_attn.v_proj.weight": _bf16(KV_HEADS * HEAD_DIM, HIDDEN),
@@ -118,9 +125,9 @@ def _tree(path: Path, *, with_draft: bool = True, vision: bool = False) -> Path:
         tensors["mtp.pre_fc_norm_hidden.weight"] = _bf16(HIDDEN)
         tensors["mtp.layers.0.input_layernorm.weight"] = _bf16(HIDDEN)
         tensors["mtp.layers.0.post_attention_layernorm.weight"] = _bf16(HIDDEN)
-        tensors["mtp.layers.0.mlp.gate_proj.weight"] = _bf16(DRAFT_WIDTH, HIDDEN)
-        tensors["mtp.layers.0.mlp.up_proj.weight"] = _bf16(DRAFT_WIDTH, HIDDEN)
-        tensors["mtp.layers.0.mlp.down_proj.weight"] = _bf16(HIDDEN, DRAFT_WIDTH)
+        tensors["mtp.layers.0.mlp.gate_proj.weight"] = _bf16(draft_width, HIDDEN)
+        tensors["mtp.layers.0.mlp.up_proj.weight"] = _bf16(draft_width, HIDDEN)
+        tensors["mtp.layers.0.mlp.down_proj.weight"] = _bf16(HIDDEN, draft_width)
         tensors["mtp.layers.0.self_attn.q_proj.weight"] = _bf16(HEADS * HEAD_DIM, HIDDEN)
 
     save_file(tensors, str(path / "model-00001-of-00001.safetensors"), metadata={"format": "pt"})
@@ -131,7 +138,9 @@ def _tree(path: Path, *, with_draft: bool = True, vision: bool = False) -> Path:
         }),
         encoding="utf-8",
     )
-    (path / "config.json").write_text(json.dumps(_config(with_draft=with_draft)), encoding="utf-8")
+    (path / "config.json").write_text(
+        json.dumps(_config(with_draft=with_draft, width=width)), encoding="utf-8"
+    )
     (path / "generation_config.json").write_text(
         json.dumps({"top_k": 20, "top_p": 0.95, "temperature": 1.0}), encoding="utf-8"
     )
@@ -548,6 +557,58 @@ def test_dry_run_prints_the_whole_plan_and_writes_nothing(
     assert plan["quantize"]["argv"][plan["quantize"]["argv"].index("--imatrix") + 1] == str(
         tmp_path / "bake-Q4_K_M.imatrix.gguf"
     )
+
+
+def test_dry_run_reports_aligned_overwrite_tree_without_padding_or_matrix_growth(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], quantizer: Path
+):
+    """An overwrite bake keeps the base width, so dry-run must not plan padding or matrix growth."""
+    tree = _tree(tmp_path / "tree", width=ALIGNED, draft_width=ALIGNED)
+    matrix = _matrix(tmp_path / "published.imatrix.gguf", ALIGNED)
+
+    code = quantize_tree.main([
+        "--tree", str(tree), "--out", str(tmp_path / "overwrite-Q4_K_M.gguf"),
+        "--quantization", "Q4_K_M", "--imatrix", str(matrix),
+        "--quantizer", str(quantizer), "--mtp-quantization", "Q8_0", "--dry-run",
+    ])
+    plan = _printed(capsys.readouterr().out)
+
+    assert code == 0
+    assert plan["width"] == {
+        "source": ALIGNED,
+        "target": ALIGNED,
+        "padding": "none",
+        "note": None,
+    }
+    assert plan["conversion"]["padding"] == "none"
+    assert plan["conversion"]["padded_tensors"] == 0
+    assert plan["imatrix"]["growth"] == {
+        "entries_grown": 0,
+        "entries_added": 0,
+        "reason": "computed from the converted tensor plan",
+    }
+
+
+def test_dry_run_reports_matrix_growth_when_aligned_tree_gets_narrow_matrix(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], quantizer: Path
+):
+    """Equal model widths do not hide adaptation needed by a stale or mismatched matrix."""
+    tree = _tree(tmp_path / "tree", width=ALIGNED, draft_width=ALIGNED)
+    matrix = _matrix(tmp_path / "narrow.imatrix.gguf", WIDTH)
+
+    code = quantize_tree.main([
+        "--tree", str(tree), "--out", str(tmp_path / "mismatched-Q4_K_M.gguf"),
+        "--quantization", "Q4_K_M", "--imatrix", str(matrix),
+        "--quantizer", str(quantizer), "--mtp-quantization", "Q8_0", "--dry-run",
+    ])
+    plan = _printed(capsys.readouterr().out)
+
+    assert code == 0
+    assert plan["imatrix"]["growth"] == {
+        "entries_grown": 1,
+        "entries_added": ALIGNED - WIDTH,
+        "reason": "computed from the converted tensor plan",
+    }
 
 
 def test_the_chain_converts_grows_quantizes_and_writes_one_receipt(
