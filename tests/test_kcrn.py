@@ -618,6 +618,17 @@ def test_cli_can_override_old_config_method(monkeypatch, tmp_path):
     assert calls == ["kcrn"]
 
 
+
+def test_help_keeps_the_documented_builtin_commands_discoverable(capsys):
+    import apostate.__main__ as main_module
+
+    assert main_module.main(["--help"]) == 0
+
+    help_text = capsys.readouterr().out
+    for command in ("setup", "doctor", "ablate", "diode", "ccv", "kcrn", "ticv", "finetune", "test", "talk", "quantize", "list"):
+        assert f"apostate {command}" in help_text
+
+
 def test_subcommands_select_kcrn_or_ccv_engine(monkeypatch):
     import apostate.__main__ as main_module
 
