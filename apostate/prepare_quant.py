@@ -7,7 +7,11 @@ llama.cpp rejects that mismatch.
 
 This command fixes both artifacts without modifying llama.cpp and without repeating HF-to-GGUF
 conversion. It rewrites the existing BF16 GGUF directly to the next declared width, then grows only
-the matching imatrix statistics with zeros. The model writer declares every tensor before writing
+the matching imatrix statistics with values taken from each tensor's own entries, keeping the padding
+zero. It is *not* a uniform zero fill: the grown region is `[the real appended neurons][padding]`, and
+zeroing the entries that hold the appended neuron's column collapses their k-quant super-block, so
+llama-quantize writes zeros over the neuron and the uncensoring goes silently inert. The model writer
+declares every tensor before writing
 payloads, so it streams source to destination and never creates a model-sized temporary spool.
 """
 from __future__ import annotations
@@ -592,6 +596,8 @@ def adapt_matrix(
     expect_append: int | None = None,
     refuse_unweighted: bool = False,
     dry_run: bool = False,
+    appended_value: str = "median",
+    appended_neurons: int = 1,
 ) -> dict[str, Any]:
     imatrix, target, out = Path(imatrix), Path(target), Path(out)
     if imatrix.resolve() == out.resolve():
@@ -622,6 +628,8 @@ def adapt_matrix(
         "entries_grown": len(plan),
         "entries_added": sum(item["added"] for item in plan),
         "plan": plan,
+        "appended_value": appended_value,
+        "appended_neurons": int(appended_neurons),
         "unweighted_draft_tensors": unweighted_draft,
     }
     if not plan:
@@ -638,13 +646,42 @@ def adapt_matrix(
         _copy_matrix_metadata(writer, fields)
         writer.add_string("apostate.quant_preparation.imatrix_from", imatrix.name)
         writer.add_string("apostate.quant_preparation.target", target.name)
-        writer.add_string("apostate.quant_preparation.appended_value", "zero")
+        writer.add_string("apostate.quant_preparation.appended_value", appended_value)
+        writer.add_string("apostate.quant_preparation.appended_neurons", str(int(appended_neurons)))
         for name, values in tensors.items():
             item = by_name.get(name)
             if item is not None:
+                source = values
                 padding = [(0, 0)] * values.ndim
-                padding[item["axis"]] = (0, item["after"] - item["before"])
+                grew = item["after"] - item["before"]
+                padding[item["axis"]] = (0, grew)
                 values = np.pad(values, padding, mode="constant")
+                # The grown region is NOT uniform: it is [the real appended neurons][padding], and only
+                # the leading `appended_neurons` entries are real. Filling the whole region is what made
+                # an additive diode inert: a zero importance across the entries that hold the appended
+                # neuron's column collapses that k-quant super-block's scale, so llama-quantize writes
+                # zeros over the neuron as well and the model silently stops uncensoring (measured
+                # 2026-09-24: appended ffn_down column norm 0.0834 -> 0.0000 under Q5_K_S, and 0.0830
+                # with no matrix at all). So the policy value goes into the real entries only, taken
+                # from that tensor's own pre-pad statistics, and the padding stays zero.
+                real = max(0, min(int(appended_neurons), grew))
+                if real and appended_value != "zero":
+                    existing = source if source.ndim == 1 else source.reshape(-1)
+                    if appended_value == "median":
+                        fill = float(np.median(existing))
+                    elif appended_value == "mean":
+                        fill = float(np.mean(existing))
+                    elif appended_value == "last":
+                        fill = float(existing[-1])
+                    else:
+                        raise PreparationRefused(
+                            f"unknown appended value policy {appended_value!r}; "
+                            "expected one of zero, median, mean, last"
+                        )
+                    if item["axis"] == 0:
+                        values[item["before"] : item["before"] + real] = fill
+                    else:
+                        values[:, item["before"] : item["before"] + real] = fill
             writer.add_tensor(name, values)
         writer.write_header_to_file()
         writer.write_kv_data_to_file()
@@ -818,6 +855,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="published imatrix cache (default: ~/.cache/apostate/imatrix)",
     )
     parser.add_argument("--out-imatrix", type=Path, help="adapted imatrix to create")
+    parser.add_argument(
+        "--appended-value",
+        default="median",
+        choices=("zero", "median", "mean", "last"),
+        help=(
+            "value written into the *real* appended neurons' statistics (default: median, taken from "
+            "that tensor's own pre-pad entries). It applies to the first --appended-neurons entries of "
+            "each grown region; the remaining padding is always zero. `zero` restores the old all-zero "
+            "fill, which is correct only when the whole region is padding"
+        ),
+    )
+    parser.add_argument(
+        "--appended-neurons",
+        type=int,
+        default=1,
+        help=(
+            "how many of each grown region's entries are real appended neurons rather than padding "
+            "(default: 1, which is what an additive diode bake appends; 0 means the region is pure "
+            "padding). A zero importance across the whole region collapses the k-quant super-block's "
+            "scale and llama-quantize then writes zeros over the appended neuron too, which leaves the "
+            "uncensoring silently inert"
+        ),
+    )
     parser.add_argument("--expect-append", type=int, help="exact statistic growth; catches a wrong base matrix")
     parser.add_argument(
         "--refuse-unweighted",
@@ -917,6 +977,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         args.out_imatrix,
                         expect_append=args.expect_append,
                         refuse_unweighted=args.refuse_unweighted,
+                        appended_value=args.appended_value,
+                        appended_neurons=args.appended_neurons,
                     )
                     created.append(args.out_imatrix)
             except BaseException:

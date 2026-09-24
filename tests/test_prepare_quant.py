@@ -137,8 +137,49 @@ def test_imatrix_adaptation_grows_only_matching_statistics(tmp_path: Path):
     assert receipt["entries_grown"] == LAYERS
     assert receipt["unweighted_draft_tensors"], "the draft block is named, not silently unweighted"
     assert tensors["blk.0.ffn_down.weight.in_sum2"].shape == (1, ALIGNED)
-    assert np.count_nonzero(tensors["blk.0.ffn_down.weight.in_sum2"][:, BASE:]) == 0
     assert tensors["blk.0.attn_q.weight.in_sum2"].shape == (1, HIDDEN)
+
+
+def test_the_grown_statistics_keep_the_appended_neuron_representable(tmp_path: Path):
+    """The grown region is `[the appended neuron][padding]`, and only the first entry is real.
+
+    A uniform zero fill is what made a quantized additive bake inert: a zero importance across the
+    entries holding the appended neuron's column collapses that k-quant super-block's scale, so
+    llama-quantize writes zeros over the neuron as well and the uncensoring silently stops. Measured
+    2026-09-24 on a real 27B: the appended `ffn_down` column's norm went 0.0834 (BF16) -> 0.0000 under
+    Q5_K_S with a zero-filled matrix, and stayed 0.0830 with no matrix at all.
+    """
+    source = _write_model(tmp_path / "source.gguf", BASE)
+    target = tmp_path / "padded.gguf"
+    prepare_quant.prepare_model(source, target, ALIGNED)
+    matrix = _write_imatrix(tmp_path / "source.imatrix.gguf", BASE)
+    out = tmp_path / "adapted.imatrix.gguf"
+
+    receipt = prepare_quant.adapt_matrix(matrix, target, out)
+
+    grown = _payloads(out)["blk.0.ffn_down.weight.in_sum2"][0]
+    existing = _payloads(matrix)["blk.0.ffn_down.weight.in_sum2"].reshape(-1)
+    # The base model's `BASE` entries are untouched, the neuron's entry is real, the pad is zero.
+    assert np.array_equal(grown[:BASE], existing), "existing statistics are never rewritten"
+    assert grown[BASE] == pytest.approx(float(np.median(existing))), "the real neuron gets a real value"
+    assert np.count_nonzero(grown[BASE + 1 :]) == 0, "the padding stays zero"
+    assert receipt["appended_value"] == "median"
+    assert receipt["appended_neurons"] == 1
+
+
+def test_appended_neurons_zero_restores_a_pure_padding_fill(tmp_path: Path):
+    """For a widened tensor with no real appended neuron the old all-zero fill is still available."""
+    source = _write_model(tmp_path / "source.gguf", BASE)
+    target = tmp_path / "padded.gguf"
+    prepare_quant.prepare_model(source, target, ALIGNED)
+    matrix = _write_imatrix(tmp_path / "source.imatrix.gguf", BASE)
+    out = tmp_path / "adapted.imatrix.gguf"
+
+    receipt = prepare_quant.adapt_matrix(matrix, target, out, appended_neurons=0)
+
+    grown = _payloads(out)["blk.0.ffn_down.weight.in_sum2"][0]
+    assert np.count_nonzero(grown[BASE:]) == 0
+    assert receipt["appended_neurons"] == 0
 
 
 def test_imatrix_adaptation_proceeds_by_default_and_names_the_unweighted_tensors(tmp_path: Path):
