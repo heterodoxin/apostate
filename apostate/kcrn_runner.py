@@ -35,6 +35,7 @@ from .evaluate import (
     _logits_kwarg,
     generate,
     judge_strict_refusal,
+    last_harmbench_run,
     response_prefix_margin,
 )
 from .activations import collect_activations, collect_response_activations
@@ -1440,6 +1441,7 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
     aggressive_controller = {}
     delivery = None
     response_lengths = None
+    judge_window = None
     cache_parent = Path(cfg.output_dir).expanduser().resolve().parent
     cache_parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(
@@ -1558,8 +1560,15 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
             }
             _release_bundle(edited)  # free the target model so the HarmBench judge fits in VRAM
             edited = None
-            refused = judge_strict_refusal(None, outputs, cfg.batch_size, eval_harmful)
+            refused = judge_strict_refusal(
+                None, outputs, cfg.batch_size, eval_harmful, cfg.max_new_tokens
+            )
             delivery = 1.0 - sum(refused) / max(1, len(refused))
+            # The judge's window is part of the delivery number's provenance: the row's render, the
+            # elision it needed and the coupled constants the run was judged under, written with the
+            # number they explain rather than left in memory.
+            judged = last_harmbench_run()
+            judge_window = judged.document() if judged is not None else None
         if edited is not None:
             _release_bundle(edited)
     aggressive_acceptance = None
@@ -1648,6 +1657,9 @@ def run(cfg: ApostateConfig, command: Optional[str] = None) -> dict:
         "post_bake_preservation": post_bake_metrics,
         "harmful_delivery": delivery,
         "harmful_response_lengths": response_lengths,
+        # The instrument face of the delivery number: the window in force, every row's cut and the
+        # elision share it needed, and the coupled constants (cap + head + cue) against the window.
+        "judge_window": judge_window,
         "elapsed_sec": round(time.time() - started, 1),
     })
     output = Path(cfg.output_dir)
