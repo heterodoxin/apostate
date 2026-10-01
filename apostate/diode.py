@@ -298,6 +298,47 @@ def _copy_dropped_tensors(model_id: str, out_dir: str) -> int:
     return len(keys)
 
 
+def _copy_processor_assets(model_id: str, tokenizer, out_dir: str) -> list[str]:
+    """Preserve processor configs omitted by model/tokenizer ``save_pretrained``."""
+    import shutil
+
+    source_dirs = []
+    for candidate in (model_id, getattr(tokenizer, "name_or_path", "")):
+        if candidate:
+            source_dir = Path(candidate)
+            if source_dir.is_dir() and source_dir not in source_dirs:
+                source_dirs.append(source_dir)
+
+    copied = []
+    filenames = ("processor_config.json", "preprocessor_config.json", "video_preprocessor_config.json")
+    for filename in filenames:
+        destination = Path(out_dir) / filename
+        if destination.is_file():
+            continue
+        source = next(
+            (directory / filename for directory in source_dirs if (directory / filename).is_file()),
+            None,
+        )
+        if source is None:
+            try:
+                from transformers.utils import cached_file
+
+                resolved = cached_file(
+                    model_id,
+                    filename,
+                    _raise_exceptions_for_missing_entries=False,
+                    _raise_exceptions_for_connection_errors=False,
+                )
+                source = Path(resolved) if resolved else None
+            except Exception:
+                source = None
+        if source is not None and source.is_file():
+            shutil.copy2(source, destination)
+            copied.append(filename)
+            print(f"[diode] copied {filename}", flush=True)
+    return copied
+
+
 def fit_and_bake(cfg: ApostateConfig, bundle=None) -> dict:
     """Fit the per-layer detectors and thresholds, write the gated neurons, and save the checkpoint."""
     cfg.with_defaults()
@@ -328,6 +369,7 @@ def fit_and_bake(cfg: ApostateConfig, bundle=None) -> dict:
     written = _bake(base, cfg, band, rmul, detector, actuator, theta, cd, m)
     base.model.save_pretrained(cfg.output_dir, safe_serialization=True, max_shard_size="5GB")
     tok.save_pretrained(cfg.output_dir)
+    _copy_processor_assets(cfg.model, tok, cfg.output_dir)
     if two_phase:  # full-model bake: restore any head the loader class did not instantiate (e.g. MTP)
         _copy_dropped_tensors(cfg.model, cfg.output_dir)
 
