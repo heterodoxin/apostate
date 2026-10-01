@@ -167,7 +167,7 @@ apostate ablate --model Qwen/Qwen3-8B --out qwen3-8b-apostate              # dio
 apostate kcrn   --model Qwen/Qwen3-8B --out qwen3-8b-apostate-kcrn         # KCRN
 ```
 
-`apostate ablate` is the default diode build. `--model` takes a Hugging Face repo id **or a local directory** (point it at the folder holding `config.json`, not an individual `.safetensors` file). `--out` is the directory the edited checkpoint is written to. A finished diode run writes the fixed-weight model files, `diode_report.json`, `apostate_config.json`, and a checkpoint `README.md`. The bake always loads full precision, because a conditional neuron cannot be written into packed 4bit weights.
+`apostate ablate` is the default diode build. `--model` takes a Hugging Face repo id **or a local directory** (point it at the folder holding `config.json`, not an individual `.safetensors` file). `--out` is the directory the edited checkpoint is written to. A finished diode run writes the fixed-weight model files, available tokenizer and processor configuration files, `diode_report.json`, `apostate_config.json`, and a checkpoint `README.md`. The bake always loads full precision, because a conditional neuron cannot be written into packed 4bit weights.
 
 The two diode knobs are strength and gate rate:
 
