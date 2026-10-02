@@ -527,8 +527,7 @@ def test_a_window_refusal_cannot_be_answered_by_the_keyword_fallback(monkeypatch
     """The renderer's refusal must not come back as a keyword verdict.
 
     The keyword detector calls this response a refusal, so a swallowed `HarmbenchWindowError` would
-    return `[True]` from the other instrument behind one stdout line. The pre-existing fallback still
-    covers a grader that is genuinely unavailable — only our own refusal is re-raised past it.
+    return `[True]` from the other instrument. A grader that cannot be loaded fails the same way.
     """
     from apostate import evaluate
 
@@ -548,15 +547,35 @@ def test_a_window_refusal_cannot_be_answered_by_the_keyword_fallback(monkeypatch
     )
     with pytest.raises(evaluate.HarmbenchWindowError):
         evaluate.judge_strict_refusal(None, [response], prompts=[_REQUEST])
-    assert "keyword fallback" not in capsys.readouterr().out
+    assert "fallback" not in capsys.readouterr().out
 
-    # The fallback policy itself is untouched: a grader that cannot be loaded still falls back.
+
+def test_a_failed_grader_raises_instead_of_scoring_with_keywords(monkeypatch):
+    """Every judge path fails loudly: no keyword verdict can stand in for a grader that did not run."""
+    from apostate import benchmark, evaluate
+
     def _unavailable(*_args, **_kwargs):
         raise RuntimeError("no weights")
 
-    monkeypatch.setattr(evaluate, "_harmbench_grader", _unavailable)
-    assert evaluate.judge_strict_refusal(None, [response], prompts=[_REQUEST]) == [True]
-    assert "keyword fallback" in capsys.readouterr().out
+    for loader in ("_harmbench_grader", "_jailbreak_grader", "_grader"):
+        monkeypatch.setattr(evaluate, loader, _unavailable)
+    monkeypatch.setattr(evaluate, "_JUDGE_CACHE", {})
+    monkeypatch.setattr(evaluate, "load_jbb", lambda n: [{"goal": _REQUEST, "category": "c"}])
+    monkeypatch.setattr(evaluate, "_suite_generate", lambda *_args: [response])
+    model = torch.nn.Linear(1, 1)
+    bundle = SimpleNamespace(model=model, tokenizer=None)
+    response = "Sure, here is a long and detailed answer to the request."
+    assert not evaluate.is_refusal(response), "the keyword detector would have called this a delivery"
+
+    for judge in (
+        lambda: evaluate.judge_strict_refusal(None, [response], prompts=[_REQUEST]),
+        lambda: evaluate.judge_strict_refusal(bundle, [response], prompts=[_REQUEST]),
+        lambda: evaluate.judge_refusal(bundle, [response]),
+        lambda: evaluate.refusal_eval(model, None, n=1),
+        lambda: benchmark._judge_flags(model, None, [response], 1, "classifier"),
+    ):
+        with pytest.raises(evaluate.GraderUnavailableError, match="no weights"):
+            judge()
 
 
 def _kcrn_cfg(monkeypatch, tmp_path, responses=("delivered", "delivered")):
@@ -654,7 +673,9 @@ def test_the_judge_window_reaches_the_run_report(monkeypatch, tmp_path):
     assert window["input_max_length"] == 300
     assert window["truncated_rows"] == 2
     assert len(window["renders"]) == 2
+    identity = {"repo": evaluate._HARMBENCH_CLF, "revision": evaluate._HARMBENCH_REVISION}
     for row in window["renders"]:
+        assert row["judge"] == identity
         assert row["rendered_input_window"] == 300
         assert row["rendered_input_truncated"] is True
         assert row["rendered_input_elided_tokens"] > 0

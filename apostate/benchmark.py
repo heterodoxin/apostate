@@ -114,11 +114,7 @@ def _judge_flags(model, tok, responses, batch_size, judge: str):
     b = _Bundle()
     b.model = model
     b.tokenizer = tok
-    try:
-        return judge_refusal(b, responses, batch_size)
-    except Exception as e:
-        print(f"[bench] classifier judge unavailable ({e}); keyword fallback", flush=True)
-        return [is_refusal(c) for c in responses]
+    return judge_refusal(b, responses, batch_size)
 
 
 @torch.no_grad()
