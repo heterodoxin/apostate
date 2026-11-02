@@ -196,6 +196,15 @@ Install the export dependencies:
 python -m pip install -e ".[convert]"
 ```
 
+Families the direct converter refuses (e.g. Gemma 4) can export an additive bake through llama.cpp's own
+converter, then `prepare-quant --out-model` pads the MLP with zero neurons to a quantizable width:
+
+```bash
+python convert_hf_to_gguf.py gemma4-diode-hf --outfile gemma4-diode-bf16.gguf --outtype bf16
+apostate prepare-quant --model gemma4-diode-bf16.gguf --out-model gemma4-diode-bf16-mlp2304.gguf
+apostate quantize-gguf --source gemma4-diode-bf16-mlp2304.gguf --out gemma4-diode-Q8_0.gguf --quantization Q8_0
+```
+
 For the supported family, convert the baked HF tree directly. This is the fast path: it preserves BF16
 payloads, applies the family-specific GGUF transforms, and computes the next 256-wide MLP boundary itself.
 Pass `--with-mtp` only when the tree contains a draft head; its MLP moves with the decoder.
