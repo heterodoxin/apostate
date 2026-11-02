@@ -153,7 +153,8 @@ def family_for_config(config: Mapping[str, Any]) -> Family:
     supported = sorted({name for family in FAMILIES.values() for name in family.model_types})
     raise ConversionRefused(
         f"model_type {model_type!r} is not supported by this converter "
-        f"(supported: {', '.join(supported)}); use llama.cpp's own converter"
+        f"(supported: {', '.join(supported)}); use llama.cpp's own converter, then "
+        "`apostate prepare-quant --out-model` to pad an additive bake's MLP to a k-quant width"
     )
 
 
