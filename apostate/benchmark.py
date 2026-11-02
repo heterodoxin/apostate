@@ -65,7 +65,16 @@ def _load(path: str):
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
     tok.padding_side = "left"
-    if use_4bit:
+    packed_moe = False
+    if use_4bit and adapter_dir is None:
+        from . import moe_nf4
+        packed_moe = moe_nf4.has_packed_experts(base_path)
+    if packed_moe:
+        # bitsandbytes cannot 4-bit packed 3D experts; the fit's loader NF4-quantizes them.
+        from .config import ApostateConfig
+        from .model import load_model
+        model = load_model(ApostateConfig(model=base_path, load_in_4bit=True)).model
+    elif use_4bit:
         bnb = BitsAndBytesConfig(
             load_in_4bit=True, bnb_4bit_quant_type="nf4",
             bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=torch.bfloat16,
