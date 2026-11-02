@@ -9,7 +9,7 @@ import torch
 from .data import resolve_prompts
 from .benchmark import (
     entry_from_code, entry_from_tests, load_code_problems, pass_at_1,
-    _load, _logprobs_lastK, _kl,
+    _load, _reply_logprobs, _kl,
 )
 from .evaluate import refusal_eval, gsm8k_eval
 from .reports import refresh_candidate_reports, write_benchmark_report
@@ -97,7 +97,7 @@ def benchmark_vs_base(
     parts.append("KL=harmless_alpaca(48)")
     print("[bench] " + "  ".join(parts), flush=True)
 
-    def eval_model(path, ref_lp):
+    def eval_model(path, ref):
         m, tok = _load(path)
         res = {}
         if run_refusal:
@@ -118,16 +118,17 @@ def benchmark_vs_base(
         if run_gsm:
             gsm = gsm8k_eval(m, tok, gsm_n, 320, batch)
             res["gsm8k"] = gsm["accuracy"]
-        lp = _logprobs_lastK(m, tok, resolve_prompts("mlabonne/harmless_alpaca:test:text", 48, 0), 8, batch)
-        kl = 0.0 if ref_lp is None else _kl(ref_lp, lp)
+        harmless = resolve_prompts("mlabonne/harmless_alpaca:test:text", 48, 0)
+        out = _reply_logprobs(m, tok, harmless, 8, batch, None if ref is None else ref[1])
+        kl = 0.0 if ref is None else _kl(ref[0], out[0], ref[2])
         del m; gc.collect(); torch.cuda.empty_cache()
         res["kl_vs_base"] = round(kl, 4)
-        return res, lp
+        return res, out
 
     print(f"[bench] base: {base}", flush=True)
-    base_res, base_lp = eval_model(base, None)
+    base_res, base_ref = eval_model(base, None)
     print(f"[bench] candidate: {candidate}", flush=True)
-    cand_res, _ = eval_model(candidate, base_lp)
+    cand_res, _ = eval_model(candidate, base_ref)
 
     report_n = {s: len(problems_by_suite[s][0]) for s in code_suites}
     if run_gsm:

@@ -18,7 +18,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from . import accel
 from .model import ModelBundle
 from .data import resolve_prompts, format_chat
-from .evaluate import is_refusal, judge_refusal
+from .evaluate import is_refusal, judge_refusal, _greedy_reply, _reply_stop_ids, _reply_window, _window_kl
 
 PROBE: List[Tuple[str, List[str]]] = [
     ("What is the capital of France?", ["paris"]),
@@ -145,50 +145,57 @@ def _perplexity(model, tok, text):
 
 
 @torch.no_grad()
-def _logprobs_lastK(model, tok, instructions, K, batch_size):
+def _reply_logprobs(model, tok, instructions, K, batch_size, replies=None):
+    """Log-probs at the K positions predicting reply tokens 1..K.
+
+    Without `replies` this model greedily writes its own K-token reply (the base reference);
+    candidates pass the base `replies` so both sides are teacher-forced on the same tokens.
+    Returns (logprobs, replies, mask); mask drops positions after the reply's first stop token.
+    """
     device = next(model.parameters()).device
     prompts = format_chat(tok, instructions)
-    chunks = []
+    stop_ids = _reply_stop_ids(model, tok)
+    chunks, reps, masks = [], [], []
     for i in range(0, len(prompts), batch_size):
         enc = tok(prompts[i:i + batch_size], return_tensors="pt", padding=True, add_special_tokens=False).to(device)
-        k = min(K, enc["input_ids"].shape[1])
-        logits = model(**enc, use_cache=False).logits[:, -k:, :].float()
-        lp = torch.log_softmax(logits, dim=-1)
-        if k < K:
-            lp = torch.nn.functional.pad(lp, (0, 0, K - k, 0))
-        chunks.append(lp.half().cpu())
-    return torch.cat(chunks, dim=0)
+        if replies is None:
+            reply = _greedy_reply(model, tok, enc, K)
+        else:
+            reply = replies[i:i + batch_size].to(device)
+        fwd, mask = _reply_window(enc, reply, stop_ids)
+        logits = model(**fwd, use_cache=False).logits[:, -K:, :].float()
+        chunks.append(torch.log_softmax(logits, dim=-1).half().cpu())
+        reps.append(reply.cpu())
+        masks.append(mask.cpu())
+    return torch.cat(chunks, dim=0), torch.cat(reps, dim=0), torch.cat(masks, dim=0)
 
 
-def _kl(ref_lp: torch.Tensor, cand_lp: torch.Tensor) -> float:
-    rp = ref_lp.float()
-    cp = cand_lp.float()
-    kl = (rp.exp() * (rp - cp)).sum(-1)
-    return float(kl.mean().item())
+def _kl(ref_lp: torch.Tensor, cand_lp: torch.Tensor, mask: Optional[torch.Tensor] = None) -> float:
+    return float(_window_kl(ref_lp.float(), cand_lp.float(), mask).mean().item())
 
 
 def benchmark_model(
     path: str,
     harmful_test: List[str],
-    ref_lp: Optional[torch.Tensor],
+    ref: Optional[tuple],
     harmless_test: List[str],
     max_new_tokens: int = 40,
     batch_size: int = 16,
     kl_K: int = 8,
     judge: str = "classifier",
-) -> Tuple[dict, torch.Tensor]:
+) -> Tuple[dict, tuple]:
     model, tok = _load(path)
     res = {
         "refusal_rate": round(_refusal_rate(model, tok, harmful_test, max_new_tokens, batch_size, judge), 4),
         "capability": round(_capability(model, tok, batch_size), 4),
         "perplexity": round(_perplexity(model, tok, BENIGN_TEXT), 3),
     }
-    cand_lp = _logprobs_lastK(model, tok, harmless_test, kl_K, batch_size)
-    res["kl_vs_base"] = 0.0 if ref_lp is None else round(_kl(ref_lp, cand_lp), 4)
+    out = _reply_logprobs(model, tok, harmless_test, kl_K, batch_size, None if ref is None else ref[1])
+    res["kl_vs_base"] = 0.0 if ref is None else round(_kl(ref[0], out[0], ref[2]), 4)
     del model
     gc.collect()
     torch.cuda.empty_cache()
-    return res, cand_lp
+    return res, out
 
 
 def run_compare(
@@ -206,12 +213,12 @@ def run_compare(
     print(f"[bench] {len(harmful_test)} harmful / {len(harmless_test)} harmless held-out prompts")
 
     print(f"[bench] base: {base}")
-    base_res, base_lp = benchmark_model(base, harmful_test, None, harmless_test, judge=judge)
+    base_res, base_ref = benchmark_model(base, harmful_test, None, harmless_test, judge=judge)
 
     report = {"judge": judge, "base": {"path": base, **base_res}, "models": {}}
     for label, path in models.items():
         print(f"[bench] candidate '{label}': {path}")
-        res, _ = benchmark_model(path, harmful_test, base_lp, harmless_test, judge=judge)
+        res, _ = benchmark_model(path, harmful_test, base_ref, harmless_test, judge=judge)
         report["models"][label] = {"path": path, **res}
 
     rows = [("model", "refusal%", "KL_vs_base", "capability%", "perplexity")]
