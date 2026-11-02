@@ -354,6 +354,8 @@ apostate quantize-tree --tree qwen-diode-hf --out M-Q4_K_M.gguf --quantization Q
 
 The benchmark path is built into the TUI. Open `apostate`, choose `Test`, pick the edited model and base model, then use the suite selector. Space toggles a suite and Enter runs the selected set. Suites are `humaneval`, `mbpp`, `gsm8k`, `refusal`, or `all`. The refusal suite uses `protectai/distilroberta-base-rejection-v1` by default; `--judge keyword` uses keyword scoring. Output is written to `benchcode.json` and `benchcode.md` and merged into the candidate report when present.
 
+`KL` is `KL(base||edited)` over the base model's first 8 greedy reply tokens on held-out harmless prompts; chat-template tokens are not scored.
+
 ## Chat
 
 ```bash

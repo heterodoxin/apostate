@@ -10,7 +10,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 import re
 import torch
 
-from .model import ModelBundle, config_value
+from .model import ModelBundle
 from .projectors import ProjectionController
 from .data import format_chat
 
@@ -35,25 +35,59 @@ def _gen_new_tokens(bundle: ModelBundle, enc: dict, max_new_tokens: int) -> torc
     return seq[:, prompt_len:]
 
 
-def _kl_forward_inputs(bundle: ModelBundle, enc: dict, positions: int):
-    """Forward kwargs + the logit slice to compare for harmless KL.
+def _reply_stop_ids(model, tok) -> List[int]:
+    """Token ids that end a reply: tokenizer EOS/pad plus generation_config EOS."""
+    ids = {tok.eos_token_id, tok.pad_token_id}
+    gen_eos = getattr(getattr(model, "generation_config", None), "eos_token_id", None)
+    ids.update(gen_eos if isinstance(gen_eos, (list, tuple)) else [gen_eos])
+    return sorted(int(i) for i in ids if i is not None)
 
-    Normal causal LM: compare the last K prompt positions' next-token distributions.
-    Block-diffusion: a bare forward denoises a RANDOM canvas (non-deterministic, so base vs
-    edit would be incomparable). Pin a deterministic canvas via decoder_input_ids and compare
-    logits over it -- this measures how much the edit shifts denoising on harmless prompts.
+
+def _greedy_reply(model, tok, enc: dict, K: int) -> torch.Tensor:
+    """Greedy-generate K reply tokens (B, K); rows that stopped early are pad-filled."""
+    gen = model.generate(**enc, max_new_tokens=K, do_sample=False, pad_token_id=tok.pad_token_id)
+    reply = getattr(gen, "sequences", gen)[:, enc["input_ids"].shape[1]:][:, :K]
+    if reply.shape[1] < K:
+        pad = int(tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id)
+        reply = torch.nn.functional.pad(reply, (0, K - reply.shape[1]), value=pad)
+    return reply
+
+
+def _reply_window(enc: dict, reply: torch.Tensor, stop_ids: Sequence[int]):
+    """Teacher-forced forward kwargs + validity mask for reply-token KL.
+
+    The last K prompt positions after the chat template predict forced template tokens
+    (`<|im_start|>assistant`, `<think></think>`, `<|turn>model`, ...), so KL there mostly
+    measures template drift. Instead append reply[:K-1] to the prompt: the last K logits then
+    predict reply tokens 1..K (the final prompt position predicts token 1). Positions after
+    the first stop token in the reply are masked out.
     """
-    if not bundle.is_block_diffusion():
-        K = min(positions, enc["input_ids"].shape[1])
-        return enc, slice(-K, None)
-    clen = int(config_value(bundle.model.config, "canvas_length") or 64)
-    K = max(8, min(positions, clen))
-    pad = int(bundle.tokenizer.pad_token_id or 0)
-    B = enc["input_ids"].shape[0]
-    canvas = torch.full((B, K), pad, dtype=torch.long, device=enc["input_ids"].device)
-    fwd = dict(enc)
-    fwd["decoder_input_ids"] = canvas
-    return fwd, slice(0, K)
+    K = reply.shape[1]
+    ids = enc["input_ids"]
+    B, L = ids.shape
+    tail = reply[:, : K - 1].to(ids.device)
+    fwd = {}
+    for k, v in enc.items():
+        if k == "input_ids":
+            fwd[k] = torch.cat([ids, tail], dim=1)
+        elif torch.is_tensor(v) and v.dim() == 2 and tuple(v.shape) == (B, L):
+            fill = torch.ones_like(tail) if k == "attention_mask" else torch.zeros_like(tail)
+            fwd[k] = torch.cat([v, fill.to(v.dtype)], dim=1)
+        else:
+            fwd[k] = v
+    stop = torch.isin(reply, torch.tensor(list(stop_ids), dtype=reply.dtype, device=reply.device))
+    mask = torch.ones_like(stop)
+    mask[:, 1:] = stop.long().cumsum(dim=1)[:, :-1] == 0
+    return fwd, mask
+
+
+def _window_kl(base_lp: torch.Tensor, edit_lp: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+    """Per-row KL(base||edit) averaged over the valid window positions."""
+    kl = (base_lp.exp() * (base_lp - edit_lp)).sum(-1)
+    if mask is None:
+        return kl.mean(dim=1)
+    m = mask.to(device=kl.device, dtype=kl.dtype)
+    return (kl * m).sum(dim=1) / m.sum(dim=1).clamp_min(1.0)
 
 _REFUSAL_STRONG = [
     "i cannot", "i can't", "i can not", "i won't", "i will not", "i'm sorry",
@@ -1360,12 +1394,13 @@ def kl_harmless(
                         enc = {k: v.to(device) for k, v in enc.items()}
                         fwd = dict(enc)
                         fwd["decoder_input_ids"] = r["canvas"].to(device)
-                        entries.append((fwd, slice(0, r["sl_stop"]), r["base_lp"]))
+                        entries.append((fwd, slice(0, r["sl_stop"]), r["base_lp"], None))
                     cache[key] = entries
                 except Exception:
                     pass  # rebuild + re-save on any load error
         if key not in cache:
             entries, recs = [], []
+            stop_ids = None if diffusion else _reply_stop_ids(model, tok)
             for i in range(0, len(prompts), batch_size):
                 pslice = prompts[i : i + batch_size]
                 enc = tok(pslice, return_tensors="pt", padding=True, add_special_tokens=False)
@@ -1377,12 +1412,17 @@ def kl_harmless(
                         canvas = _gen_new_tokens(bundle, enc, positions).contiguous()
                     fwd, sl = dict(enc), slice(0, canvas.shape[1])
                     fwd["decoder_input_ids"] = canvas
+                    mask = None
                 else:
-                    fwd, sl = _kl_forward_inputs(bundle, enc, positions)
+                    # Compare on the base model's own greedy reply
+                    with controller.bypassed():
+                        reply = _greedy_reply(model, tok, enc, positions)
+                    fwd, mask = _reply_window(enc, reply, stop_ids)
+                    sl = slice(-positions, None)
                 with controller.bypassed():
                     base = _kl_logits(bundle, fwd, sl)
                 blp = torch.log_softmax(base, dim=-1).half().cpu()
-                entries.append((fwd, sl, blp))
+                entries.append((fwd, sl, blp, mask))
                 if dpath is not None:
                     recs.append({"prompts": pslice, "canvas": fwd["decoder_input_ids"].cpu(),
                                  "sl_stop": sl.stop, "base_lp": blp})
@@ -1396,12 +1436,13 @@ def kl_harmless(
                     pass
 
     kls = []
-    for fwd, sl, base_lp in cache[key]:
+    for fwd, sl, base_lp, mask in cache[key]:
         with controller.active():
             edit = _kl_logits(bundle, fwd, sl)
         blp = base_lp.to(edit.device).float()
-        kl = (blp.exp() * (blp - torch.log_softmax(edit, dim=-1))).sum(-1)
-        kls.append(kl.mean(dim=1).cpu())
+        # Round like the cached base so an identity edit scores exactly 0
+        elp = torch.log_softmax(edit, dim=-1).half().float()
+        kls.append(_window_kl(blp, elp, mask).cpu())
     return float(torch.cat(kls).mean().item())
 
 
