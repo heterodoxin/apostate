@@ -967,7 +967,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             try:
                 model = None
                 if model_plan is not None:
-                    model = prepare_model(args.model, args.out_model, args.to)
+                    model = prepare_model(args.model, args.out_model, target_width)
                     created.append(args.out_model)
                 matrix = None
                 if resolved_imatrix is not None:
