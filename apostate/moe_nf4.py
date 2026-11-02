@@ -228,10 +228,11 @@ def _packed_gateup_down_forward(self, hidden_states, top_k_index, top_k_weights)
     return final
 
 
-# Shared Qwen and DiffusionGemma expert forward
+# Shared Qwen, DiffusionGemma and Gemma-4 expert forward
 _FORWARDS = {
     "Qwen3_5MoeExperts": _packed_gateup_down_forward,
     "DiffusionGemmaTextExperts": _packed_gateup_down_forward,
+    "Gemma4TextExperts": _packed_gateup_down_forward,
 }
 
 
